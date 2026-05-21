@@ -1,0 +1,269 @@
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, delete
+from app.core.database import get_db
+from app.core.security import verify_api_key
+from app.core.config import settings
+from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
+from app.services.db_importer import import_products_from_excel, import_constants_from_excel
+from pydantic import BaseModel
+from typing import Optional, List
+import bcrypt
+
+router = APIRouter()
+
+
+# ─── Schemas ───────────────────────────────────────────────────────────────────
+
+class ProductUpdate(BaseModel):
+    article:  Optional[str]   = None
+    name:     Optional[str]   = None
+    unit:     Optional[str]   = None
+    kaznisa:  Optional[float] = None
+    rrts:     Optional[float] = None
+    mrc:      Optional[float] = None
+    opt:      Optional[float] = None
+    partner:  Optional[float] = None
+    brand:    Optional[str]   = None
+    is_active: Optional[bool] = None
+
+
+class ConstantUpdate(BaseModel):
+    margin:        Optional[float] = None
+    logistics:     Optional[float] = None
+    rate:          Optional[float] = None
+    currency_rate: Optional[float] = None
+    nds:           Optional[float] = None
+    gp:            Optional[float] = None
+
+
+class AdminRequest(BaseModel):
+    password: str
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def check_admin(password: str):
+    try:
+        ok = bcrypt.checkpw(password.encode(), settings.ADMIN_PASSWORD_HASH.encode())
+    except Exception:
+        ok = False
+    if not ok:
+        raise HTTPException(403, "Неверный пароль администратора")
+
+
+# ─── Products CRUD ─────────────────────────────────────────────────────────────
+
+@router.get("/products")
+async def list_products(
+    brand: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = Query(100, le=500),
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    q = select(Product).where(Product.is_active == True)
+    if brand:
+        q = q.where(Product.brand == brand)
+    if search:
+        like = f"%{search}%"
+        q = q.where(
+            Product.article.ilike(like) | Product.name.ilike(like)
+        )
+    q = q.offset(offset).limit(limit)
+    result = await db.execute(q)
+    products = result.scalars().all()
+    return [
+        {
+            "id": p.id, "num": p.num, "article": p.article, "name": p.name,
+            "unit": p.unit, "brand": p.brand, "kaznisa": p.kaznisa,
+            "rrts": p.rrts, "mrc": p.mrc, "opt": p.opt, "partner": p.partner,
+            "multiplicity": p.multiplicity, "kaznisa_code": p.kaznisa_code,
+        }
+        for p in products
+    ]
+
+
+@router.get("/products/count")
+async def count_products(
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    result = await db.execute(select(func.count()).select_from(Product).where(Product.is_active == True))
+    return {"count": result.scalar()}
+
+
+@router.get("/products/all")
+async def list_all_products(
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    """Возвращает все активные товары без пагинации (для заполнения листа БД в Excel)."""
+    result = await db.execute(
+        select(Product).where(Product.is_active == True).order_by(Product.num)
+    )
+    products = result.scalars().all()
+    return [
+        {
+            "id": p.id, "num": p.num, "article": p.article, "name": p.name,
+            "unit": p.unit, "brand": p.brand, "kaznisa": p.kaznisa,
+            "rrts": p.rrts, "mrc": p.mrc, "opt": p.opt, "partner": p.partner,
+            "multiplicity": p.multiplicity, "kaznisa_code": p.kaznisa_code,
+        }
+        for p in products
+    ]
+
+
+@router.patch("/products/{product_id}")
+async def update_product(
+    product_id: int,
+    data: ProductUpdate,
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Товар не найден")
+
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(product, field, value)
+
+    await db.commit()
+    return {"status": "updated", "id": product_id}
+
+
+@router.delete("/products/{product_id}")
+async def delete_product(
+    product_id: int,
+    body: AdminRequest,
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    check_admin(body.password)
+    result = await db.execute(select(Product).where(Product.id == product_id))
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Товар не найден")
+    product.is_active = False
+    await db.commit()
+    return {"status": "deleted"}
+
+
+# ─── Import ────────────────────────────────────────────────────────────────────
+
+def _check_excel_file(file: UploadFile):
+    name = (file.filename or "").lower()
+    if not (name.endswith(".xlsx") or name.endswith(".xlsm")):
+        raise HTTPException(400, "Файл должен быть в формате .xlsx или .xlsm")
+
+
+@router.post("/import/products")
+async def import_products(
+    file: UploadFile = File(...),
+    password: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    check_admin(password)
+    _check_excel_file(file)
+    content = await file.read()
+    try:
+        added, updated = await import_products_from_excel(content, db, file.filename)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"status": "ok", "added": added, "updated": updated}
+
+
+@router.post("/import/constants")
+async def import_constants(
+    file: UploadFile = File(...),
+    password: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    check_admin(password)
+    _check_excel_file(file)
+    content = await file.read()
+    try:
+        count = await import_constants_from_excel(content, db, file.filename)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"status": "ok", "brands_updated": count}
+
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+
+@router.get("/constants")
+async def get_constants(
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    brands = await db.execute(select(BrandConstant))
+    currencies = await db.execute(select(CurrencyRate))
+    managers = await db.execute(
+        select(Manager).where(Manager.is_active == True).order_by(Manager.full_name)
+    )
+    return {
+        "brands": [
+            {"brand": b.brand, "margin": b.margin, "logistics": b.logistics,
+             "rate": b.rate, "currency_rate": b.currency_rate, "nds": b.nds, "gp": b.gp}
+            for b in brands.scalars().all()
+        ],
+        "currencies": [
+            {"name": c.name, "rate": c.rate}
+            for c in currencies.scalars().all()
+        ],
+        "managers": [
+            m.full_name for m in managers.scalars().all() if m.full_name
+        ],
+        "managers_full": [
+            {
+                "full_name": m.full_name or "",
+                "position":  m.position  or "",
+                "email":     m.email     or "",
+                "phone":     m.phone     or "",
+            }
+            for m in managers.scalars().all() if m.full_name
+        ],
+    }
+
+
+@router.patch("/constants/{brand}")
+async def update_constant(
+    brand: str,
+    data: ConstantUpdate,
+    password: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    check_admin(password)
+    result = await db.execute(select(BrandConstant).where(BrandConstant.brand == brand))
+    bc = result.scalar_one_or_none()
+    if not bc:
+        raise HTTPException(404, f"Бренд '{brand}' не найден")
+    for field, value in data.dict(exclude_none=True).items():
+        setattr(bc, field, value)
+    await db.commit()
+    return {"status": "updated", "brand": brand}
+
+
+# ─── Import Logs ───────────────────────────────────────────────────────────────
+
+@router.get("/logs")
+async def get_import_logs(
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+):
+    result = await db.execute(
+        select(ImportLog).order_by(ImportLog.created_at.desc()).limit(limit)
+    )
+    logs = result.scalars().all()
+    return [
+        {"id": l.id, "filename": l.filename, "rows_added": l.rows_added,
+         "rows_updated": l.rows_updated, "status": l.status,
+         "message": l.message, "created_at": str(l.created_at)}
+        for l in logs
+    ]

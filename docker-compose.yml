@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aps_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: aps_db
+      POSTGRES_USER: aps_user
+      POSTGRES_PASSWORD: aps_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Bootstrap-schema: postgres runs *.sql from this folder on first start
+      # (when postgres_data volume is still empty). The old ./init.sql dir is unused.
+      - ./docker-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aps_user -d aps_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: aps_api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aps_user:aps_password@postgres:5432/aps_db
+      DEBUG: "false"
+      # Replace with your bcrypt hash. Default below corresponds to password "321".
+      # IMPORTANT: literal "$" must be escaped as "$$" in docker-compose env values.
+      ADMIN_PASSWORD_HASH: "$$2b$$12$$CCzA2DrCCI.wqM9h5ysVduENYZu9GfR0TknF.EZd.udu/rjuHkQue"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./server:/app
+    command: >
+      sh -c "
+        python -c 'import asyncio; from app.models import models; from app.core.database import init_db; asyncio.run(init_db())' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+      "
+
+volumes:
+  postgres_data:

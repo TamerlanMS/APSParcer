@@ -1,0 +1,876 @@
+import customtkinter as ctk
+import os
+import subprocess
+import sys
+from tkinter import ttk, filedialog, messagebox
+import tkinter as tk
+import math
+from typing import List, Dict, Optional
+
+from assets.theme import *
+from locales.strings import t
+from services.api_service import ApiService
+from services.excel_generator import generate_excel
+
+
+# Цвета строк
+C_EXACT    = "#D4EDDA"
+C_MULTIPLE = "#FFF3CD"
+C_NOTFOUND = "#F8D7DA"
+C_EDITED   = "#CCE5FF"
+C_SELECT   = "#C8DFFF"
+
+
+# Колонки строго в порядке WV 4.0 + два служебных
+# Внутренний ключ → ярлык (берём из локализации)
+COLS = [
+    ("pos",        "col_num"),          # 0 — № позиции из PDF
+    ("brand",      "col_brand"),        # 1
+    ("article",    "col_art_db"),       # 2 — артикул из БД
+    ("name",       "col_name_db"),      # 3 — наименование из БД
+    ("unit",       "col_unit"),         # 4
+    ("qty",        "col_qty"),          # 5  редактируется
+    ("mult",       "col_mult"),         # 6 — кратность
+    ("const",      "col_const"),        # 7 — Константа цена, редактируется
+    ("seb",        "col_price_seb"),    # 8 — Цена себес
+    ("seb_sum",    "col_sum_seb"),      # 9 — Сумма себес
+    ("kp",         "col_price_kp"),     # 10 — Цена КП, редактируется
+    ("kp_sum",     "col_sum_kp"),       # 11 — Сумма КП
+    ("kaznisa",    "col_kaznisa_code"), # 12 — Код КазНИИСА
+    ("comment",    "col_comment"),      # 13 — Комментарии (редактируется)
+    ("delivery",   "col_delivery"),     # 14 — Срок поставки (редактируется)
+    ("status",     "col_status"),       # 15 — Статус
+]
+COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100]
+EDITABLE_COLS = {5, 7, 10, 13, 14}     # Кол-во, Константа цена, Цена КП, Коммент., Срок
+
+
+# Соответствие "rate" (1..5) → ключ цены из БД
+RATE_FIELD = {1: "rrts", 2: "mrc", 3: "opt", 4: "partner", 5: "kaznisa"}
+
+
+def _make_headers() -> List[str]:
+    return [t(key) for _k, key in COLS]
+
+
+class CandidateDialog(ctk.CTkToplevel):
+    def __init__(self, parent, candidates: list):
+        super().__init__(parent)
+        self.candidates = candidates
+        self.selected   = None
+        self.title(t("cand_title"))
+        self.geometry("700x420")
+        self.grab_set()
+        self.resizable(True, False)
+        self._build()
+
+    def _build(self):
+        ctk.CTkLabel(self, text=t("cand_label"),
+                     font=FONT_NORMAL, text_color=NAVY).pack(pady=(16, 8), padx=20, anchor="w")
+        frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD)
+        frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        cols = ["score", "article", "name", "brand", "rrts", "mrc"]
+        hdrs = ["%", "Артикул", "Наименование", "Бренд", "РРЦ", "МРЦ"]
+        style = ttk.Style()
+        style.configure("Cand.Treeview", rowheight=28, font=("Calibri", 12))
+        style.configure("Cand.Treeview.Heading", font=("Calibri", 12, "bold"),
+                        background=NAVY, foreground="white")
+        style.map("Cand.Treeview", background=[("selected", C_SELECT)])
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings",
+                                  style="Cand.Treeview", selectmode="browse")
+        for col, hdr, w in zip(cols, hdrs, [40, 180, 280, 90, 90, 90]):
+            self.tree.heading(col, text=hdr)
+            # Добавляем stretch=False, чтобы колонка не прыгала обратно
+            # Добавляем minwidth, чтобы пользователь не мог скрыть её совсем
+            self.tree.column(col, width=w, minwidth=w // 20, stretch=0, anchor="center" if col == "score" else "w")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        for c in self.candidates:
+            score = int(c.get("score", 0))
+            tag   = "exact" if score >= 95 else "fuzzy"
+            vals  = (f"{score}%", c.get("article",""), c.get("name",""),
+                     c.get("brand",""), c.get("rrts",""), c.get("mrc",""))
+            self.tree.insert("", "end", values=vals, tags=(tag,))
+        self.tree.tag_configure("exact", background=C_EXACT)
+        self.tree.tag_configure("fuzzy", background=C_MULTIPLE)
+        self.tree.bind("<Double-1>", lambda e: self._ok())
+        # Авто-выделение первой строки — чтобы Enter / кнопка «Выбрать» сразу работали
+        children = self.tree.get_children()
+        if children:
+            self.tree.selection_set(children[0])
+            self.tree.focus(children[0])
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(pady=(0, 16), padx=16, fill="x")
+        ctk.CTkButton(btn_row, text=t("cand_cancel"),
+                      fg_color="#AEB6BF", hover_color="#95A5A6",
+                      width=120, command=self.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_row, text=t("cand_ok"),
+                      fg_color=NAVY_LIGHT, hover_color=NAVY,
+                      width=140, command=self._ok).pack(side="right")
+
+    def _ok(self):
+        sel = self.tree.selection()
+        if not sel:
+            # Если есть единственный кандидат — выбираем его автоматически
+            children = self.tree.get_children()
+            if len(children) == 1:
+                sel = (children[0],)
+            else:
+                messagebox.showwarning(t("cand_title"),
+                                        t("cand_no_selection"))
+                return
+        idx = self.tree.index(sel[0])
+        self.selected = self.candidates[idx]
+        self.destroy()
+
+
+class SaveKPDialog(ctk.CTkToplevel):
+    """Окно для ввода Менеджер / Проект / Клиент перед сохранением."""
+    def __init__(self, parent, managers: List[str]):
+        super().__init__(parent)
+        self.title(t("save_kp_title"))
+        self.geometry("520x360")
+        self.grab_set()
+        self.resizable(False, False)
+        self.result = None  # dict | None
+        self._build(managers)
+
+    def _build(self, managers):
+        pad = 20
+        ctk.CTkLabel(self, text=t("save_kp_subtitle"),
+                     font=FONT_HEADING, text_color=NAVY).pack(pady=(pad, 6))
+
+        form = ctk.CTkFrame(self, fg_color="transparent")
+        form.pack(pady=10, padx=pad, fill="x")
+
+        ctk.CTkLabel(form, text=t("save_kp_manager"), anchor="w",
+                     font=FONT_NORMAL).pack(fill="x")
+        self.manager_var = ctk.StringVar(value=managers[0] if managers else "")
+        self.manager_dd = ctk.CTkOptionMenu(form, values=managers or [""],
+                                            variable=self.manager_var,
+                                            width=460, height=34)
+        self.manager_dd.pack(fill="x", pady=(2, 12))
+
+        ctk.CTkLabel(form, text=t("save_kp_project"), anchor="w",
+                     font=FONT_NORMAL).pack(fill="x")
+        self.project_entry = ctk.CTkEntry(form, height=34, font=FONT_NORMAL)
+        self.project_entry.pack(fill="x", pady=(2, 12))
+
+        ctk.CTkLabel(form, text=t("save_kp_client"), anchor="w",
+                     font=FONT_NORMAL).pack(fill="x")
+        self.client_entry = ctk.CTkEntry(form, height=34, font=FONT_NORMAL)
+        self.client_entry.pack(fill="x", pady=(2, 12))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(pady=(12, pad), padx=pad, fill="x")
+        ctk.CTkButton(btn_row, text=t("save_kp_cancel"),
+                      fg_color="#AEB6BF", hover_color="#95A5A6",
+                      width=140, command=self._cancel).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_row, text=t("save_kp_ok"),
+                      fg_color=NAVY_LIGHT, hover_color=NAVY,
+                      width=160, command=self._ok).pack(side="right")
+
+    def _ok(self):
+        self.result = {
+            "manager": self.manager_var.get().strip(),
+            "project": self.project_entry.get().strip(),
+            "client":  self.client_entry.get().strip(),
+        }
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class PreviewPage(ctk.CTkFrame):
+    def __init__(self, parent, api: ApiService, app):
+        super().__init__(parent, fg_color=BG_MAIN, corner_radius=0)
+        self._reset = None
+        self.api     = api
+        self.app     = app
+        self.items   = []
+        self.constants   = {}       # raw из API
+        self.brand_consts = {}      # {brand: {margin, logistics, rate, currency_rate, nds, gp}}
+        self.managers    = []
+        self._edit_iid   = None
+        self._edit_entry = None
+        self._filter_mode = "all"
+        self._suppress_recalc = False
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self._build()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+    def _build(self):
+        pad = PAD_MD
+
+        # Топ-панель
+        top = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+                           border_width=1, border_color="#E0E0E0")
+        top.grid(row=0, column=0, sticky="ew", padx=pad, pady=(pad, 4))
+        top.grid_columnconfigure(1, weight=1)
+
+        self.title_lbl = ctk.CTkLabel(top, text=t("preview_title"),
+                                       font=FONT_HEADING, text_color=NAVY, anchor="w")
+        self.title_lbl.grid(row=0, column=0, padx=16, pady=12, sticky="w")
+        self.stat_lbl = ctk.CTkLabel(top, text="", font=FONT_SMALL,
+                                      text_color=NAVY_LIGHT)
+        self.stat_lbl.grid(row=0, column=1, padx=8, sticky="w")
+
+        filter_frame = ctk.CTkFrame(top, fg_color="transparent")
+        filter_frame.grid(row=0, column=2, padx=8)
+        self.filter_btns = {}
+        for key, label_key in [("all","preview_filter_all"),
+                                ("warn","preview_filter_warn"),
+                                ("nf","preview_filter_nf")]:
+            btn = ctk.CTkButton(filter_frame, text=t(label_key), font=FONT_SMALL,
+                                height=30, width=130, corner_radius=RADIUS_SM,
+                                fg_color=NAVY_LIGHT if key=="all" else "#AEB6BF",
+                                hover_color=BLUE_MID,
+                                command=lambda k=key: self._set_filter(k))
+            btn.pack(side="left", padx=3)
+            self.filter_btns[key] = btn
+
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", self._on_search)
+        self.search_entry = ctk.CTkEntry(top, placeholder_text=t("preview_search_ph"),
+                                          textvariable=self.search_var,
+                                          width=200, height=32, font=FONT_NORMAL)
+        self.search_entry.grid(row=0, column=3, padx=8)
+
+        self.reset_btn = ctk.CTkButton(
+            top, text=t("preview_reset"), font=FONT_SMALL,
+            fg_color="#AEB6BF", hover_color="#7F8C8D", text_color="white",
+            height=36, width=110, corner_radius=RADIUS_SM, command=self._reset
+        )
+        self.reset_btn.grid(row=0, column=4, padx=(8, 4))
+
+        self.save_btn = ctk.CTkButton(
+            top, text=t("preview_save"),
+            font=(*FONT_NORMAL[:2], "bold"),
+            fg_color=NAVY, hover_color=NAVY_DARK,
+            height=36, width=180, corner_radius=RADIUS_SM,
+            state="disabled", command=self._save
+        )
+        self.save_btn.grid(row=0, column=5, padx=(0, 16))
+
+        # Легенда
+        leg = ctk.CTkFrame(self, fg_color="transparent")
+        leg.grid(row=1, column=0, sticky="w", padx=pad, pady=(0, 4))
+        for bg, key in [
+            (C_EXACT,    "preview_legend_exact"),
+            (C_MULTIPLE, "preview_legend_warn"),
+            (C_NOTFOUND, "preview_legend_nf"),
+            (C_EDITED,   "preview_legend_edit"),
+        ]:
+            lf = tk.Frame(leg, bg=bg, relief="solid", bd=1)
+            lf.pack(side="left", padx=(0, 8))
+            tk.Label(lf, text=f"  {t(key)}  ", bg=bg, font=("Calibri", 11)).pack()
+
+        # Таблица
+        tree_frame = ctk.CTkFrame(self, fg_color=BG_CARD,
+                                   corner_radius=RADIUS_MD,
+                                   border_width=1, border_color="#E0E0E0")
+        tree_frame.grid(row=2, column=0, sticky="nsew", padx=pad, pady=(0, 4))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("APS.Treeview",
+                        background=BG_CARD, fieldbackground=BG_CARD,
+                        rowheight=28, font=("Calibri", 12))
+        style.configure("APS.Treeview.Heading",
+                        background=NAVY, foreground="white",
+                        font=("Calibri", 12, "bold"), relief="flat")
+        style.map("APS.Treeview",
+                  background=[("selected", C_SELECT)],
+                  foreground=[("selected", "#000000")])
+
+        cols = [f"c{i}" for i in range(len(COLS))]
+        self.tree = ttk.Treeview(tree_frame, columns=cols,
+                                  show="headings", style="APS.Treeview",
+                                  selectmode="browse")
+        hdrs = _make_headers()
+        # minwidth — чтобы пользователь не мог скрыть колонку, сделав её уже
+        # ширины подписи. Берём примерную ширину текста заголовка + 18 пикс.
+        for i, (col, w, hdr) in enumerate(zip(cols, COL_WIDTHS, hdrs)):
+            self.tree.heading(col, text=hdr)
+            anchor = "center" if i in (0, 4, 5, 6) else "w"
+            min_w = max(50, len(hdr) * 9 + 18)
+            self.tree.column(col, width=max(w, min_w), minwidth=min_w,
+                             anchor=anchor, stretch=False)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        self.tree.tag_configure("exact",    background=C_EXACT)
+        self.tree.tag_configure("multiple", background=C_MULTIPLE)
+        self.tree.tag_configure("notfound", background=C_NOTFOUND)
+        self.tree.tag_configure("edited",   background=C_EDITED)
+
+        self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Button-1>", self._cancel_edit)
+
+        # Контекстное меню (правая кнопка мыши)
+        self._ctx_menu = tk.Menu(self, tearoff=0)
+        self._ctx_menu.add_command(
+            label=t("ctx_copy_article"),
+            command=lambda: self._copy_cell("article"),
+        )
+        self._ctx_menu.add_command(
+            label=t("ctx_copy_kaznisa"),
+            command=lambda: self._copy_cell("kaznisa"),
+        )
+        self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(
+            label=t("ctx_copy_row"),
+            command=self._copy_row,
+        )
+        self.tree.bind("<Button-3>", self._show_ctx_menu)
+
+        # Панель «Константы по бренду»
+        cf = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+                          border_width=1, border_color="#E0E0E0")
+        cf.grid(row=3, column=0, sticky="ew", padx=pad, pady=(0, pad))
+
+        self.const_title = ctk.CTkLabel(cf, text=t("preview_constants_brand"),
+                                         font=(*FONT_NORMAL[:2], "bold"),
+                                         text_color=NAVY)
+        self.const_title.grid(row=0, column=0, padx=16, pady=(10, 6), sticky="w", columnspan=12)
+
+        # Селектор бренда
+        ctk.CTkLabel(cf, text=t("preview_brand_select"), font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY).grid(row=1, column=0, padx=(16, 4), pady=(0, 10), sticky="w")
+        self.brand_var = ctk.StringVar(value="—")
+        self.brand_dd = ctk.CTkOptionMenu(cf, values=["—"], variable=self.brand_var,
+                                           width=180, height=30,
+                                           command=self._on_brand_select)
+        self.brand_dd.grid(row=1, column=1, padx=(0, 16), pady=(0, 10))
+
+        # Поля констант
+        self.const_vars = {}
+        const_items = [
+            ("preview_margin",     "margin",        1.20),
+            ("preview_logistics",  "logistics",     1.03),
+            ("preview_nds",        "nds",           1.16),
+            ("preview_currency",   "currency_rate", 1.00),
+            ("preview_rate_type",  "rate",          1),
+        ]
+        for col_i, (key, var_key, default) in enumerate(const_items):
+            lbl = ctk.CTkLabel(cf, text=t(key), font=FONT_SMALL,
+                                text_color=TEXT_SECONDARY)
+            lbl.grid(row=1, column=2 + col_i * 2, padx=(8, 4), pady=(0, 10), sticky="w")
+            var = tk.DoubleVar(value=default)
+            var.trace_add("write", self._on_const_change)
+            entry = ctk.CTkEntry(cf, textvariable=var, width=70, height=30, font=FONT_SMALL)
+            entry.grid(row=1, column=3 + col_i * 2, padx=(0, 8), pady=(0, 10))
+            self.const_vars[var_key] = var
+
+        # Подсказка
+        self.hint_lbl = ctk.CTkLabel(cf, text=t("preview_rate_hint"),
+                                      font=FONT_SMALL, text_color=TEXT_SECONDARY)
+        self.hint_lbl.grid(row=2, column=0, columnspan=12, padx=16, pady=(0, 10), sticky="w")
+
+        self._no_data_lbl = ctk.CTkLabel(self, text=t("preview_no_data"),
+                                          font=FONT_HEADING, text_color="#AEB6BF")
+        self._no_data_lbl.grid(row=2, column=0)
+        self._no_data_lbl.lower()
+
+    # ── Данные ───────────────────────────────────────────────────────────────
+    def load_data(self, result: dict):
+        self.items = result.get("items", [])
+        # Фиксируем базовые значения и сбрасываем флаги
+        for it in self.items:
+            bm = it.get("best_match") or {}
+            it["_iid"] = None
+            it["_user_edited"]      = False
+            it["_user_price"]       = None
+            it["_user_const_price"] = None
+
+        # Подтягиваем константы с сервера
+        self._suppress_recalc = True
+        try:
+            self.constants = self.api.get_constants()
+            self.brand_consts = {}
+            for b in self.constants.get("brands", []):
+                self.brand_consts[(b.get("brand") or "").upper()] = {
+                    "margin":        float(b.get("margin")        or 1.0),
+                    "logistics":     float(b.get("logistics")     or 1.0),
+                    "rate":          int(b.get("rate")            or 1),
+                    "currency_rate": float(b.get("currency_rate") or 1.0),
+                    "nds":           float(b.get("nds")           or 1.0),
+                    "gp":            float(b.get("gp")            or 1.0),
+                }
+            # Менеджеры из Const (B-колонка) — приходят отдельно если сервер вернёт
+            self.managers = self.constants.get("managers", [])
+        except Exception as e:
+            print(f"[Preview] get_constants: {e}")
+
+        # Заполняем dropdown брендов из присутствующих в результатах
+        brands_in_data = sorted({
+            ((it.get("best_match") or {}).get("brand") or "").strip()
+            for it in self.items
+            if (it.get("best_match") or {}).get("brand")
+        })
+        if brands_in_data:
+            self.brand_dd.configure(values=brands_in_data)
+            self.brand_var.set(brands_in_data[0])
+            self._load_const_fields(brands_in_data[0])
+        else:
+            self.brand_dd.configure(values=["—"])
+            self.brand_var.set("—")
+
+        self._suppress_recalc = False
+
+        self._populate()
+        self._update_stats()
+        self.save_btn.configure(state="normal")
+        self._no_data_lbl.lower()
+
+    def _load_const_fields(self, brand: str):
+        """Загружает значения констант выбранного бренда в поля ввода."""
+        consts = self.brand_consts.get(brand.upper())
+        if not consts:
+            return
+        self._suppress_recalc = True
+        for k in ("margin", "logistics", "nds", "currency_rate", "rate"):
+            if k in self.const_vars and k in consts:
+                self.const_vars[k].set(consts[k])
+        self._suppress_recalc = False
+
+    def _on_brand_select(self, brand: str):
+        self._load_const_fields(brand)
+
+    # ── Расчёт цены ──────────────────────────────────────────────────────────
+    def _compute_kp(self, item: dict) -> tuple:
+        """
+        Возвращает (price_seb, sum_seb, price_kp, sum_kp).
+        Формула из WV_template.xlsm:
+            base = выбор по rate-индексу бренда из БД (1=РРЦ,2=МРЦ,3=Опт,4=Партнёр,5=КазНИИСА)
+                   либо ручная константа из G
+            price_seb = base × курс × НДС × лог
+            price_kp  = price_seb × маржа
+            суммы     = цена × Кол-во,  округление вверх.
+        """
+        bm    = item.get("best_match") or {}
+        brand = (bm.get("brand") or "").upper()
+        bc    = self.brand_consts.get(brand)
+        if not bc:
+            # Фолбэк — берём текущие значения с экрана
+            try:
+                bc = {
+                    "margin":        float(self.const_vars["margin"].get()),
+                    "logistics":     float(self.const_vars["logistics"].get()),
+                    "nds":           float(self.const_vars["nds"].get()),
+                    "currency_rate": float(self.const_vars["currency_rate"].get()),
+                    "rate":          int(float(self.const_vars["rate"].get() or 1)),
+                }
+            except (tk.TclError, ValueError):
+                return 0.0, 0.0, 0.0, 0.0
+
+        # Базовая цена
+        if item.get("_user_const_price"):
+            base = float(item["_user_const_price"])
+        else:
+            field = RATE_FIELD.get(bc.get("rate", 1), "rrts")
+            base = bm.get(field) or bm.get("rrts") or bm.get("mrc") or 0
+        base = float(base or 0)
+        if not base:
+            return 0.0, 0.0, 0.0, 0.0
+
+        cur, nds, lo, mg = bc["currency_rate"], bc["nds"], bc["logistics"], bc["margin"]
+        price_seb = base * cur * nds * lo
+        price_kp  = price_seb * mg
+        qty       = float(item.get("qty", 1) or 1)
+
+        # Если пользователь руками задал Цена КП — она в приоритете
+        if item.get("_user_edited") and item.get("_user_price") is not None:
+            price_kp = float(item["_user_price"])
+
+        price_seb = math.ceil(price_seb)
+        price_kp  = math.ceil(price_kp)
+        return price_seb, price_seb * qty, price_kp, price_kp * qty
+
+    # ── Заполнение таблицы ───────────────────────────────────────────────────
+    def _populate(self, items=None):
+        self.tree.delete(*self.tree.get_children())
+        data = items if items is not None else self.items
+        for item in data:
+            self._insert_row(item)
+
+    def _insert_row(self, item: dict) -> str:
+        bm     = item.get("best_match") or {}
+        status = item.get("status", "not_found")
+
+        if status == "exact":
+            tag, stxt = "exact",    t("status_exact")
+        elif status == "multiple":
+            tag, stxt = "multiple", t("status_multiple")
+        elif status == "fuzzy":
+            tag, stxt = "multiple", t("status_fuzzy")
+        else:
+            tag, stxt = "notfound", t("status_nf")
+
+        if item.get("_user_edited"):
+            tag = "edited"
+
+        seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+        qty = item.get("qty", 1)
+        brand = bm.get("brand", "")
+        article = bm.get("article", "") or item.get("article_raw", "")
+        name    = (bm.get("name", "") or item.get("name", ""))
+        unit    = bm.get("unit", "шт.") if bm else "шт."
+        mult    = bm.get("multiplicity") or ""
+        kaznisa_code = bm.get("kaznisa_code") or ""
+        const_price  = item.get("_user_const_price") or ""
+
+        def f(v):
+            return f"{v:.2f}" if v else ""
+
+        vals = (
+            item.get("pos", ""),
+            brand,
+            article,
+            name,
+            unit,
+            qty,
+            mult,
+            const_price,
+            f(seb),
+            f(seb_sum),
+            f(kp),
+            f(kp_sum),
+            kaznisa_code,
+            item.get("comment", "") or "",
+            item.get("delivery", "") or "",
+            stxt,
+        )
+        iid = self.tree.insert("", "end", values=vals, tags=(tag,))
+        item["_iid"] = iid
+        return iid
+
+    def _update_stats(self):
+        total = len(self.items)
+        exact = sum(1 for i in self.items if i.get("status") == "exact")
+        warn  = sum(1 for i in self.items if i.get("status") in ("multiple","fuzzy"))
+        nf    = sum(1 for i in self.items if i.get("status") == "not_found")
+        self.stat_lbl.configure(text=t("preview_stat", total=total, exact=exact, warn=warn, nf=nf))
+
+    # ── Реакция на изменение констант ────────────────────────────────────────
+    def _on_const_change(self, *_):
+        if self._suppress_recalc:
+            return
+        brand = self.brand_var.get().strip().upper()
+        if not brand or brand == "—":
+            return
+        # Обновляем словарь констант для бренда из полей
+        try:
+            bc = self.brand_consts.setdefault(brand, {})
+            bc["margin"]        = float(self.const_vars["margin"].get())
+            bc["logistics"]     = float(self.const_vars["logistics"].get())
+            bc["nds"]           = float(self.const_vars["nds"].get())
+            bc["currency_rate"] = float(self.const_vars["currency_rate"].get())
+            bc["rate"]          = int(float(self.const_vars["rate"].get() or 1))
+        except (tk.TclError, ValueError):
+            return
+        self._recalc_for_brand(brand)
+
+    def _recalc_for_brand(self, brand: str):
+        for item in self.items:
+            bm = item.get("best_match") or {}
+            if (bm.get("brand") or "").upper() != brand:
+                continue
+            if item.get("_user_edited"):
+                continue
+            iid = item.get("_iid")
+            if not iid or not self.tree.exists(iid):
+                continue
+            seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+            vals = list(self.tree.item(iid, "values"))
+            vals[8]  = f"{seb:.2f}"      if seb     else ""
+            vals[9]  = f"{seb_sum:.2f}"  if seb_sum else ""
+            vals[10] = f"{kp:.2f}"       if kp      else ""
+            vals[11] = f"{kp_sum:.2f}"   if kp_sum  else ""
+            self.tree.item(iid, values=vals)
+
+    # ── Фильтр и поиск ───────────────────────────────────────────────────────
+    def _set_filter(self, mode: str):
+        self._filter_mode = mode
+        for k, btn in self.filter_btns.items():
+            btn.configure(fg_color=NAVY_LIGHT if k == mode else "#AEB6BF")
+        self._apply_filter()
+
+    def _on_search(self, *_):
+        self._apply_filter()
+
+    def _apply_filter(self):
+        q = self.search_var.get().lower().strip()
+        result = []
+        for item in self.items:
+            status = item.get("status", "not_found")
+            if self._filter_mode == "warn" and status not in ("multiple", "fuzzy"):
+                continue
+            if self._filter_mode == "nf" and status != "not_found":
+                continue
+            if q and q not in (item.get("article_raw","") + item.get("name","")).lower():
+                continue
+            result.append(item)
+        self._populate(result)
+
+    # ── Двойной клик ─────────────────────────────────────────────────────────
+    def _on_double_click(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        iid = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        col_idx = int(col.replace("#", "")) - 1
+        if not iid:
+            return
+        item = self._get_item_by_iid(iid)
+        if item is None:
+            return
+
+        # Жёлтая строка + клик НЕ по редактируемой колонке → выбор кандидата
+        if item.get("status") in ("multiple", "fuzzy") and col_idx not in EDITABLE_COLS:
+            cands = item.get("candidates", [])
+            if cands:
+                dlg = CandidateDialog(self, cands)
+                self.wait_window(dlg)
+                if dlg.selected:
+                    item["best_match"] = dlg.selected
+                    item["status"]     = "exact"
+                    item["_user_edited"] = False
+                    item["_user_price"]  = None
+                    self._refresh_row(iid, item)
+                    self._update_stats()
+            return
+
+        if col_idx in EDITABLE_COLS:
+            self._start_edit(iid, col, col_idx, item)
+
+    def _get_item_by_iid(self, iid: str) -> Optional[Dict]:
+        for item in self.items:
+            if item.get("_iid") == iid:
+                return item
+        return None
+
+    def _refresh_row(self, iid: str, item: dict):
+        # Полная перерисовка строки после смены кандидата
+        seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+        bm    = item.get("best_match") or {}
+        brand = bm.get("brand", "")
+        vals = (
+            item.get("pos", ""),
+            brand,
+            bm.get("article", ""),
+            (bm.get("name", "") or "")[:80],
+            bm.get("unit", "шт."),
+            item.get("qty", 1),
+            bm.get("multiplicity") or "",
+            item.get("_user_const_price") or "",
+            f"{seb:.2f}"      if seb     else "",
+            f"{seb_sum:.2f}"  if seb_sum else "",
+            f"{kp:.2f}"       if kp      else "",
+            f"{kp_sum:.2f}"   if kp_sum  else "",
+            bm.get("kaznisa_code") or "",
+            item.get("comment", "") or "",
+            item.get("delivery", "") or "",
+            t("status_exact"),
+        )
+        self.tree.item(iid, values=vals, tags=("exact",))
+        # Снимаем выделение, иначе цвет SELECT перекрывает зелёный тег
+        try:
+            self.tree.selection_remove(iid)
+        except Exception:
+            pass
+
+    # ── Inline-редактирование ───────────────────────────────────────────────
+    def _start_edit(self, iid, col, col_idx, item):
+        self._cancel_edit()
+        bbox = self.tree.bbox(iid, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        cur_val = self.tree.item(iid, "values")[col_idx]
+        self._edit_iid  = iid
+        self._edit_col  = col_idx
+        self._edit_item = item
+
+        entry = tk.Entry(self.tree, font=("Calibri", 12), relief="solid", bd=1)
+        entry.insert(0, cur_val)
+        entry.select_range(0, "end")
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.focus_set()
+        entry.bind("<Return>",   lambda e: self._commit_edit(entry))
+        entry.bind("<Escape>",   lambda e: self._cancel_edit())
+        entry.bind("<FocusOut>", lambda e: self._commit_edit(entry))
+        self._edit_entry = entry
+
+    def _commit_edit(self, entry):
+        if not self._edit_iid:
+            return
+        raw = entry.get().strip()
+        iid     = self._edit_iid
+        col_idx = self._edit_col
+        item    = self._edit_item
+        vals    = list(self.tree.item(iid, "values"))
+
+        if col_idx in (13, 14):       # Комментарий / Срок поставки — строка
+            key = "comment" if col_idx == 13 else "delivery"
+            item[key] = raw
+            vals[col_idx] = raw
+        else:                          # числовое поле
+            try:
+                new_val = float(raw.replace(",", "."))
+            except ValueError:
+                self._cancel_edit()
+                return
+            if col_idx == 5:          # Кол-во
+                item["qty"] = new_val
+            elif col_idx == 7:        # Константа цена
+                item["_user_const_price"] = new_val if new_val else None
+                item["_user_edited"] = False
+                item["_user_price"]  = None
+            elif col_idx == 10:       # Цена КП
+                item["_user_edited"] = True
+                item["_user_price"]  = new_val
+            # Пересчёт всей строки
+            seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+            vals[5]  = item.get("qty", 1) if col_idx != 5 else str(new_val)
+            vals[7]  = item.get("_user_const_price") or ""
+            vals[8]  = f"{seb:.2f}"     if seb     else ""
+            vals[9]  = f"{seb_sum:.2f}" if seb_sum else ""
+            vals[10] = f"{kp:.2f}"      if kp      else ""
+            vals[11] = f"{kp_sum:.2f}"  if kp_sum  else ""
+
+        tag = "edited" if (item.get("_user_edited") or item.get("_user_const_price")) else None
+        if tag:
+            self.tree.item(iid, values=vals, tags=(tag,))
+        else:
+            cur_tags = self.tree.item(iid, "tags")
+            self.tree.item(iid, values=vals, tags=cur_tags)
+        self._cancel_edit()
+
+    def _cancel_edit(self, event=None):
+        if self._edit_entry:
+            self._edit_entry.destroy()
+            self._edit_entry = None
+        self._edit_iid = None
+
+    # ── Контекстное меню / копирование ───────────────────────────────────────
+    def _show_ctx_menu(self, event):
+        """Показывает контекстное меню по правому клику; выделяет строку под курсором."""
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+        try:
+            self._ctx_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._ctx_menu.grab_release()
+
+    def _copy_cell(self, col_key: str):
+        """Копирует значение указанной колонки выбранной строки в буфер обмена."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        # col_key — это id колонки в Treeview (совпадает с первым элементом COLS)
+        col_ids = [c for c, _ in COLS]
+        if col_key not in col_ids:
+            return
+        values = self.tree.item(sel[0], "values")
+        col_idx = col_ids.index(col_key)
+        value = values[col_idx] if col_idx < len(values) else ""
+        self.clipboard_clear()
+        self.clipboard_append(str(value))
+
+    def _copy_row(self):
+        """Копирует всю строку (артикул + код КазНИИСА) в буфер через Tab."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        col_ids = [c for c, _ in COLS]
+        values = self.tree.item(sel[0], "values")
+        art_idx = col_ids.index("article")
+        kaz_idx = col_ids.index("kaznisa")
+        art  = values[art_idx]  if art_idx  < len(values) else ""
+        code = values[kaz_idx]  if kaz_idx  < len(values) else ""
+        self.clipboard_clear()
+        self.clipboard_append(f"{art}\t{code}")
+
+    # ── Сохранение ───────────────────────────────────────────────────────────
+    def _save(self):
+        if not self.items:
+            return
+        managers = self.managers or []
+        dlg = SaveKPDialog(self, managers)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        meta = dlg.result
+
+        path = filedialog.asksaveasfilename(
+            title=t("preview_save"),
+            defaultextension=".xlsm",
+            filetypes=[("Excel с макросами", "*.xlsm")]
+        )
+        if not path:
+            return
+        try:
+            # Вычисляем цены КП для каждой позиции
+            for it in self.items:
+                seb, seb_sum, kp, kp_sum = self._compute_kp(it)
+                it["_computed_kp_price"] = kp
+                it["_computed_kp_sum"]   = kp_sum
+
+            # Загружаем актуальные данные БД с сервера (для листов БД и Const)
+            products = []
+            try:
+                products = self.api.get_all_products()
+            except Exception as e_db:
+                print(f"[Save] get_all_products: {e_db}")
+
+            out = generate_excel(
+                self.items, path,
+                constants=self.constants,
+                products=products,
+                brand_consts=self.brand_consts,
+                project_name=meta.get("project", ""),
+                client_name=meta.get("client", ""),
+                manager_name=meta.get("manager", ""),
+            )
+
+            # Предлагаем открыть файл
+            if messagebox.askyesno(
+                t("preview_save"),
+                t("preview_saved", path=out, count=len(self.items))
+                + "\n\n" + t("preview_open_file"),
+            ):
+                self._open_file(out)
+        except FileNotFoundError as e:
+            messagebox.showerror(t("preview_save_error"), str(e))
+        except Exception as e:
+            messagebox.showerror(t("preview_save_error"), str(e))
+
+    @staticmethod
+    def _open_file(path: str):
+        """Открывает файл стандартным приложением ОС."""
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            print(f"[open_file] {e}")
