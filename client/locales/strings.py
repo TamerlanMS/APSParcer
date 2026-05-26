@@ -3,7 +3,7 @@
 STRINGS = {
     "ru": {
         # App
-        "app_title": "APS Parser — Обработка спецификаций",
+        "app_title": "GQ-Builder — Обработка спецификаций",
         "app_subtitle": "GQ Group",
         "lang_switch": "ҚАЗ",
 
@@ -13,8 +13,11 @@ STRINGS = {
         "nav_database": "🗄️   База данных",
         "nav_key_info": "Ключ: ",
         "nav_change_key": "🔑  Сменить ключ",
+        "nav_user_label": "👤  {name}",
+        "nav_user_role": "{role}",
+        "nav_logout": "🚪  Выйти",
 
-        # Auth dialog
+        # Auth dialog — step 1 (connection)
         "auth_title": "Авторизация",
         "auth_subtitle": "Введите данные для подключения к серверу",
         "auth_server": "Адрес сервера:",
@@ -31,6 +34,31 @@ STRINGS = {
         "auth_invalid": "❌ Недействительный ключ",
         "auth_no_conn": "❌ Нет соединения с сервером",
 
+        # Auth dialog — step 2 (JWT login)
+        "auth_login_title": "Вход в систему",
+        "auth_login_subtitle": "Введите логин и пароль",
+        "auth_username": "Имя пользователя:",
+        "auth_username_ph": "login",
+        "auth_password": "Пароль:",
+        "auth_password_ph": "••••••••",
+        "auth_login_btn": "🔓  Войти",
+        "auth_logging_in": "🔄 Выполняется вход...",
+        "auth_login_ok": "✅ Добро пожаловать, {name}!",
+        "auth_no_username": "⚠️ Введите имя пользователя",
+        "auth_no_password": "⚠️ Введите пароль",
+        "auth_username_manual": "или введите вручную:",
+        "auth_wrong_creds": "❌ Неверный логин или пароль",
+        "auth_login_error": "❌ Ошибка входа. Попробуйте снова.",
+        "auth_back": "← Назад",
+        "auth_step2_title": "Выбор пользователя",
+        "auth_step2_sub": "Выберите сотрудника и введите пароль",
+        "auth_user_select": "Сотрудник:",
+        "auth_login": "🔓  Войти",
+        "auth_loading_users": "🔄 Загрузка пользователей...",
+        "auth_no_user": "⚠️ Выберите пользователя",
+        "auth_login_failed": "❌ Неверный пароль",
+        "auth_session_expired": "Сессия истекла. Войдите заново.",
+
         # Upload page
         "upload_title": "Загрузка PDF спецификации",
         "upload_desc": "Загрузите PDF рабочего проекта АПС. Система извлечёт спецификацию и найдёт позиции в базе данных.",
@@ -44,6 +72,15 @@ STRINGS = {
         "upload_error_title": "Ошибка обработки",
         "upload_error_msg": "Не удалось обработать PDF:\n\n",
         "upload_wrong_type": "Файл должен быть в формате PDF",
+        "upload_tab_upload": "Загрузка",
+        "upload_tab_history": "История загрузок",
+        "upload_hist_refresh": "🔄  Обновить",
+        "upload_hist_who": "Кто загрузил",
+        "upload_hist_file": "Файл",
+        "upload_hist_project": "Наименование проекта",
+        "upload_hist_date": "Дата и время",
+        "upload_hist_empty": "История загрузок пуста",
+        "upload_hist_error": "Ошибка загрузки истории",
 
         # Preview page
         "preview_title": "📊  Предпросмотр результатов",
@@ -129,6 +166,8 @@ STRINGS = {
         "db_tab_const": "⚙️  Константы",
         "db_tab_logs": "📋  История",
         "db_import_desc": "Загрузите обновлённый Excel (лист «БД»). Новые позиции добавятся, существующие обновятся.",
+        "db_import_both_desc": "Загрузите Excel-файл со справочником товаров и константами. Данные БД и Константы будут обновлены за один шаг.",
+        "db_import_both_btn": "📥  Загрузить БД и Константы",
         "db_drop_label": "База данных товаров (лист «БД»)",
         "db_import_btn": "📥  Импортировать базу данных",
         "db_const_desc": "Загрузите Excel с константами (лист «Const»). Обновятся коэффициенты и курсы.",
@@ -147,14 +186,60 @@ STRINGS = {
         "db_log_date": "Дата",
         "db_load_logs": "🔄  Загрузить историю",
 
+        # Users page (superadmin)
+        "nav_users": "👥  Пользователи",
+        "users_title": "👥  Управление пользователями",
+        "users_add": "➕  Добавить",
+        "users_edit": "✏️  Редактировать",
+        "users_delete": "🗑️  Деактивировать",
+        "users_refresh": "🔄  Обновить",
+        "users_loading": "Загрузка...",
+        "users_empty": "Нет пользователей",
+        "users_col_name": "ФИО",
+        "users_col_login": "Логин",
+        "users_col_role": "Роль",
+        "users_col_email": "Email",
+        "users_col_phone": "Телефон",
+        "users_col_active": "Статус",
+        "users_col_last_login": "Последний вход",
+        "users_active": "✅ Активен",
+        "users_inactive": "🔒 Заблокирован",
+        "users_select_to_edit": "Выберите пользователя для редактирования",
+        "users_confirm_delete": "Деактивировать пользователя «{name}»?\n\nВсе активные сессии будут завершены.",
+        "users_deleted": "Пользователь «{name}» деактивирован.",
+        "users_saved": "Изменения сохранены.",
+        "users_created": "Пользователь «{name}» создан.",
+        "users_error": "Ошибка: {error}",
+        "udlg_title_create": "Новый пользователь",
+        "udlg_title_edit": "Редактирование: {name}",
+        "udlg_full_name": "ФИО:",
+        "udlg_username": "Логин:",
+        "udlg_email": "Email (необязательно):",
+        "udlg_phone": "Телефон (необязательно):",
+        "udlg_role": "Роль:",
+        "udlg_password": "Пароль:",
+        "udlg_password_edit": "Новый пароль (оставьте пустым):",
+        "udlg_password_ph_create": "Минимум 6 символов",
+        "udlg_password_ph_edit": "Не менять пароль",
+        "udlg_active": "Пользователь активен",
+        "udlg_save": "💾  Сохранить",
+        "udlg_cancel": "Отмена",
+        "udlg_no_name": "⚠️ Введите ФИО",
+        "udlg_no_username": "⚠️ Введите логин",
+        "udlg_no_password": "⚠️ Введите пароль",
+        "udlg_pwd_too_short": "⚠️ Пароль минимум 6 символов",
+        "udlg_saving": "⏳ Сохранение...",
+        "udlg_no_role": "⚠️ Выберите роль",
+
         # Status bar
         "status_connected": "Подключено: {url}",
         "status_not_conn": "Не подключено",
+        "status_user": "  {url}  |  👤 {name}  [{role}]",
     },
 
     "kz": {
         # App
-        "app_title": "APS Parser — Сипаттамаларды өңдеу",
+        "app_title": "GQ-Builder — Сипаттамаларды өңдеу",
         "app_subtitle": "GQ Group",
         "lang_switch": "РУС",
 
@@ -164,8 +249,11 @@ STRINGS = {
         "nav_database": "🗄️   Деректер қоры",
         "nav_key_info": "Кілт: ",
         "nav_change_key": "🔑  Кілтті өзгерту",
+        "nav_user_label": "👤  {name}",
+        "nav_user_role": "{role}",
+        "nav_logout": "🚪  Шығу",
 
-        # Auth dialog
+        # Auth dialog — step 1
         "auth_title": "Авторизация",
         "auth_subtitle": "Серверге қосылу деректерін енгізіңіз",
         "auth_server": "Сервер мекенжайы:",
@@ -182,6 +270,31 @@ STRINGS = {
         "auth_invalid": "❌ Жарамсыз кілт",
         "auth_no_conn": "❌ Серверге қосылу мүмкін емес",
 
+        # Auth dialog — step 2
+        "auth_login_title": "Жүйеге кіру",
+        "auth_login_subtitle": "Логин мен құпия сөзді енгізіңіз",
+        "auth_username": "Пайдаланушы аты:",
+        "auth_username_ph": "login",
+        "auth_password": "Құпия сөз:",
+        "auth_password_ph": "••••••••",
+        "auth_login_btn": "🔓  Кіру",
+        "auth_logging_in": "🔄 Кіру орындалуда...",
+        "auth_login_ok": "✅ Қош келдіңіз, {name}!",
+        "auth_no_username": "⚠️ Пайдаланушы атын енгізіңіз",
+        "auth_no_password": "⚠️ Құпия сөзді енгізіңіз",
+        "auth_username_manual": "немесе қолмен енгізіңіз:",
+        "auth_wrong_creds": "❌ Қате логин немесе құпия сөз",
+        "auth_login_error": "❌ Кіру қатесі. Қайталап көріңіз.",
+        "auth_back": "← Артқа",
+        "auth_step2_title": "Пайдаланушыны таңдау",
+        "auth_step2_sub": "Қызметкерді таңдап, құпия сөзді енгізіңіз",
+        "auth_user_select": "Қызметкер:",
+        "auth_login": "🔓  Кіру",
+        "auth_loading_users": "🔄 Пайдаланушылар жүктелуде...",
+        "auth_no_user": "⚠️ Пайдаланушыны таңдаңыз",
+        "auth_login_failed": "❌ Құпия сөз қате",
+        "auth_session_expired": "Сессия аяқталды. Қайта кіріңіз.",
+
         # Upload page
         "upload_title": "PDF сипаттамасын жүктеу",
         "upload_desc": "АПС жұмыс жобасының PDF файлын жүктеңіз. Жүйе сипаттаманы шығарып, деректер қорынан табады.",
@@ -195,6 +308,15 @@ STRINGS = {
         "upload_error_title": "Өңдеу қатесі",
         "upload_error_msg": "PDF өңдеу мүмкін болмады:\n\n",
         "upload_wrong_type": "Файл PDF форматында болуы керек",
+        "upload_tab_upload": "Жүктеу",
+        "upload_tab_history": "Жүктеу тарихы",
+        "upload_hist_refresh": "🔄  Жаңарту",
+        "upload_hist_who": "Кім жүктеді",
+        "upload_hist_file": "Файл",
+        "upload_hist_project": "Жоба атауы",
+        "upload_hist_date": "Күн және уақыт",
+        "upload_hist_empty": "Жүктеу тарихы бос",
+        "upload_hist_error": "Тарихты жүктеу қатесі",
 
         # Preview page
         "preview_title": "📊  Нәтижелерді алдын ала қарау",
@@ -280,6 +402,8 @@ STRINGS = {
         "db_tab_const": "⚙️  Константалар",
         "db_tab_logs": "📋  Тарих",
         "db_import_desc": "Жаңартылған Excel жүктеңіз («БД» парағы). Жаңа позициялар қосылады, бар позициялар жаңартылады.",
+        "db_import_both_desc": "Тауарлар анықтамалығы мен константалары бар Excel файлын жүктеңіз. БД және Константалар бір қадамда жаңартылады.",
+        "db_import_both_btn": "📥  БД және Константаларды жүктеу",
         "db_drop_label": "Тауарлар дерек қоры («БД» парағы)",
         "db_import_btn": "📥  Деректер қорын импорттау",
         "db_const_desc": "Константалары бар Excel жүктеңіз («Const» парағы). Коэффициенттер жаңартылады.",
@@ -298,10 +422,46 @@ STRINGS = {
         "db_log_date": "Күні",
         "db_load_logs": "🔄  Тарихты жүктеу",
 
-        # Status bar
-        "status_connected": "Қосылды: {url}",
-        "status_not_conn": "Қосылмаған",
-    }
+        # Users page (superadmin)
+        "nav_users": "👥  Пайдаланушылар",
+        "users_title": "👥  Пайдаланушыларды басқару",
+        "users_add": "➕  Қосу",
+        "users_edit": "✏️  Өзгерту",
+        "users_delete": "🗑️  Өшіру",
+        "users_refresh": "🔄  Жаңарту",
+        "users_loading": "Жүктелуде...",
+        "users_empty": "Пайдаланушылар жоқ",
+        "users_col_name": "Аты-жөні",
+        "users_col_login": "Логин",
+        "users_col_role": "Рөл",
+        "users_col_email": "Email",
+        "users_col_phone": "Телефон",
+        "users_col_active": "Мәртебе",
+        "users_col_last_login": "Соңғы кіру",
+        "users_active": "✅ Белсенді",
+        "users_inactive": "🔒 Бұғатталған",
+        "users_select_to_edit": "Өзгерту үшін пайдаланушы таңдаңыз",
+        "users_confirm_delete": "«{name}» пайдаланушысын өшіру?\n\nБарлық белсенді сессиялар аяқталады.",
+        "users_deleted": "«{name}» пайдаланушысы өшірілді.",
+        "users_saved": "Өзгерістер сақталды.",
+        "users_created": "«{name}» пайдаланушысы жасалды.",
+        "users_error": "Қате: {error}",
+        "udlg_title_create": "Жаңа пайдаланушы",
+        "udlg_title_edit": "Өзгерту: {name}",
+        "udlg_full_name": "Аты-жөні:",
+        "udlg_username": "Логин:",
+        "udlg_email": "Email (міндетті емес):",
+        "udlg_phone": "Телефон (міндетті емес):",
+        "udlg_role": "Рөл:",
+        "udlg_password": "Құпия сөз:",
+        "udlg_password_edit": "Жаңа құпия сөз (бос қалдырыңыз):",
+        "udlg_password_ph_create": "Кемінде 6 таңба",
+        "udlg_password_ph_edit": "Құпия сөзді өзгертпеу",
+        "udlg_active": "Пайдаланушы белсенді",
+        "udlg_save": "💾  Сақтау",
+        "udlg_cancel": "Болдырмау",
+        "udlg_no_name": "⚠️ Аты-жөнін енгізіңіз",
+    },
 }
 
 
@@ -318,7 +478,7 @@ class Lang:
 
 
 def t(key: str, **kwargs) -> str:
-    """Возвращает строку на текущем языке; fallback → русский."""
+    """Возвращает строку на текущем языке; fallback -> русский."""
     lang = Lang.get()
     text = STRINGS.get(lang, {}).get(key) or STRINGS.get("ru", {}).get(key) or key
     return text.format(**kwargs) if kwargs else text

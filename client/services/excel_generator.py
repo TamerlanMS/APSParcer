@@ -227,97 +227,164 @@ def _fill_kp_header(wb: openpyxl.Workbook, manager: str, project: str, client: s
         print(f"[Excel/КП] header: {e}")
 
 
+def _shift_row_refs(formula: str, old_итого: int, shift: int) -> str:
+    """Shift all row numbers >= old_итого in a formula string by shift."""
+    import re as _re
+    def _rep(m):
+        col_part = m.group(1)
+        row_num  = int(m.group(2))
+        return col_part + str(row_num + shift if row_num >= old_итого else row_num)
+    return _re.sub(r'([A-Za-z]+)(\d+)', _rep, formula)
+
+
 def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
+    """Заполняет строки данных листа КП.
+
+    НЕ использует insert_rows() — это ломает VBA-модули в .xlsm файлах.
+    Вместо этого:
+      1. Находим строку "Итого:" динамически (сканируем снизу данных).
+      2. Сохраняем весь подвал (Итого, НДС, условия, подпись) как словарь.
+      3. Очищаем зону данных + старый подвал.
+      4. Пишем данные (только колонки A–I: без КазНИИСА/РРЦ).
+      5. Переносим подвал вниз через запись значений (без структурных операций).
+      6. Исправляем формулу SUM в строке Итого.
+      7. Обновляем ссылку Таблица5 без insert_rows.
     """
-    Заполняет строки данных листа КП прямыми значениями.
-    Записываются только найденные позиции (status != 'not_found').
-    Колонки J, K (КазНИИСА) и M, N (РРЦ в тнг) вычисляем из best_match + курс бренда.
-    """
+    import re as _re
+    from copy import copy as _copy
     if "КП" not in wb.sheetnames:
         return
     kp = wb["КП"]
 
-    # Удаляем calculatedColumnFormula из Таблица5 — иначе Excel перетрёт
-    # наши записанные значения своими формулами колонки при открытии файла
+    # ── 1. Найти строку "Итого:" ─────────────────────────────────────────────
+    итого_row = None
+    for r in range(KP_DATA_START, KP_DATA_START + 900):
+        for col in range(1, 10):
+            v = kp.cell(row=r, column=col).value
+            if isinstance(v, str) and v.strip().lower().startswith("итого"):
+                итого_row = r
+                break
+        if итого_row:
+            break
+    if not итого_row:
+        итого_row = KP_DATA_MAX + 1   # запасной вариант
+
+    # ── 2. Сохранить подвал (до 80 строк начиная с Итого) ──────────────────
+    FOOTER_ROWS = 80
+    footer: dict = {}   # {offset_from_итого: {col: value}}
+    for offset in range(FOOTER_ROWS):
+        r = итого_row + offset
+        row_data = {}
+        for col in range(1, 20):
+            v = kp.cell(row=r, column=col).value
+            if v is not None:
+                row_data[col] = v
+        if row_data:
+            footer[offset] = row_data
+
+    # ── 3. Снять calculatedColumnFormula из Таблица5 ────────────────────────
     kp_table = kp.tables.get("Таблица5")
     if kp_table:
         for tc in kp_table.tableColumns:
             tc.calculatedColumnFormula = None
-        # Убираем кешированный фильтр (filterColumn) — он скрывает строки,
-        # где Цена/Сумма КП была " " (пробел из формулы).
-        # Теперь мы пишем прямые значения — фильтр не нужен.
         if kp_table.autoFilter:
             kp_table.autoFilter.filterColumn = []
 
-    # Снимаем hidden="1" со всех строк диапазона данных.
-    # Шаблон хранит кешированное состояние фильтра: строки 15-500 помечены
-    # hidden=True (их скрывал autoFilter), поэтому Excel их не показывает
-    # даже после того, как мы записали туда значения.
-    for r in range(KP_DATA_START, KP_DATA_MAX + 1):
+    # ── 4. Очистить зону данных + старого подвала ───────────────────────────
+    clear_end = итого_row + FOOTER_ROWS + 5
+    for r in range(KP_DATA_START, clear_end):
         kp.row_dimensions[r].hidden = False
-
-    # Очищаем старые данные строк
-    for r in range(KP_DATA_START, KP_DATA_MAX + 1):
-        for col in range(1, 15):          # A-N
+        for col in range(1, 20):
             cell = kp.cell(row=r, column=col)
             if cell.value is not None:
                 cell.value = None
 
-    found_items = [it for it in items if it.get("status") != "not_found"]
+    # ── 4б. Определить фактическую границу шаблонной таблицы ───────────────
+    actual_table_end = KP_DATA_MAX  # по умолчанию
+    if kp_table:
+        m_end = _re.search(r'[A-Za-z]+(\d+)$', kp_table.ref)
+        if m_end:
+            actual_table_end = int(m_end.group(1))
 
-    row = KP_DATA_START
-    for item in found_items:
-        if row > KP_DATA_MAX:
-            break
-        bm    = item.get("best_match") or {}
-        brand = bm.get("brand", "")
-        bc    = brand_consts.get(brand.upper(), {})
-        cur_rate = float(bc.get("currency_rate") or 1.0)
+    # Строка-образец стиля (последняя строка в шаблонной таблице)
+    style_src_row = actual_table_end
 
-        article      = bm.get("article", "") or item.get("article_raw", "")
-        name         = bm.get("name", "")    or item.get("name", "")
-        unit         = bm.get("unit", "шт.")
-        qty          = float(item.get("qty", 1) or 1)
-        kaz_code     = bm.get("kaznisa_code", "") or ""
-        comment      = item.get("comment", "")  or ""
-        delivery     = item.get("delivery", "") or ""
+    # ── 5. Записать строки данных (колонки A–I, без КазНИИСА/РРЦ) ──────────
+    last_data_row = KP_DATA_START - 1
+    for i, item in enumerate(items):
+        row  = KP_DATA_START + i
+        bm   = item.get("best_match") or {}
 
-        # Цена КП (из preview или вычисленная)
+        # Скопировать стиль для строк за пределами шаблонной таблицы
+        if row > actual_table_end:
+            for col in range(1, 10):
+                src_cell = kp.cell(row=style_src_row, column=col)
+                dst_cell = kp.cell(row=row, column=col)
+                dst_cell.number_format = src_cell.number_format
+                if src_cell.has_style:
+                    try:
+                        dst_cell.font      = _copy(src_cell.font)
+                        dst_cell.border    = _copy(src_cell.border)
+                        dst_cell.fill      = _copy(src_cell.fill)
+                        dst_cell.alignment = _copy(src_cell.alignment)
+                    except Exception:
+                        pass
+
+        article  = bm.get("article", "") or item.get("article_raw", "")
+        name     = bm.get("name",    "") or item.get("name_raw",    "")
+        brand    = bm.get("brand",   "")
+        unit     = bm.get("unit", "") if bm else item.get("unit", "шт.")
+        qty      = float(item.get("qty", 1) or 1)
+        comment  = item.get("comment",  "") or ""
+        delivery = item.get("delivery", "") or ""
+
         price_kp = float(item.get("_computed_kp_price") or 0)
         sum_kp   = float(item.get("_computed_kp_sum")   or 0)
-        if not price_kp and qty:
-            sum_kp = price_kp * qty
 
-        # КазНИИСА: сырая цена × курс
-        raw_kaz   = float(bm.get("kaznisa") or 0)
-        price_kaz = math.ceil(raw_kaz * cur_rate) if raw_kaz else 0
-        sum_kaz   = price_kaz * qty if price_kaz else 0
+        kp.cell(row=row, column=KP_BRAND,    value=brand    or None)
+        kp.cell(row=row, column=KP_ARTICLE,  value=article  or None)
+        kp.cell(row=row, column=KP_NAME,     value=name     or None)
+        kp.cell(row=row, column=KP_UNIT,     value=unit     or None)
+        kp.cell(row=row, column=KP_QTY,      value=qty)
+        kp.cell(row=row, column=KP_PRICE_KP, value=price_kp or None)
+        kp.cell(row=row, column=KP_SUM_KP,   value=sum_kp   or None)
+        kp.cell(row=row, column=KP_COMMENT,  value=comment  or None)
+        kp.cell(row=row, column=KP_DELIVERY, value=delivery or None)
+        last_data_row = row
 
-        # РРЦ в тенге: сырая РРЦ × курс
-        raw_rrc   = float(bm.get("rrts") or 0)
-        price_rrc = math.ceil(raw_rrc * cur_rate) if raw_rrc else 0
-        sum_rrc   = price_rrc * qty if price_rrc else 0
+    # ── 6. Перенести подвал на новую позицию ────────────────────────────────
+    new_итого_row = last_data_row + 2   # пустая строка-разделитель
+    shift         = new_итого_row - итого_row
 
-        kp.cell(row=row, column=KP_BRAND,     value=brand)
-        kp.cell(row=row, column=KP_ARTICLE,   value=article)
-        kp.cell(row=row, column=KP_NAME,      value=name)
-        kp.cell(row=row, column=KP_UNIT,      value=unit)
-        kp.cell(row=row, column=KP_QTY,       value=qty)
-        kp.cell(row=row, column=KP_PRICE_KP,  value=price_kp  or None)
-        kp.cell(row=row, column=KP_SUM_KP,    value=sum_kp    or None)
-        kp.cell(row=row, column=KP_COMMENT,   value=comment   or None)
-        kp.cell(row=row, column=KP_DELIVERY,  value=delivery  or None)
-        kp.cell(row=row, column=KP_PRICE_KAZ, value=price_kaz or None)
-        kp.cell(row=row, column=KP_SUM_KAZ,   value=sum_kaz   or None)
-        kp.cell(row=row, column=KP_KAZ_CODE,  value=kaz_code  or None)
-        kp.cell(row=row, column=KP_PRICE_RRC, value=price_rrc or None)
-        kp.cell(row=row, column=KP_SUM_RRC,   value=sum_rrc   or None)
+    for offset, row_data in sorted(footer.items()):
+        new_r = new_итого_row + offset
+        for col, val in row_data.items():
+            if isinstance(val, str) and val.startswith("=") and shift != 0:
+                val = _shift_row_refs(val, итого_row, shift)
+            kp.cell(row=new_r, column=col).value = val
 
-        row += 1
+    # ── 7. Исправить формулу SUM в строке Итого ─────────────────────────────
+    # Ищем ячейку с формулой суммы в строке new_итого_row
+    for col in range(1, 15):
+        v = kp.cell(row=new_итого_row, column=col).value
+        if isinstance(v, str) and v.startswith("="):
+            tl = v.lower()
+            if "сумм" in tl or "sum" in tl:
+                # Заменяем конечную строку диапазона на фактическую последнюю
+                fixed = _re.sub(
+                    r'([Gg])(\d+)\)',
+                    lambda m: m.group(1) + str(last_data_row) + ")",
+                    v,
+                )
+                kp.cell(row=new_итого_row, column=col).value = fixed
 
-    # Скрываем пустые строки после последней позиции (до конца таблицы)
-    for r in range(row, KP_DATA_MAX + 1):
-        kp.row_dimensions[r].hidden = True
+    # ── 8. Обновить ссылку Таблица5 (без insert_rows) ───────────────────────
+    if kp_table and last_data_row >= KP_DATA_START:
+        kp_table.ref = _re.sub(
+            r'(\$?[A-Za-z]+\$?)\d+$',
+            lambda m: m.group(1) + str(last_data_row),
+            kp_table.ref,
+        )
 
 
 def generate_excel(
@@ -329,20 +396,30 @@ def generate_excel(
     project_name: str = "",
     client_name: str = "",
     manager_name: str = "",
+    base_template_path: str = "",
 ) -> str:
     """
     Сохраняет результат в .xlsm на основе шаблона со всеми макросами.
 
-    items         — список позиций с best_match, status, qty, _user_price, …
-    constants     — ответ api.get_constants() (brands, managers, currencies)
-    products      — ответ api.get_all_products() (все товары для листа БД)
-    brand_consts  — {BRAND_UPPER: {margin, logistics, …}} (уже построен в preview_page)
+    items              — список позиций с best_match, status, qty, _user_price, …
+    constants          — ответ api.get_constants() (brands, managers, currencies)
+    products           — ответ api.get_all_products() (все товары для листа БД)
+    brand_consts       — {BRAND_UPPER: {margin, logistics, …}} (уже построен в preview_page)
+    base_template_path — путь к скачанному с сервера файлу (уже содержит БД и Const);
+                         если передан — пропускаем _fill_bd_sheet и _fill_const_sheet.
     """
     out_path = output_path
     if not out_path.lower().endswith(".xlsm"):
         out_path = os.path.splitext(out_path)[0] + ".xlsm"
 
-    tpl = _template_path()
+    # Определяем источник шаблона: серверный кэш или локальный файл
+    if base_template_path and os.path.isfile(base_template_path):
+        tpl = base_template_path
+        _skip_db_const = True
+    else:
+        tpl = _template_path()
+        _skip_db_const = False
+
     if not tpl:
         raise FileNotFoundError(
             "Шаблон WV_template.xlsm не найден. Поместите его в client/assets/ "
@@ -357,19 +434,22 @@ def generate_excel(
 
     ws = wb["WV 4.0"]
 
-    # 1. Обновляем лист БД актуальными данными с сервера
-    if products:
-        try:
-            _fill_bd_sheet(wb, products)
-        except Exception as e:
-            print(f"[Excel/БД] {e}")
+    if not _skip_db_const:
+        # 1. Обновляем лист БД актуальными данными с сервера
+        if products:
+            try:
+                _fill_bd_sheet(wb, products)
+            except Exception as e:
+                print(f"[Excel/БД] {e}")
 
-    # 2. Обновляем лист Const
-    if constants:
-        try:
-            _fill_const_sheet(wb, constants)
-        except Exception as e:
-            print(f"[Excel/Const] {e}")
+        # 2. Обновляем лист Const
+        if constants:
+            try:
+                _fill_const_sheet(wb, constants)
+            except Exception as e:
+                print(f"[Excel/Const] {e}")
+    else:
+        print("[Excel] Using server-side base template — skipping БД/Const fill")
 
     # 3. Заполняем лист WV 4.0 (только вводные колонки)
     _clear_input_rows(ws, start_row=2, end_row=max(465, 2 + len(items)))
@@ -384,6 +464,14 @@ def generate_excel(
         ws.cell(row=row, column=WV_BRAND,   value=brand)
         ws.cell(row=row, column=WV_ARTICLE, value=article)
         ws.cell(row=row, column=WV_QTY,     value=qty)
+
+        # Если позиция не найдена в БД или нет артикула — формула VLOOKUP в столбце C
+        # вернёт пустоту. Записываем наименование из PDF напрямую как fallback.
+        db_name = bm.get("name", "")
+        if not db_name:
+            pdf_name = item.get("name_raw", "")
+            if pdf_name:
+                ws.cell(row=row, column=WV_NAME, value=pdf_name)
 
         if item.get("_user_edited") and item.get("_user_price") is not None:
             try:
@@ -404,8 +492,19 @@ def generate_excel(
             ws.cell(row=row, column=WV_DELIVERY, value=delivery)
 
     # 4. Заполняем шапку и данные листа КП
-    _fill_kp_header(wb, manager_name, project_name, client_name)
-    _fill_kp_data(wb, items, brand_consts or {})
+    try:
+        _fill_kp_header(wb,
+                        manager=manager_name,
+                        project=project_name,
+                        client=client_name)
+    except Exception as e:
+        print(f"[Excel/КП header] {e}")
 
+    try:
+        _fill_kp_data(wb, items, brand_consts or {})
+    except Exception as e:
+        print(f"[Excel/КП data] {e}")
+
+    # 5. Сохраняем файл
     wb.save(out_path)
     return out_path

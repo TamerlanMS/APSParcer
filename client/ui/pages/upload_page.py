@@ -1,12 +1,11 @@
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import threading, os
 
 from assets.theme import *
 from locales.strings import t
 from services.api_service import ApiService
 
-# Опциональный DnD — на корневом окне MainApp вызывается TkinterDnD._require()
 try:
     from tkinterdnd2 import DND_FILES
 except Exception:
@@ -16,35 +15,53 @@ except Exception:
 class UploadPage(ctk.CTkFrame):
     def __init__(self, parent, api: ApiService, app):
         super().__init__(parent, fg_color=BG_MAIN, corner_radius=0)
-        self.api  = api
-        self.app  = app
+        self.api   = api
+        self.app   = app
         self._path = None
-        self._worker = None
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(0, weight=1)
         self._build()
 
+    # ── Main layout: tabview ────────────────────────────────────────────────
+
     def _build(self):
+        self.tabview = ctk.CTkTabview(
+            self,
+            fg_color=BG_MAIN, corner_radius=0,
+            segmented_button_fg_color=NAVY,
+            segmented_button_selected_color=NAVY_LIGHT,
+            segmented_button_unselected_color=BLUE_MID,
+            segmented_button_selected_hover_color=BLUE_LIGHT,
+            text_color="white", text_color_disabled=TEXT_NAV,
+        )
+        self.tabview.grid(row=0, column=0, sticky="nsew")
+        self.tabview.add(t("upload_tab_upload"))
+        self.tabview.add(t("upload_tab_history"))
+        self._build_upload_tab()
+        self._build_history_tab()
+
+    # ── Upload tab ──────────────────────────────────────────────────────────
+
+    def _build_upload_tab(self):
+        tab = self.tabview.tab(t("upload_tab_upload"))
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
         pad = PAD_XL
 
-        # Заголовок
-        self.title_lbl = ctk.CTkLabel(self, text=t("upload_title"),
+        self.title_lbl = ctk.CTkLabel(tab, text=t("upload_title"),
                                        font=FONT_TITLE, text_color=NAVY, anchor="w")
         self.title_lbl.grid(row=0, column=0, sticky="w", padx=pad, pady=(pad, 4))
 
-        self.desc_lbl = ctk.CTkLabel(self, text=t("upload_desc"),
+        self.desc_lbl = ctk.CTkLabel(tab, text=t("upload_desc"),
                                       font=FONT_NORMAL, text_color=TEXT_SECONDARY,
                                       anchor="w", wraplength=700)
         self.desc_lbl.grid(row=1, column=0, sticky="w", padx=pad, pady=(0, PAD_MD))
 
-        # Drop zone
         self.drop_zone = ctk.CTkFrame(
-            self, fg_color=BG_CARD,
-            corner_radius=RADIUS_LG,
-            border_width=2, border_color="#AEB6BF"
+            tab, fg_color=BG_CARD,
+            corner_radius=RADIUS_LG, border_width=2, border_color="#AEB6BF"
         )
-        self.drop_zone.grid(row=2, column=0, sticky="ew",
-                            padx=pad, pady=(0, PAD_MD))
+        self.drop_zone.grid(row=2, column=0, sticky="ew", padx=pad, pady=(0, PAD_MD))
         self.drop_zone.grid_columnconfigure(0, weight=1)
 
         self.drop_icon = ctk.CTkLabel(self.drop_zone, text="📄",
@@ -59,12 +76,10 @@ class UploadPage(ctk.CTkFrame):
                                       font=FONT_NORMAL, text_color=TEXT_SECONDARY)
         self.drop_sub.grid(row=2, pady=(4, 32))
 
-        # Включаем drag-and-drop через tkinterdnd2 (если доступен)
         self._bind_dnd()
 
-        # Кнопка выбора файла
         self.browse_btn = ctk.CTkButton(
-            self, text=t("upload_browse"),
+            tab, text=t("upload_browse"),
             font=(*FONT_NORMAL[:2], "bold"),
             fg_color=NAVY_LIGHT, hover_color=NAVY,
             height=44, corner_radius=RADIUS_MD, width=220,
@@ -72,27 +87,24 @@ class UploadPage(ctk.CTkFrame):
         )
         self.browse_btn.grid(row=3, pady=4)
 
-        # Имя файла
-        self.file_lbl = ctk.CTkLabel(self, text=t("upload_no_file"),
+        self.file_lbl = ctk.CTkLabel(tab, text=t("upload_no_file"),
                                       font=FONT_NORMAL, text_color=TEXT_SECONDARY)
         self.file_lbl.grid(row=4, pady=(0, 8))
 
-        # Прогресс-бар
-        self.progress = ctk.CTkProgressBar(self, width=500,
+        self.progress = ctk.CTkProgressBar(tab, width=500,
                                             progress_color=NAVY_LIGHT,
                                             fg_color="#D5D8DC")
         self.progress.set(0)
         self.progress.grid(row=5, pady=(0, 4))
         self.progress.grid_remove()
 
-        self.progress_lbl = ctk.CTkLabel(self, text="", font=FONT_SMALL,
+        self.progress_lbl = ctk.CTkLabel(tab, text="", font=FONT_SMALL,
                                           text_color=TEXT_SECONDARY)
         self.progress_lbl.grid(row=6)
         self.progress_lbl.grid_remove()
 
-        # Кнопка отправки
         self.send_btn = ctk.CTkButton(
-            self, text=t("upload_send"),
+            tab, text=t("upload_send"),
             font=(*FONT_HEADING[:2], "bold"),
             fg_color=NAVY, hover_color=NAVY_DARK,
             height=52, corner_radius=RADIUS_MD, width=320,
@@ -101,9 +113,109 @@ class UploadPage(ctk.CTkFrame):
         )
         self.send_btn.grid(row=7, pady=(12, pad))
 
+    # ── History tab ─────────────────────────────────────────────────────────
+
+    def _build_history_tab(self):
+        tab = self.tabview.tab(t("upload_tab_history"))
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        # Top bar
+        top = ctk.CTkFrame(tab, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=PAD_MD, pady=(PAD_MD, 6))
+        top.grid_columnconfigure(0, weight=1)
+
+        self.hist_title_lbl = ctk.CTkLabel(
+            top, text=t("upload_tab_history"),
+            font=FONT_TITLE, text_color=NAVY, anchor="w"
+        )
+        self.hist_title_lbl.grid(row=0, column=0, sticky="w")
+
+        self.hist_refresh_btn = ctk.CTkButton(
+            top, text=t("upload_hist_refresh"),
+            font=FONT_SMALL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=32, width=140, corner_radius=RADIUS_SM,
+            command=self._load_history,
+        )
+        self.hist_refresh_btn.grid(row=0, column=1)
+
+        # Treeview
+        style = ttk.Style()
+        style.configure("Hist.Treeview",
+                        rowheight=30, font=("Calibri", 12),
+                        background=BG_CARD, fieldbackground=BG_CARD)
+        style.configure("Hist.Treeview.Heading",
+                        background=NAVY, foreground="white",
+                        font=("Calibri", 12, "bold"))
+        style.map("Hist.Treeview", background=[("selected", BLUE_MID)])
+
+        cols = ["who", "file", "project", "date"]
+        self.hist_tree = ttk.Treeview(tab, columns=cols, show="headings",
+                                       style="Hist.Treeview")
+
+        col_widths = {"who": 180, "file": 220, "project": 420, "date": 150}
+        col_keys   = {"who": "upload_hist_who", "file": "upload_hist_file",
+                      "project": "upload_hist_project", "date": "upload_hist_date"}
+        for col in cols:
+            self.hist_tree.heading(col, text=t(col_keys[col]))
+            self.hist_tree.column(col, width=col_widths[col], minwidth=80)
+
+        vsb = ttk.Scrollbar(tab, orient="vertical", command=self.hist_tree.yview)
+        hsb = ttk.Scrollbar(tab, orient="horizontal", command=self.hist_tree.xview)
+        self.hist_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.hist_tree.grid(row=1, column=0, sticky="nsew",
+                             padx=(PAD_MD, 0), pady=(0, 0))
+        vsb.grid(row=1, column=1, sticky="ns")
+        hsb.grid(row=2, column=0, sticky="ew", padx=(PAD_MD, 0))
+
+        self.hist_status_lbl = ctk.CTkLabel(
+            tab, text="", font=FONT_SMALL, text_color=TEXT_SECONDARY
+        )
+        self.hist_status_lbl.grid(row=3, column=0, pady=(4, PAD_SM))
+
+        # Load on first show
+        self.after(500, self._load_history)
+
+    def _load_history(self):
+        self.hist_refresh_btn.configure(state="disabled")
+        self.hist_status_lbl.configure(text="...")
+
+        def _worker():
+            try:
+                rows = self.api.get_pdf_history()
+                self.after(0, lambda: self._populate_history(rows))
+            except Exception as e:
+                self.after(0, lambda: self._history_error(str(e)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _populate_history(self, rows: list):
+        self.hist_tree.delete(*self.hist_tree.get_children())
+        for r in rows:
+            self.hist_tree.insert("", "end", values=(
+                r.get("full_name", "—"),
+                r.get("filename",  "—"),
+                r.get("project_name", "—"),
+                r.get("uploaded_at", "—"),
+            ))
+        count = len(rows)
+        self.hist_status_lbl.configure(
+            text=f"{count} " + ("записей" if count != 1 else "запись"),
+            text_color=TEXT_SECONDARY
+        )
+        self.hist_refresh_btn.configure(state="normal")
+
+    def _history_error(self, error: str):
+        self.hist_status_lbl.configure(
+            text=t("upload_hist_error") + f": {error}", text_color="#E74C3C"
+        )
+        self.hist_refresh_btn.configure(state="normal")
+
+    # ── DnD / browse ────────────────────────────────────────────────────────
+
     def _bind_dnd(self):
-        """Включаем drag-and-drop на drop_zone и всех её детях.
-        Корневое окно MainApp уже инициализировало TkinterDnD._require()."""
         targets = [self.drop_zone, self.drop_icon, self.drop_title, self.drop_sub]
         for w in targets:
             try:
@@ -111,13 +223,10 @@ class UploadPage(ctk.CTkFrame):
                 w.dnd_bind("<<Drop>>", self._on_drop)
                 w.configure(cursor="hand2")
             except Exception as e:
-                # Логируем в консоль (видно если запускать .exe с console=True)
-                print(f"[DnD] не удалось зарегистрировать {w}: {e}")
+                print(f"[DnD] {w}: {e}")
 
     def _on_drop(self, event):
-        # event.data: список путей в фигурных скобках, например "{C:/path/file.pdf}"
         raw = (event.data or "").strip()
-        # Берём только первый файл если кинули несколько
         if raw.startswith("{"):
             end = raw.find("}")
             path = raw[1:end] if end > 0 else raw.strip("{}")
@@ -130,7 +239,6 @@ class UploadPage(ctk.CTkFrame):
 
     def _browse(self):
         path = filedialog.askopenfilename(
-            title=t("upload_browse"),
             filetypes=[("PDF", "*.pdf"), ("All", "*.*")]
         )
         if path:
@@ -138,13 +246,12 @@ class UploadPage(ctk.CTkFrame):
 
     def _set_file(self, path: str):
         self._path = path
-        name  = os.path.basename(path)
-        size  = os.path.getsize(path) / 1024
-        self.file_lbl.configure(
-            text=f"✅  {name}  ({size:.0f} КБ)", text_color=NAVY_LIGHT
-        )
-        self.send_btn.configure(state="normal")
+        name = os.path.basename(path)
+        self.file_lbl.configure(text=f"📄  {name}", text_color=NAVY)
         self.drop_zone.configure(border_color=NAVY_LIGHT, fg_color=BLUE_PALE)
+        self.send_btn.configure(state="normal")
+
+    # ── Send ────────────────────────────────────────────────────────────────
 
     def _send(self):
         if not self._path:
@@ -185,6 +292,8 @@ class UploadPage(ctk.CTkFrame):
         self.send_btn.configure(state="normal")
         self.browse_btn.configure(state="normal")
         self.app.on_result_ready(result)
+        # Refresh history in background so new entry appears
+        self.after(1000, self._load_history)
 
     def _on_error(self, error: str):
         self.progress.grid_remove()
@@ -193,8 +302,9 @@ class UploadPage(ctk.CTkFrame):
         self.browse_btn.configure(state="normal")
         messagebox.showerror(t("upload_error_title"), t("upload_error_msg") + error)
 
+    # ── Reset / lang ─────────────────────────────────────────────────────────
+
     def reset(self):
-        """Сброс состояния страницы — вызывается из preview._reset()."""
         self._path = None
         self.send_btn.configure(state="disabled")
         self.file_lbl.configure(text=t("upload_no_file"), text_color=TEXT_SECONDARY)
@@ -210,5 +320,12 @@ class UploadPage(ctk.CTkFrame):
         self.drop_sub.configure(text=t("upload_drop_sub"))
         self.browse_btn.configure(text=t("upload_browse"))
         self.send_btn.configure(text=t("upload_send"))
+        self.hist_title_lbl.configure(text=t("upload_tab_history"))
+        self.hist_refresh_btn.configure(text=t("upload_hist_refresh"))
+        for col, key in [("who",     "upload_hist_who"),
+                         ("file",    "upload_hist_file"),
+                         ("project", "upload_hist_project"),
+                         ("date",    "upload_hist_date")]:
+            self.hist_tree.heading(col, text=t(key))
         if not self._path:
             self.file_lbl.configure(text=t("upload_no_file"))

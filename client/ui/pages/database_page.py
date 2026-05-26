@@ -13,7 +13,7 @@ except Exception:
 
 
 class DropCard(ctk.CTkFrame):
-    """Карточка drag-and-drop для файлов"""
+    """Drag-and-drop card for xlsx files."""
     def __init__(self, parent, label_key: str, **kwargs):
         super().__init__(parent, fg_color=BG_CARD, corner_radius=RADIUS_LG,
                          border_width=2, border_color="#AEB6BF", **kwargs)
@@ -23,7 +23,7 @@ class DropCard(ctk.CTkFrame):
         self.lbl = ctk.CTkLabel(self,
                                  text=f"📂  {t(label_key)}\n\nПеретащите .xlsx или нажмите для выбора",
                                  font=FONT_NORMAL, text_color=TEXT_SECONDARY,
-                                 wraplength=380)
+                                 wraplength=500)
         self.lbl.pack(pady=(28, 8))
 
         self.status_lbl = ctk.CTkLabel(self, text="", font=FONT_SMALL,
@@ -77,11 +77,25 @@ class DatabasePage(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self._build()
+        self._apply_role_visibility()
+
+    def _is_admin(self) -> bool:
+        try:
+            return self.app.config.user_role in ("superadmin", "administrator", "admin")
+        except Exception:
+            return False
+
+    def _apply_role_visibility(self):
+        """Скрывает поле пароля для администраторов."""
+        if self._is_admin():
+            self._pwd_frame.grid_remove()
+        else:
+            self._pwd_frame.grid()
 
     def _build(self):
         pad = PAD_MD
 
-        # Заголовок + счётчик
+        # ── Header ────────────────────────────────────────────────────────────
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", padx=pad, pady=(PAD_MD, 8))
         top.grid_columnconfigure(1, weight=1)
@@ -102,26 +116,23 @@ class DatabasePage(ctk.CTkFrame):
         )
         self.refresh_btn.grid(row=0, column=2)
 
-        # Вкладки
-        self.tabview = ctk.CTkTabview(self, fg_color=BG_CARD,
-                                       corner_radius=RADIUS_MD,
-                                       segmented_button_fg_color=NAVY,
-                                       segmented_button_selected_color=NAVY_LIGHT,
-                                       segmented_button_unselected_color=BLUE_MID,
-                                       segmented_button_selected_hover_color=BLUE_LIGHT,
-                                       text_color="white",
-                                       text_color_disabled=TEXT_NAV)
+        # ── Tabview (Import + Logs) ───────────────────────────────────────────
+        self.tabview = ctk.CTkTabview(
+            self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+            segmented_button_fg_color=NAVY,
+            segmented_button_selected_color=NAVY_LIGHT,
+            segmented_button_unselected_color=BLUE_MID,
+            segmented_button_selected_hover_color=BLUE_LIGHT,
+            text_color="white", text_color_disabled=TEXT_NAV,
+        )
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=pad, pady=(0, pad))
-
         self.tabview.add(t("db_tab_import"))
-        self.tabview.add(t("db_tab_const"))
         self.tabview.add(t("db_tab_logs"))
 
         self._build_import_tab()
-        self._build_const_tab()
         self._build_logs_tab()
 
-        # Статус прогресса (общий)
+        # ── Progress / status (shared) ────────────────────────────────────────
         self.progress = ctk.CTkProgressBar(self, progress_color=NAVY_LIGHT,
                                             fg_color="#D5D8DC")
         self.progress.set(0)
@@ -138,63 +149,38 @@ class DatabasePage(ctk.CTkFrame):
         tab = self.tabview.tab(t("db_tab_import"))
         tab.grid_columnconfigure(0, weight=1)
 
-        self.db_desc = ctk.CTkLabel(tab, text=t("db_import_desc"),
-                                     font=FONT_NORMAL, text_color=TEXT_SECONDARY,
-                                     wraplength=600, anchor="w")
+        self.db_desc = ctk.CTkLabel(
+            tab, text=t("db_import_both_desc"),
+            font=FONT_NORMAL, text_color=TEXT_SECONDARY,
+            wraplength=700, anchor="w",
+        )
         self.db_desc.grid(row=0, column=0, sticky="w", padx=16, pady=(16, 12))
 
+        # Single drop zone for both DB and Constants
         self.db_drop = DropCard(tab, "db_drop_label")
         self.db_drop.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
 
-        self._build_password_row(tab, "db", row=2)
+        # Password row (скрыт для администраторов)
+        self._pwd_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        self._pwd_frame.grid(row=2, column=0, padx=16, sticky="ew")
+        self.db_pwd_lbl = ctk.CTkLabel(self._pwd_frame, text=t("db_password"),
+                                        font=FONT_NORMAL, text_color=NAVY, anchor="w")
+        self.db_pwd_lbl.pack(side="left")
+        self.db_pwd_entry = ctk.CTkEntry(
+            self._pwd_frame, placeholder_text=t("db_password_ph"),
+            show="*", width=260, height=36, font=FONT_NORMAL,
+        )
+        self.db_pwd_entry.pack(side="left", padx=(12, 0))
 
+        # Single combined import button
         self.db_btn = ctk.CTkButton(
-            tab, text=t("db_import_btn"),
+            tab, text=t("db_import_both_btn"),
             font=(*FONT_NORMAL[:2], "bold"),
             fg_color=NAVY, hover_color=NAVY_DARK,
             height=44, corner_radius=RADIUS_MD,
-            command=self._import_db
+            command=self._import_both,
         )
-        self.db_btn.grid(row=3, column=0, padx=16, pady=(8, 0), sticky="ew")
-
-    def _build_const_tab(self):
-        tab = self.tabview.tab(t("db_tab_const"))
-        tab.grid_columnconfigure(0, weight=1)
-
-        self.const_desc = ctk.CTkLabel(tab, text=t("db_const_desc"),
-                                        font=FONT_NORMAL, text_color=TEXT_SECONDARY,
-                                        wraplength=600, anchor="w")
-        self.const_desc.grid(row=0, column=0, sticky="w", padx=16, pady=(16, 12))
-
-        self.const_drop = DropCard(tab, "db_const_label")
-        self.const_drop.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
-
-        self._build_password_row(tab, "const", row=2)
-
-        self.const_btn = ctk.CTkButton(
-            tab, text=t("db_const_btn"),
-            font=(*FONT_NORMAL[:2], "bold"),
-            fg_color=NAVY, hover_color=NAVY_DARK,
-            height=44, corner_radius=RADIUS_MD,
-            command=self._import_const
-        )
-        self.const_btn.grid(row=3, column=0, padx=16, pady=(8, 0), sticky="ew")
-
-    def _build_password_row(self, parent, prefix: str, row: int):
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.grid(row=row, column=0, padx=16, sticky="ew")
-        lbl_attr = f"{prefix}_pwd_lbl"
-        ent_attr = f"{prefix}_pwd_entry"
-
-        lbl = ctk.CTkLabel(frame, text=t("db_password"), font=FONT_NORMAL,
-                            text_color=NAVY, anchor="w")
-        lbl.pack(side="left")
-        setattr(self, lbl_attr, lbl)
-
-        entry = ctk.CTkEntry(frame, placeholder_text=t("db_password_ph"),
-                              show="•", width=260, height=36, font=FONT_NORMAL)
-        entry.pack(side="left", padx=(12, 0))
-        setattr(self, ent_attr, entry)
+        self.db_btn.grid(row=3, column=0, padx=16, pady=(16, 8), sticky="ew")
 
     def _build_logs_tab(self):
         tab = self.tabview.tab(t("db_tab_logs"))
@@ -225,11 +211,12 @@ class DatabasePage(ctk.CTkFrame):
             tab, text=t("db_load_logs"), font=FONT_SMALL,
             fg_color=NAVY_LIGHT, hover_color=NAVY,
             height=32, width=180, corner_radius=RADIUS_SM,
-            command=self._load_logs
+            command=self._load_logs,
         )
         self.load_logs_btn.grid(row=1, column=0, pady=(0, 12))
 
-    # ── Логика ───────────────────────────────────────────────────────────────
+    # ── Logic ─────────────────────────────────────────────────────────────────
+
     def _refresh_count(self):
         def _worker():
             try:
@@ -240,72 +227,76 @@ class DatabasePage(ctk.CTkFrame):
                 self.after(0, lambda: self.count_lbl.configure(text=f"Ошибка: {e}"))
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _get_password(self, prefix: str) -> str:
-        return getattr(self, f"{prefix}_pwd_entry").get().strip()
-
-    def _import_db(self):
+    def _import_both(self):
         path = self.db_drop.get_path()
         if not path:
             messagebox.showwarning("", t("db_no_file"))
             return
-        pwd = self._get_password("db")
-        if not pwd:
-            messagebox.showwarning("", t("db_password"))
-            return
-        self._run_import(self.api.import_products, path, pwd)
+        if self._is_admin():
+            pwd = ""
+        else:
+            pwd = self.db_pwd_entry.get().strip()
+            if not pwd:
+                messagebox.showwarning("", t("db_password"))
+                return
+        self._run_import_both(path, pwd)
 
-    def _import_const(self):
-        path = self.const_drop.get_path()
-        if not path:
-            messagebox.showwarning("", t("db_no_file"))
-            return
-        pwd = self._get_password("const")
-        if not pwd:
-            messagebox.showwarning("", t("db_password"))
-            return
-        self._run_import(self.api.import_constants, path, pwd)
+    def _run_import_both(self, path: str, pwd: str):
+        self._anim_token = getattr(self, "_anim_token", 0) + 1
+        token = self._anim_token
 
-    def _run_import(self, func, path: str, pwd: str):
         self.progress.grid()
         self.progress.set(0)
-        self._animate(0)
+        self._animate(0, token)
         self.status_lbl.configure(text=t("db_running"), text_color=TEXT_SECONDARY)
         self.db_btn.configure(state="disabled")
-        self.const_btn.configure(state="disabled")
 
         def _worker():
+            results = {}
+            errors  = []
             try:
-                result = func(path, pwd)
-                self.after(0, lambda: self._done(result))
+                results["db"] = self.api.import_products(path, pwd)
             except Exception as e:
-                self.after(0, lambda: self._error(str(e)))
+                errors.append(f"БД: {e}")
+            try:
+                results["const"] = self.api.import_constants(path, pwd)
+            except Exception as e:
+                errors.append(f"Константы: {e}")
+
+            self.after(0, lambda: self._done_both(results, errors))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _animate(self, val):
+    def _animate(self, val, token: int):
+        if token != getattr(self, "_anim_token", 0):
+            return
         if val < 0.85:
-            self.progress.set(val + 0.015)
-            self.after(100, lambda: self._animate(val + 0.015))
+            nxt = val + 0.015
+            self.progress.set(nxt)
+            self.after(100, lambda: self._animate(nxt, token))
 
-    def _done(self, result: dict):
+    def _done_both(self, results: dict, errors: list):
+        self._anim_token = getattr(self, "_anim_token", 0) + 1
         self.progress.set(1.0)
-        added   = result.get("added",   result.get("brands_updated", 0))
-        updated = result.get("updated", 0)
-        self.status_lbl.configure(
-            text=f"✅  {t('db_import_ok', added=added, updated=updated).split(chr(10))[0]}",
-            text_color="#27AE60"
-        )
         self.db_btn.configure(state="normal")
-        self.const_btn.configure(state="normal")
         self._refresh_count()
-        messagebox.showinfo("OK", t("db_import_ok", added=added, updated=updated))
 
-    def _error(self, error: str):
-        self.progress.grid_remove()
-        self.status_lbl.configure(text=f"❌  {error}", text_color="#E74C3C")
-        self.db_btn.configure(state="normal")
-        self.const_btn.configure(state="normal")
-        messagebox.showerror("", t("db_import_error", error=error))
+        if errors:
+            self.status_lbl.configure(
+                text="❌  " + "  |  ".join(errors), text_color="#E74C3C")
+            messagebox.showerror("", "\n".join(errors))
+        else:
+            db_r    = results.get("db", {})
+            const_r = results.get("const", {})
+            added   = db_r.get("added", 0)
+            updated = db_r.get("updated", 0)
+            brands  = const_r.get("brands_updated", 0)
+            msg = t("db_import_ok", added=added, updated=updated)
+            if brands:
+                msg += f"\nКонстанты: обновлено брендов — {brands}"
+            self.status_lbl.configure(
+                text=f"✅  {msg.split(chr(10))[0]}", text_color="#27AE60")
+            messagebox.showinfo("OK", msg)
 
     def _load_logs(self):
         try:
@@ -314,11 +305,11 @@ class DatabasePage(ctk.CTkFrame):
             for log in logs:
                 status = log.get("status", "")
                 vals = (
-                    log.get("filename",""),
+                    log.get("filename", ""),
                     log.get("rows_added", 0),
                     log.get("rows_updated", 0),
                     "✅ ok" if status == "success" else f"❌ {status}",
-                    str(log.get("created_at",""))[:19]
+                    str(log.get("created_at", ""))[:19],
                 )
                 tag = "ok" if status == "success" else "err"
                 self.log_tree.insert("", "end", values=vals, tags=(tag,))
@@ -329,22 +320,11 @@ class DatabasePage(ctk.CTkFrame):
 
     def refresh_lang(self):
         self.title_lbl.configure(text=t("db_title"))
+        self.count_lbl.configure(text=t("db_count", count="..."))
         self.refresh_btn.configure(text=t("db_refresh"))
-        self.db_desc.configure(text=t("db_import_desc"))
-        self.const_desc.configure(text=t("db_const_desc"))
-        self.db_btn.configure(text=t("db_import_btn"))
-        self.const_btn.configure(text=t("db_const_btn"))
+        self.db_desc.configure(text=t("db_import_both_desc"))
+        self.db_btn.configure(text=t("db_import_both_btn"))
         self.db_drop.refresh_lang()
-        self.const_drop.refresh_lang()
         self.load_logs_btn.configure(text=t("db_load_logs"))
         self.db_pwd_lbl.configure(text=t("db_password"))
-        self.const_pwd_lbl.configure(text=t("db_password"))
-        count_text = self.count_lbl.cget("text")
-        self.count_lbl.configure(text=t("db_count", count=count_text.split(":")[-1].strip()))
-        self.db_drop.refresh_lang()
-        self.const_drop.refresh_lang()
-        self.load_logs_btn.configure(text=t("db_load_logs"))
-        self.db_pwd_lbl.configure(text=t("db_password"))
-        self.const_pwd_lbl.configure(text=t("db_password"))
-        count_text = self.count_lbl.cget("text")
-        self.count_lbl.configure(text=t("db_count", count=count_text.split(":")[-1].strip()))
+        self._apply_role_visibility()

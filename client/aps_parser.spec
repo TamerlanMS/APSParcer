@@ -71,6 +71,14 @@ a = Analysis(
         "idna",
         "urllib3",
         "certifi",
+
+        # Pillow (для логотипа)
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
+        "PIL.ImageFont",
+        "PIL.PngImagePlugin",
+        "PIL.IcoImagePlugin",
     ],
     hookspath=[],
     hooksconfig={},
@@ -91,7 +99,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="APSParser",
+    name="GQ-Builder 0.1",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -104,5 +112,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="assets/icon.ico",
+    icon="assets/icon.ico",
 )

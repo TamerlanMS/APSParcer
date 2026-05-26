@@ -188,7 +188,6 @@ class SaveKPDialog(ctk.CTkToplevel):
 class PreviewPage(ctk.CTkFrame):
     def __init__(self, parent, api: ApiService, app):
         super().__init__(parent, fg_color=BG_MAIN, corner_radius=0)
-        self._reset = None
         self.api     = api
         self.app     = app
         self.items   = []
@@ -245,7 +244,7 @@ class PreviewPage(ctk.CTkFrame):
         self.reset_btn = ctk.CTkButton(
             top, text=t("preview_reset"), font=FONT_SMALL,
             fg_color="#AEB6BF", hover_color="#7F8C8D", text_color="white",
-            height=36, width=110, corner_radius=RADIUS_SM, command=self._reset
+            height=36, width=110, corner_radius=RADIUS_SM, command=self._reset_session
         )
         self.reset_btn.grid(row=0, column=4, padx=(8, 4))
 
@@ -385,8 +384,28 @@ class PreviewPage(ctk.CTkFrame):
         self._no_data_lbl.grid(row=2, column=0)
         self._no_data_lbl.lower()
 
+    # ── Сброс сессии ─────────────────────────────────────────────────────────
+    def _reset_session(self):
+        """Сброс страницы к начальному состоянию — возврат на вкладку загрузки."""
+        self.items = []
+        self.tree.delete(*self.tree.get_children())
+        self._filter_mode = "all"
+        self.search_var.set("")
+        for k, btn in self.filter_btns.items():
+            btn.configure(fg_color=NAVY_LIGHT if k == "all" else "#AEB6BF")
+        self.save_btn.configure(state="disabled")
+        self.stat_lbl.configure(text="")
+        self._no_data_lbl.lift()
+        self.app._switch_tab(0)
+
     # ── Данные ───────────────────────────────────────────────────────────────
     def load_data(self, result: dict):
+        # Сбрасываем фильтр и поиск чтобы не было «призраков» из предыдущего файла
+        self._filter_mode = "all"
+        self.search_var.set("")
+        for k, btn in self.filter_btns.items():
+            btn.configure(fg_color=NAVY_LIGHT if k == "all" else "#AEB6BF")
+
         self.items = result.get("items", [])
         # Фиксируем базовые значения и сбрасываем флаги
         for it in self.items:
@@ -506,6 +525,34 @@ class PreviewPage(ctk.CTkFrame):
         data = items if items is not None else self.items
         for item in data:
             self._insert_row(item)
+        self._adjust_row_height()
+
+    def _adjust_row_height(self):
+        """Set rowheight to fit the tallest cell value across visible rows."""
+        max_lines = 1
+        for iid in self.tree.get_children():
+            for val in self.tree.item(iid, "values"):
+                lines = str(val).count("\n") + 1
+                if lines > max_lines:
+                    max_lines = lines
+        line_px = 18   # pixels per text line at Calibri 12
+        padding = 8    # top+bottom cell padding
+        new_h   = max(28, max_lines * line_px + padding)
+        ttk.Style().configure("APS.Treeview", rowheight=new_h)
+        self._adjust_row_height()
+
+    def _adjust_row_height(self):
+        """Set rowheight to fit the tallest cell value across all visible rows."""
+        max_lines = 1
+        for iid in self.tree.get_children():
+            for val in self.tree.item(iid, "values"):
+                lines = str(val).count("\n") + 1
+                if lines > max_lines:
+                    max_lines = lines
+        line_px  = 18   # pixels per text line at Calibri 12
+        padding  = 8    # top+bottom cell padding
+        new_h    = max(28, max_lines * line_px + padding)
+        ttk.Style().configure("APS.Treeview", rowheight=new_h)
 
     def _insert_row(self, item: dict) -> str:
         bm     = item.get("best_match") or {}
@@ -526,8 +573,8 @@ class PreviewPage(ctk.CTkFrame):
         seb, seb_sum, kp, kp_sum = self._compute_kp(item)
         qty = item.get("qty", 1)
         brand = bm.get("brand", "")
-        article = bm.get("article", "") or item.get("article_raw", "")
-        name    = (bm.get("name", "") or item.get("name", ""))
+        article = (bm.get("article", "") or item.get("article_raw", "")).replace("\n", " ").strip()
+        name    = (bm.get("name",    "") or item.get("name_raw", "")).replace("\n", " ").strip()
         unit    = bm.get("unit", "шт.") if bm else "шт."
         mult    = bm.get("multiplicity") or ""
         kaznisa_code = bm.get("kaznisa_code") or ""
@@ -621,7 +668,7 @@ class PreviewPage(ctk.CTkFrame):
                 continue
             if self._filter_mode == "nf" and status != "not_found":
                 continue
-            if q and q not in (item.get("article_raw","") + item.get("name","")).lower():
+            if q and q not in (item.get("article_raw","") + item.get("name_raw","")).lower():
                 continue
             result.append(item)
         self._populate(result)
@@ -833,22 +880,48 @@ class PreviewPage(ctk.CTkFrame):
                 it["_computed_kp_price"] = kp
                 it["_computed_kp_sum"]   = kp_sum
 
-            # Загружаем актуальные данные БД с сервера (для листов БД и Const)
-            products = []
+            # Пробуем скачать готовый шаблон (БД + Const) с сервера
+            import tempfile
+            base_tpl = ""
             try:
-                products = self.api.get_all_products()
-            except Exception as e_db:
-                print(f"[Save] get_all_products: {e_db}")
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsm")
+                os.close(tmp_fd)
+                if self.api.download_base_template(tmp_path):
+                    base_tpl = tmp_path
+                    print("[Save] Using server base template")
+                else:
+                    os.unlink(tmp_path)
+                    print("[Save] Server base template not ready, falling back")
+            except Exception as e_tpl:
+                print(f"[Save] base template download: {e_tpl}")
+                if 'tmp_path' in dir() and os.path.exists(tmp_path):
+                    try: os.unlink(tmp_path)
+                    except Exception: pass
 
-            out = generate_excel(
-                self.items, path,
-                constants=self.constants,
-                products=products,
-                brand_consts=self.brand_consts,
-                project_name=meta.get("project", ""),
-                client_name=meta.get("client", ""),
-                manager_name=meta.get("manager", ""),
-            )
+            # Если шаблон не скачан — грузим продукты сами (старый путь)
+            products = []
+            if not base_tpl:
+                try:
+                    products = self.api.get_all_products()
+                except Exception as e_db:
+                    print(f"[Save] get_all_products: {e_db}")
+
+            try:
+                out = generate_excel(
+                    self.items, path,
+                    constants=self.constants,
+                    products=products,
+                    brand_consts=self.brand_consts,
+                    project_name=meta.get("project", ""),
+                    client_name=meta.get("client", ""),
+                    manager_name=meta.get("manager", ""),
+                    base_template_path=base_tpl,
+                )
+            finally:
+                # Удаляем временный файл шаблона в любом случае
+                if base_tpl and os.path.exists(base_tpl):
+                    try: os.unlink(base_tpl)
+                    except Exception: pass
 
             # Предлагаем открыть файл
             if messagebox.askyesno(

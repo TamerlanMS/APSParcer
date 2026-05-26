@@ -7,14 +7,21 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://aps_user:aps_password@postgres:5432/aps_db"
 
-    # Security
-    SECRET_KEY: str = secrets.token_hex(32)
-    DEBUG: bool = False
+    # JWT
+    JWT_SECRET_KEY: str = secrets.token_hex(32)
+    JWT_ALGORITHM: str  = "HS256"
+    JWT_EXPIRE_HOURS: int = 12      # Время жизни токена (часов)
 
-    # Admin password for DB updates (hashed with bcrypt)
+    # Legacy admin password for DB import (bcrypt hash, backward compat)
     ADMIN_PASSWORD_HASH: str = "$2b$12$placeholder_replace_in_env"
 
-    # Valid API keys for desktop client (10 keys)
+    # Superadmin seed — создаётся при первом запуске если нет пользователей
+    SUPERADMIN_USERNAME: str = "admin"
+    SUPERADMIN_PASSWORD: str = "change_me_on_first_login"
+
+    DEBUG: bool = False
+
+    # Valid API keys for desktop client (backward compat)
     API_KEYS: List[str] = [
         "APS-K1-X7mN2pQrL9vW4bYcJ6sT8uE3fH5kZ",
         "APS-K2-R4nD8wA1mK7vP3xB9yU6tF2hG5jQ0",

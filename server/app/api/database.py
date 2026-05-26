@@ -1,11 +1,16 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
+import asyncio
+import os
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func
 from app.core.database import get_db
-from app.core.security import verify_api_key
+from app.core.security import verify_api_key, verify_any_auth, get_current_user_optional
+from app.core.audit import write_audit
 from app.core.config import settings
 from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
 from app.services.db_importer import import_products_from_excel, import_constants_from_excel
+from app.services.excel_cache import rebuild_base_template, CACHE_PATH
 from pydantic import BaseModel
 from typing import Optional, List
 import bcrypt
@@ -61,7 +66,7 @@ async def list_products(
     limit: int = Query(100, le=500),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
-    _key: str = Depends(verify_api_key),
+    _auth: str = Depends(verify_any_auth),
 ):
     q = select(Product).where(Product.is_active == True)
     if brand:
@@ -88,16 +93,18 @@ async def list_products(
 @router.get("/products/count")
 async def count_products(
     db: AsyncSession = Depends(get_db),
-    _key: str = Depends(verify_api_key),
+    _auth: str = Depends(verify_any_auth),
 ):
-    result = await db.execute(select(func.count()).select_from(Product).where(Product.is_active == True))
+    result = await db.execute(
+        select(func.count()).select_from(Product).where(Product.is_active == True)
+    )
     return {"count": result.scalar()}
 
 
 @router.get("/products/all")
 async def list_all_products(
     db: AsyncSession = Depends(get_db),
-    _key: str = Depends(verify_api_key),
+    _auth: str = Depends(verify_any_auth),
 ):
     """Возвращает все активные товары без пагинации (для заполнения листа БД в Excel)."""
     result = await db.execute(
@@ -120,14 +127,14 @@ async def update_product(
     product_id: int,
     data: ProductUpdate,
     db: AsyncSession = Depends(get_db),
-    _key: str = Depends(verify_api_key),
+    _auth: str = Depends(verify_any_auth),
 ):
     result = await db.execute(select(Product).where(Product.id == product_id))
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Товар не найден")
 
-    for field, value in data.dict(exclude_none=True).items():
+    for field, value in data.model_dump(exclude_none=True).items():
         setattr(product, field, value)
 
     await db.commit()
@@ -159,38 +166,93 @@ def _check_excel_file(file: UploadFile):
         raise HTTPException(400, "Файл должен быть в формате .xlsx или .xlsm")
 
 
+def _is_admin_user(user) -> bool:
+    """True если у пользователя роль admin/superadmin."""
+    try:
+        return user is not None and user.role.name.value in ("superadmin", "administrator")
+    except Exception:
+        return False
+
+
 @router.post("/import/products")
 async def import_products(
+    request: Request,
     file: UploadFile = File(...),
-    password: str = Query(...),
+    password: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
     _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
 ):
-    check_admin(password)
+    if not _is_admin_user(current_user):
+        check_admin(password)
     _check_excel_file(file)
     content = await file.read()
+    ip = request.client.host if request.client else None
     try:
         added, updated = await import_products_from_excel(content, db, file.filename)
     except ValueError as e:
+        await write_audit(db, current_user, "import_products",
+                          resource=file.filename, details=str(e), ip=ip, status="error")
         raise HTTPException(422, str(e))
+    await write_audit(db, current_user, "import_products",
+                      resource=file.filename,
+                      details=f"added={added}, updated={updated}",
+                      ip=ip)
+    # Rebuild cached base template in background (non-blocking)
+    asyncio.create_task(rebuild_base_template(db))
     return {"status": "ok", "added": added, "updated": updated}
 
 
 @router.post("/import/constants")
 async def import_constants(
+    request: Request,
     file: UploadFile = File(...),
-    password: str = Query(...),
+    password: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
     _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
 ):
-    check_admin(password)
+    if not _is_admin_user(current_user):
+        check_admin(password)
     _check_excel_file(file)
     content = await file.read()
+    ip = request.client.host if request.client else None
     try:
         count = await import_constants_from_excel(content, db, file.filename)
     except ValueError as e:
+        await write_audit(db, current_user, "import_constants",
+                          resource=file.filename, details=str(e), ip=ip, status="error")
         raise HTTPException(422, str(e))
+    await write_audit(db, current_user, "import_constants",
+                      resource=file.filename,
+                      details=f"brands_updated={count}",
+                      ip=ip)
+    # Rebuild cached base template in background (non-blocking)
+    asyncio.create_task(rebuild_base_template(db))
     return {"status": "ok", "brands_updated": count}
+
+
+# ─── Base template download ────────────────────────────────────────────────────
+
+@router.get("/base-template")
+async def get_base_template(
+    _key: str = Depends(verify_api_key),
+):
+    """Download pre-built .xlsm with БД and Const sheets already filled.
+
+    Rebuilt automatically after every products/constants import.
+    Returns 404 if no import has been run yet.
+    """
+    if not os.path.exists(CACHE_PATH):
+        raise HTTPException(
+            404,
+            "Кэшированный шаблон не найден. Выполните импорт товаров или констант."
+        )
+    return FileResponse(
+        CACHE_PATH,
+        media_type="application/vnd.ms-excel.sheet.macroEnabled.12",
+        filename="base_template.xlsm",
+    )
 
 
 # ─── Constants ─────────────────────────────────────────────────────────────────
@@ -198,13 +260,14 @@ async def import_constants(
 @router.get("/constants")
 async def get_constants(
     db: AsyncSession = Depends(get_db),
-    _key: str = Depends(verify_api_key),
+    _auth: str = Depends(verify_any_auth),
 ):
     brands = await db.execute(select(BrandConstant))
     currencies = await db.execute(select(CurrencyRate))
     managers = await db.execute(
         select(Manager).where(Manager.is_active == True).order_by(Manager.full_name)
     )
+    managers_list = managers.scalars().all()
     return {
         "brands": [
             {"brand": b.brand, "margin": b.margin, "logistics": b.logistics,
@@ -216,7 +279,7 @@ async def get_constants(
             for c in currencies.scalars().all()
         ],
         "managers": [
-            m.full_name for m in managers.scalars().all() if m.full_name
+            m.full_name for m in managers_list if m.full_name
         ],
         "managers_full": [
             {
@@ -225,7 +288,7 @@ async def get_constants(
                 "email":     m.email     or "",
                 "phone":     m.phone     or "",
             }
-            for m in managers.scalars().all() if m.full_name
+            for m in managers_list if m.full_name
         ],
     }
 
@@ -243,7 +306,7 @@ async def update_constant(
     bc = result.scalar_one_or_none()
     if not bc:
         raise HTTPException(404, f"Бренд '{brand}' не найден")
-    for field, value in data.dict(exclude_none=True).items():
+    for field, value in data.model_dump(exclude_none=True).items():
         setattr(bc, field, value)
     await db.commit()
     return {"status": "updated", "brand": brand}
@@ -255,7 +318,7 @@ async def update_constant(
 async def get_import_logs(
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
-    _key: str = Depends(verify_api_key),
+    _auth: str = Depends(verify_any_auth),
 ):
     result = await db.execute(
         select(ImportLog).order_by(ImportLog.created_at.desc()).limit(limit)
