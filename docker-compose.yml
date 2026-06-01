@@ -32,7 +32,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+asyncpg://aps_user:aps_password@postgres:5432/aps_db
+      DATABASE_URL: postgresql+asyncpg://aps_user:${DB_PASS}@postgres:5432/aps_db
       DEBUG: "false"
       # Replace with your bcrypt hash. Default below corresponds to password "321".
       # IMPORTANT: literal "$" must be escaped as "$$" in docker-compose env values.
