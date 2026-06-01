@@ -258,7 +258,7 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
 
     # ── 1. Найти строку "Итого:" ─────────────────────────────────────────────
     итого_row = None
-    for r in range(KP_DATA_START, KP_DATA_START + 900):
+    for r in range(KP_DATA_START, KP_DATA_START + 2000):
         for col in range(1, 10):
             v = kp.cell(row=r, column=col).value
             if isinstance(v, str) and v.strip().lower().startswith("итого"):
@@ -290,45 +290,45 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
         if kp_table.autoFilter:
             kp_table.autoFilter.filterColumn = []
 
-    # ── 4. Очистить зону данных + старого подвала ───────────────────────────
+    # ── 3б. Сохранить merge-диапазоны из зоны данных/подвала ─────────────────
+    # Они мешают записи значений — нужно разъединить, потом пересоздать.
     clear_end = итого_row + FOOTER_ROWS + 5
+    footer_merges = []   # (offset_from_итого, min_col, max_col)
+    data_merges_to_undo = []   # строковые диапазоны для unmerge
+    for mr in list(kp.merged_cells.ranges):
+        if mr.min_row >= KP_DATA_START and mr.max_row < clear_end:
+            data_merges_to_undo.append(str(mr))
+            # If inside footer zone, remember for relocation
+            if mr.min_row >= итого_row:
+                footer_merges.append((
+                    mr.min_row - итого_row,  # offset
+                    mr.min_col, mr.max_col,
+                    mr.min_row, mr.max_row,  # orig rows (for multi-row spans)
+                ))
+    for rng in data_merges_to_undo:
+        try:
+            kp.unmerge_cells(rng)
+        except Exception:
+            pass
+
+    # ── 4. Очистить зону данных + старого подвала ───────────────────────────
     for r in range(KP_DATA_START, clear_end):
         kp.row_dimensions[r].hidden = False
         for col in range(1, 20):
             cell = kp.cell(row=r, column=col)
-            if cell.value is not None:
-                cell.value = None
-
-    # ── 4б. Определить фактическую границу шаблонной таблицы ───────────────
-    actual_table_end = KP_DATA_MAX  # по умолчанию
-    if kp_table:
-        m_end = _re.search(r'[A-Za-z]+(\d+)$', kp_table.ref)
-        if m_end:
-            actual_table_end = int(m_end.group(1))
-
-    # Строка-образец стиля (последняя строка в шаблонной таблице)
-    style_src_row = actual_table_end
+            # Skip MergedCell slaves (read-only), only clear master cells
+            try:
+                if cell.value is not None:
+                    cell.value = None
+            except (TypeError, AttributeError):
+                pass
 
     # ── 5. Записать строки данных (колонки A–I, без КазНИИСА/РРЦ) ──────────
+    # Стили уже присутствуют в шаблоне до строки 1012 (расширено excel_cache.py).
     last_data_row = KP_DATA_START - 1
     for i, item in enumerate(items):
         row  = KP_DATA_START + i
         bm   = item.get("best_match") or {}
-
-        # Скопировать стиль для строк за пределами шаблонной таблицы
-        if row > actual_table_end:
-            for col in range(1, 10):
-                src_cell = kp.cell(row=style_src_row, column=col)
-                dst_cell = kp.cell(row=row, column=col)
-                dst_cell.number_format = src_cell.number_format
-                if src_cell.has_style:
-                    try:
-                        dst_cell.font      = _copy(src_cell.font)
-                        dst_cell.border    = _copy(src_cell.border)
-                        dst_cell.fill      = _copy(src_cell.fill)
-                        dst_cell.alignment = _copy(src_cell.alignment)
-                    except Exception:
-                        pass
 
         article  = bm.get("article", "") or item.get("article_raw", "")
         name     = bm.get("name",    "") or item.get("name_raw",    "")
@@ -378,13 +378,201 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
                 )
                 kp.cell(row=new_итого_row, column=col).value = fixed
 
-    # ── 8. Обновить ссылку Таблица5 (без insert_rows) ───────────────────────
+    # ── 8. Пересоздать merge-диапазоны в новом месте подвала ────────────────
+    if footer_merges:
+        shift = new_итого_row - итого_row
+        for (offset, min_col, max_col, orig_min_row, orig_max_row) in footer_merges:
+            new_min = orig_min_row + shift
+            new_max = orig_max_row + shift
+            col_min_ltr = openpyxl.utils.get_column_letter(min_col)
+            col_max_ltr = openpyxl.utils.get_column_letter(max_col)
+            rng = f"{col_min_ltr}{new_min}:{col_max_ltr}{new_max}"
+            try:
+                kp.merge_cells(rng)
+            except Exception:
+                pass
+
+    # ── 9. Обновить ссылку Таблица5 (без insert_rows) ───────────────────────
     if kp_table and last_data_row >= KP_DATA_START:
         kp_table.ref = _re.sub(
             r'(\$?[A-Za-z]+\$?)\d+$',
             lambda m: m.group(1) + str(last_data_row),
             kp_table.ref,
         )
+
+
+
+def _extend_sheet_styles(ws, n_items: int, data_start: int = 2) -> None:
+    """
+    Копирует стили из последней стилизованной строки вниз до строки (data_start + n_items).
+    Нужно для шаблонов у которых стили есть только до определённой строки.
+    Не трогает значения и формулы — только border/font/fill/alignment/number_format.
+    """
+    from copy import copy as _copy
+
+    need_row = data_start + n_items        # последняя строка данных
+    # Найти последнюю строку со стилями
+    last_styled = data_start
+    for r in range(data_start, need_row + 50):
+        row_styled = False
+        for col in range(1, 15):
+            if ws.cell(row=r, column=col).has_style:
+                row_styled = True
+                break
+        if row_styled:
+            last_styled = r
+        elif r > last_styled + 3:
+            break   # 3 пустые подряд — конец зоны стилей
+
+    if last_styled >= need_row:
+        return   # стилей уже достаточно
+
+    # Читаем образец стиля из последней стилизованной строки
+    src_styles = {}
+    for col in range(1, 15):
+        cell = ws.cell(row=last_styled, column=col)
+        if cell.has_style:
+            src_styles[col] = (
+                cell.number_format,
+                _copy(cell.font),
+                _copy(cell.border),
+                _copy(cell.fill),
+                _copy(cell.alignment),
+            )
+
+    # Применяем стиль к строкам за границей
+    for row in range(last_styled + 1, need_row + 1):
+        for col, style_tuple in src_styles.items():
+            nfmt, font, border, fill, alignment = style_tuple
+            dst = ws.cell(row=row, column=col)
+            dst.number_format = nfmt
+            try:
+                dst.font      = _copy(font)
+                dst.border    = _copy(border)
+                dst.fill      = _copy(fill)
+                dst.alignment = _copy(alignment)
+            except Exception:
+                pass
+
+
+def _extend_kp_styles(wb, n_items: int) -> None:
+    """
+    Расширяет стили листа КП и обновляет Таблица5.ref если данных больше
+    чем строк в шаблоне.  Идентичен логике excel_cache._extend_kp_table,
+    но без переноса подвала (это делает _fill_kp_data).
+    """
+    from copy import copy as _copy
+    import re as _re
+
+    if "КП" not in wb.sheetnames:
+        return
+    kp = wb["КП"]
+
+    kp_table = kp.tables.get("Таблица5")
+    if not kp_table:
+        # нет таблицы — просто расширяем стили
+        _extend_sheet_styles(kp, n_items, data_start=KP_DATA_START)
+        return
+
+    # Разбираем ref таблицы, например "A12:N500"
+    m = _re.match(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', kp_table.ref, _re.IGNORECASE)
+    if not m:
+        return
+
+    table_header = int(m.group(2))   # 12
+    current_end  = int(m.group(4))   # 500
+    need_end     = table_header + n_items + 10  # запас
+
+    if current_end >= need_end:
+        return   # уже достаточно
+
+    # Читаем стили из последней строки таблицы
+    src_styles = {}
+    for col in range(1, 15):
+        cell = kp.cell(row=current_end, column=col)
+        nfmt = cell.number_format
+        if cell.has_style:
+            src_styles[col] = (
+                nfmt,
+                _copy(cell.font),
+                _copy(cell.border),
+                _copy(cell.fill),
+                _copy(cell.alignment),
+            )
+
+    # Снять calculatedColumnFormula и autoFilter чтобы не было #REF!
+    for tc in kp_table.tableColumns:
+        tc.calculatedColumnFormula = None
+    if kp_table.autoFilter:
+        kp_table.autoFilter.filterColumn = []
+
+    # Применить стили к новым строкам
+    for row in range(current_end + 1, need_end + 1):
+        for col, style_tuple in src_styles.items():
+            nfmt, font, border, fill, alignment = style_tuple
+            dst = kp.cell(row=row, column=col)
+            dst.number_format = nfmt
+            try:
+                dst.font      = _copy(font)
+                dst.border    = _copy(border)
+                dst.fill      = _copy(fill)
+                dst.alignment = _copy(alignment)
+            except Exception:
+                pass
+
+    # Обновить ref таблицы
+    kp_table.ref = _re.sub(
+        r'(\$?[A-Za-z]+\$?)\d+$',
+        lambda mm: mm.group(1) + str(need_end),
+        kp_table.ref,
+    )
+
+
+
+def _extend_wv_formulas(ws, last_data_row: int) -> None:
+    """
+    Копирует формулы из последней строки шаблона WV 4.0 в строки за её пределами.
+    Обрабатывает:
+      - col 6  (F) — формула кратности (обычная строка-формула)
+      - cols 8-12 (H-L) — ArrayFormula с ценами из БД
+    Пропускает ячейки которые уже заполнены явными значениями.
+    """
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    # Найти последнюю строку с ArrayFormula в col 8 (цены)
+    last_formula_row = 0
+    for r in range(2, last_data_row + 50):
+        if isinstance(ws.cell(row=r, column=8).value, ArrayFormula):
+            last_formula_row = r
+        elif last_formula_row > 0 and r > last_formula_row + 3:
+            break
+
+    if last_formula_row == 0 or last_formula_row >= last_data_row:
+        return  # нечего расширять
+
+    src_row     = last_formula_row
+    src_row_str = str(src_row)
+
+    # Только «формульные» колонки которые мы НЕ пишем явно
+    formula_cols = [6, 8, 9, 10, 11, 12]
+
+    for dst_row in range(last_formula_row + 1, last_data_row + 1):
+        dst_row_str = str(dst_row)
+        for col in formula_cols:
+            dst_cell = ws.cell(row=dst_row, column=col)
+            if dst_cell.value is not None:
+                continue   # явное значение — не трогаем
+
+            src_val = ws.cell(row=src_row, column=col).value
+            if src_val is None:
+                continue
+
+            if isinstance(src_val, ArrayFormula):
+                new_ref  = src_val.ref.replace(src_row_str, dst_row_str)
+                new_text = src_val.text.replace(src_row_str, dst_row_str)
+                dst_cell.value = ArrayFormula(new_ref, new_text)
+            elif isinstance(src_val, str) and src_val.startswith("="):
+                dst_cell.value = src_val.replace(src_row_str, dst_row_str)
 
 
 def generate_excel(
@@ -434,6 +622,10 @@ def generate_excel(
 
     ws = wb["WV 4.0"]
 
+    # Расширяем стили листов под фактическое количество позиций
+    _extend_sheet_styles(ws, len(items), data_start=2)
+    _extend_kp_styles(wb, len(items))
+
     if not _skip_db_const:
         # 1. Обновляем лист БД актуальными данными с сервера
         if products:
@@ -465,13 +657,14 @@ def generate_excel(
         ws.cell(row=row, column=WV_ARTICLE, value=article)
         ws.cell(row=row, column=WV_QTY,     value=qty)
 
-        # Если позиция не найдена в БД или нет артикула — формула VLOOKUP в столбце C
-        # вернёт пустоту. Записываем наименование из PDF напрямую как fallback.
-        db_name = bm.get("name", "")
-        if not db_name:
-            pdf_name = item.get("name_raw", "")
-            if pdf_name:
-                ws.cell(row=row, column=WV_NAME, value=pdf_name)
+        # Записываем наименование и единицу явно: для строк за пределами шаблонных
+        # VLOOKUP-формул данные не появятся автоматически.
+        wv_name = bm.get("name", "") or item.get("name_raw", "")
+        wv_unit = bm.get("unit", "") or item.get("unit", "")
+        if wv_name:
+            ws.cell(row=row, column=WV_NAME, value=wv_name)
+        if wv_unit:
+            ws.cell(row=row, column=WV_UNIT, value=wv_unit)
 
         if item.get("_user_edited") and item.get("_user_price") is not None:
             try:
@@ -490,6 +683,10 @@ def generate_excel(
             ws.cell(row=row, column=WV_COMMENT,  value=comment)
         if delivery:
             ws.cell(row=row, column=WV_DELIVERY, value=delivery)
+
+    # Расширяем формулы WV для строк за пределами шаблона (цены, кратность)
+    if len(items) > 0:
+        _extend_wv_formulas(ws, 2 + len(items) - 1)
 
     # 4. Заполняем шапку и данные листа КП
     try:

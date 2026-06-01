@@ -96,6 +96,176 @@ def _fill_const(ws, brands: List, managers: List, currencies: List) -> None:
         ws.cell(row=row, column=CONST_CUR_RATE, value=c.rate)
 
 
+
+
+# ── КП table pre-extension ───────────────────────────────────────────────────
+_KP_TARGET_DATA_ROWS = 1000   # expand Таблица5 to this many data rows
+
+
+def _extend_kp_table(wb: openpyxl.Workbook) -> None:
+    """
+    Pre-extend Таблица5 in sheet КП to _KP_TARGET_DATA_ROWS data rows
+    so every cell already has proper styles (borders, number formats, fonts).
+
+    This removes the need for runtime style-copying on the client side and
+    ensures rows 501+ look identical to the original template rows.
+
+    Steps:
+      1. Parse current table boundaries from Таблица5.ref
+      2. Save the Итого/footer section (values + styles)
+      3. Copy cell styles from the last template row to all extension rows
+      4. Clear the old footer location
+      5. Write footer at new position (target_end + 2)
+      6. Update Таблица5.ref to cover target_end
+    """
+    from copy import copy as _copy
+    import re as _re
+
+    if "КП" not in wb.sheetnames:
+        return
+    kp = wb["КП"]
+
+    kp_table = kp.tables.get("Таблица5")
+    if not kp_table:
+        return
+
+    # Parse ref, e.g. "A12:N500"
+    m = _re.match(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', kp_table.ref, _re.IGNORECASE)
+    if not m:
+        return
+
+    table_header_row = int(m.group(2))   # 12
+    current_end      = int(m.group(4))   # 500
+    target_end       = table_header_row + _KP_TARGET_DATA_ROWS  # 1012
+
+    if current_end >= target_end:
+        logger.info("excel_cache: КП already has %d rows, skipping extend", current_end)
+        return
+
+    # ── 1. Find footer (first non-empty row after current_end) ──────────────
+    footer_start = None
+    for r in range(current_end + 1, current_end + 200):
+        for col in range(1, 20):
+            if kp.cell(row=r, column=col).value is not None:
+                footer_start = r
+                break
+        if footer_start:
+            break
+
+    FOOTER_ROWS = 80
+
+    # ── 2. Save footer: values + styles ─────────────────────────────────────
+    footer_vals  = {}   # (offset, col) → value
+    footer_nfmt  = {}   # (offset, col) → number_format
+    footer_style = {}   # (offset, col) → (font, border, fill, alignment)
+
+    if footer_start:
+        for offset in range(FOOTER_ROWS):
+            r = footer_start + offset
+            for col in range(1, 20):
+                cell = kp.cell(row=r, column=col)
+                if cell.value is not None:
+                    key = (offset, col)
+                    footer_vals[key]  = cell.value
+                    footer_nfmt[key]  = cell.number_format
+                    if cell.has_style:
+                        footer_style[key] = (
+                            _copy(cell.font),
+                            _copy(cell.border),
+                            _copy(cell.fill),
+                            _copy(cell.alignment),
+                        )
+
+    # ── 3. Read source-row styles (last row inside the current table) ────────
+    src_row    = current_end
+    src_styles = {}   # col → (num_fmt, font, border, fill, alignment)
+    for col in range(1, 15):
+        cell = kp.cell(row=src_row, column=col)
+        nfmt = cell.number_format
+        if cell.has_style:
+            src_styles[col] = (
+                nfmt,
+                _copy(cell.font),
+                _copy(cell.border),
+                _copy(cell.fill),
+                _copy(cell.alignment),
+            )
+        else:
+            src_styles[col] = (nfmt, None, None, None, None)
+
+    # ── 4. Strip calculatedColumnFormula & autoFilter (prevent #REF!) ────────
+    for tc in kp_table.tableColumns:
+        tc.calculatedColumnFormula = None
+    if kp_table.autoFilter:
+        kp_table.autoFilter.filterColumn = []
+
+    # ── 5. Apply styles to extension rows ────────────────────────────────────
+    for row in range(current_end + 1, target_end + 1):
+        for col in range(1, 15):
+            nfmt, font, border, fill, alignment = src_styles.get(
+                col, ("General", None, None, None, None))
+            dst = kp.cell(row=row, column=col)
+            dst.number_format = nfmt
+            if font:
+                try:
+                    dst.font      = _copy(font)
+                    dst.border    = _copy(border)
+                    dst.fill      = _copy(fill)
+                    dst.alignment = _copy(alignment)
+                except Exception:
+                    pass
+
+    # ── 6. Clear old footer ───────────────────────────────────────────────────
+    if footer_start:
+        for offset in range(FOOTER_ROWS):
+            r = footer_start + offset
+            for col in range(1, 20):
+                kp.cell(row=r, column=col).value = None
+
+    # ── 7. Write footer at new position ──────────────────────────────────────
+    new_footer_start = target_end + 2   # one blank row gap
+    if footer_start:
+        shift = new_footer_start - footer_start
+        for (offset, col), val in footer_vals.items():
+            new_r = new_footer_start + offset
+            dst   = kp.cell(row=new_r, column=col)
+            # Shift relative (non-$) row references in formulas
+            if isinstance(val, str) and val.startswith("=") and shift != 0:
+                val = _re.sub(
+                    r'([A-Za-z]+)(\$?)(\d+)',
+                    lambda mm: (
+                        mm.group(1) + mm.group(2) + mm.group(3)
+                        if mm.group(2)   # absolute row ($N) — keep as-is
+                        else mm.group(1) + str(int(mm.group(3)) + shift)
+                    ),
+                    val,
+                )
+            dst.value = val
+            key = (offset, col)
+            if key in footer_nfmt:
+                dst.number_format = footer_nfmt[key]
+            if key in footer_style:
+                fnt, brd, fll, aln = footer_style[key]
+                try:
+                    dst.font      = _copy(fnt)
+                    dst.border    = _copy(brd)
+                    dst.fill      = _copy(fll)
+                    dst.alignment = _copy(aln)
+                except Exception:
+                    pass
+
+    # ── 8. Update Таблица5.ref ────────────────────────────────────────────────
+    kp_table.ref = _re.sub(
+        r'(\$?[A-Za-z]+\$?)\d+$',
+        lambda mm: mm.group(1) + str(target_end),
+        kp_table.ref,
+    )
+
+    logger.info(
+        "excel_cache: КП extended from row %d → %d  (Таблица5 ref: %s)",
+        current_end, target_end, kp_table.ref,
+    )
+
 def _build_sync(products: List, brands: List,
                 managers: List, currencies: List) -> None:
     """CPU-bound: copy template, fill sheets, save. Runs in thread executor."""
@@ -116,6 +286,9 @@ def _build_sync(products: List, brands: List,
         _fill_const(wb["Const"], brands, managers, currencies)
     else:
         logger.warning("excel_cache: sheet 'Const' not found in template")
+
+    # Extend КП table to 1000 rows so clients never hit formatting gaps
+    _extend_kp_table(wb)
 
     wb.save(tmp)
     os.replace(tmp, CACHE_PATH)   # atomic replace
