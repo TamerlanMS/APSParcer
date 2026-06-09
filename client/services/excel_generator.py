@@ -776,16 +776,48 @@ def generate_excel(
         if wv_unit:
             ws.cell(row=row, column=WV_UNIT, value=wv_unit)
 
-        if item.get("_user_edited") and item.get("_user_price") is not None:
-            try:
-                ws.cell(row=row, column=WV_CONST_PRC, value=float(item["_user_price"]))
-            except (TypeError, ValueError):
-                pass
-        elif item.get("_user_const_price") is not None:
-            try:
+        # Колонка G WV 4.0 = базовая константа (до умножения на НДС/лог/маржу).
+        # Заполняется для ВСЕХ строк — это гарантирует что формула WV 4.0
+        # вычисляет ту же самую Цена КП, что и Python (_computed_kp_price).
+        # Важно: VBA Worksheet_SelectionChange копирует цены WV 4.0 → КП;
+        # без явного G формула WV 4.0 использует другой маппинг rate→поле,
+        # и цены расходятся с preview.
+        # Приоритет записи в G:
+        #   1. _user_const_price — пользователь ввёл «константу цены» вручную
+        #   2. _user_seb_price   — пользователь задал Цена себес (обратный пересчёт)
+        #   3. _user_price       — пользователь задал Цена КП напрямую
+        #   4. _computed_kp_price — Python-расчёт (обратный пересчёт из итоговой КП)
+        _wv_brand   = (bm.get("brand") or "").upper()
+        _wv_bc      = (brand_consts or {}).get(_wv_brand, {})
+        _wv_nds     = float(_wv_bc.get("nds",           1.0) or 1.0)
+        _wv_lo      = float(_wv_bc.get("logistics",     1.0) or 1.0)
+        _wv_cur     = float(_wv_bc.get("currency_rate", 1.0) or 1.0)
+        _wv_mg      = float(_wv_bc.get("margin",        1.0) or 1.0)
+        _wv_denom_s = _wv_nds * _wv_lo * _wv_cur          # seb = G × denom_s
+        _wv_denom_k = _wv_denom_s * _wv_mg                 # kp  = G × denom_k
+        try:
+            if item.get("_user_const_price") is not None:
+                # Константа задана напрямую — это уже и есть G
                 ws.cell(row=row, column=WV_CONST_PRC, value=float(item["_user_const_price"]))
-            except (TypeError, ValueError):
-                pass
+            elif item.get("_user_seb_price") is not None:
+                # Пользователь задал Цена себес: G = seb / denom_s
+                g = float(item["_user_seb_price"]) / _wv_denom_s if _wv_denom_s else float(item["_user_seb_price"])
+                ws.cell(row=row, column=WV_CONST_PRC, value=g)
+            elif item.get("_user_edited") and item.get("_user_price") is not None:
+                # Пользователь задал Цена КП: G = kp / denom_k
+                g = float(item["_user_price"]) / _wv_denom_k if _wv_denom_k else float(item["_user_price"])
+                ws.cell(row=row, column=WV_CONST_PRC, value=g)
+            else:
+                # Нередактированная позиция: используем Python-вычисленную Цена КП.
+                # G = kp / denom_k → формула WV 4.0 даст ROUNDUP(G×denom_k,0) = kp.
+
+                # Это устраняет расхождение маппинга rate→поле между Python и WV 4.0.
+                kp_price = float(item.get("_computed_kp_price") or 0)
+                if kp_price and _wv_denom_k:
+                    g = kp_price / _wv_denom_k
+                    ws.cell(row=row, column=WV_CONST_PRC, value=g)
+        except (TypeError, ValueError):
+            pass
 
         comment  = item.get("comment")  or ""
         delivery = item.get("delivery") or ""

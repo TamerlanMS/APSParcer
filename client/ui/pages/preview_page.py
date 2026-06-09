@@ -557,8 +557,25 @@ class PreviewPage(ctk.CTkFrame):
                 return 0.0, 0.0, 0.0, 0.0
 
         rate_type = int(bc.get("rate", 3) or 3)
+        cur = float(bc.get("currency_rate", 1.0) or 1.0)
+        nds = float(bc.get("nds",           1.0) or 1.0)
+        lo  = float(bc.get("logistics",     1.0) or 1.0)
+        mg  = float(bc.get("margin",        1.0) or 1.0)
+        qty = float(item.get("qty", 1) or 1)
 
-        # Базовая цена
+        # ── Приоритет 1: пользователь задал Цена КП напрямую ────────────
+        if item.get("_user_edited") and item.get("_user_price") is not None:
+            price_kp  = math.ceil(float(item["_user_price"]))
+            price_seb = math.ceil(price_kp / mg) if mg else price_kp
+            return price_seb, price_seb * qty, price_kp, price_kp * qty
+
+        # ── Приоритет 2: пользователь задал Цена себес напрямую ─────────
+        if item.get("_user_seb_price") is not None:
+            price_seb = math.ceil(float(item["_user_seb_price"]))
+            price_kp  = math.ceil(price_seb * mg)
+            return price_seb, price_seb * qty, price_kp, price_kp * qty
+
+        # ── Приоритет 3: константа цена вместо базы из БД ───────────────
         if item.get("_user_const_price"):
             base = float(item["_user_const_price"])
         else:
@@ -567,32 +584,16 @@ class PreviewPage(ctk.CTkFrame):
                     or bm.get("rrts") or bm.get("partner")
                     or bm.get("mrc")  or bm.get("opt")
                     or bm.get("kaznisa") or 0)
-            # Для типов ГП умножаем базу на коэффициент ГП
             if rate_type in GP_RATE_TYPES:
                 gp = float(bc.get("gp", 1.0) or 1.0)
                 base = float(base or 0) * gp
+
         base = float(base or 0)
         if not base:
             return 0.0, 0.0, 0.0, 0.0
 
-        cur = float(bc.get("currency_rate", 1.0) or 1.0)
-        nds = float(bc.get("nds",           1.0) or 1.0)
-        lo  = float(bc.get("logistics",     1.0) or 1.0)
-        mg  = float(bc.get("margin",        1.0) or 1.0)
-
-        price_seb = base * cur * nds * lo
-        # Прямая правка цены себес имеет приоритет над рассчитанной
-        if item.get("_user_seb_price") is not None:
-            price_seb = float(item["_user_seb_price"])
-        price_kp  = price_seb * mg
-        qty       = float(item.get("qty", 1) or 1)
-
-        # Если пользователь руками задал Цена КП — она в приоритете
-        if item.get("_user_edited") and item.get("_user_price") is not None:
-            price_kp = float(item["_user_price"])
-
-        price_seb = math.ceil(price_seb)
-        price_kp  = math.ceil(price_kp)
+        price_seb = math.ceil(base * cur * nds * lo)
+        price_kp  = math.ceil(price_seb * mg)
         return price_seb, price_seb * qty, price_kp, price_kp * qty
 
     # ── Заполнение таблицы ───────────────────────────────────────────────────
