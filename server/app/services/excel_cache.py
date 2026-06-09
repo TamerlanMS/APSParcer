@@ -15,6 +15,7 @@ import shutil
 from typing import List, Dict
 
 import openpyxl
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -35,6 +36,20 @@ CONST_MANAGER   = 2;  CONST_POSITION = 3;  CONST_EMAIL   = 4;  CONST_PHONE   = 5
 CONST_BRAND     = 8;  CONST_MARGIN   = 9;  CONST_LOGISTICS = 10; CONST_RATE  = 11
 CONST_CURRATE   = 12; CONST_NDS      = 13; CONST_GP      = 14
 CONST_CUR_NAME  = 22; CONST_CUR_RATE = 23
+
+# Rate-type list column in Const sheet (used for data validation dropdown)
+CONST_RATE_LIST_COL = 31   # column AE (1-based) — stores the 8 rate label strings
+
+RATE_TYPE_LABELS = [
+    "Сумма КазНИИСА",
+    "Цена КазНИИСА",
+    "РРЦ",
+    "МРЦ",
+    "Опт",
+    "Цена ГП",
+    "Сумма ГП",
+    "Проект",
+]
 
 
 def _fill_bd(ws, products: List) -> None:
@@ -95,7 +110,114 @@ def _fill_const(ws, brands: List, managers: List, currencies: List) -> None:
         ws.cell(row=row, column=CONST_CUR_NAME, value=c.name or "")
         ws.cell(row=row, column=CONST_CUR_RATE, value=c.rate)
 
+    # ── Записываем список типов расценки в колонку AE (строки 1-8) ───────────
+    # Это источник данных для выпадающего списка (data validation) в колонке K
+    for idx, label in enumerate(RATE_TYPE_LABELS, start=1):
+        ws.cell(row=idx, column=CONST_RATE_LIST_COL, value=label)
 
+    # ── Data validation dropdown в колонке K (Расценка) ──────────────────────
+    # Ссылаемся на диапазон AE1:AE8 (CONST_RATE_LIST_COL = 31 = AE)
+    from openpyxl.utils import get_column_letter
+    rate_list_col_letter = get_column_letter(CONST_RATE_LIST_COL)  # "AE"
+    dv_range_end = max(2 + len(brands), 20)
+    rate_dv = DataValidation(
+        type="list",
+        formula1=f"Const!${rate_list_col_letter}$1:${rate_list_col_letter}$8",
+        allow_blank=True,
+        showDropDown=False,   # False = показывать стрелку (XML-флаг инвертирован)
+    )
+    rate_dv.error      = "Выберите из списка"
+    rate_dv.errorTitle = "Тип расценки"
+    rate_dv.prompt     = "Выберите тип расценки"
+    rate_dv.promptTitle = "Расценка"
+    # Удаляем старые DV на колонке K чтобы не дублировать
+    to_remove = [dv for dv in ws.data_validations.dataValidation
+                 if f"K" in str(dv.sqref)]
+    for dv in to_remove:
+        ws.data_validations.dataValidation.remove(dv)
+    ws.add_data_validation(rate_dv)
+    rate_dv.sqref = f"K2:K{dv_range_end}"
+
+
+
+
+# ── x14:dataValidation (расширенный Excel 2010+) ─────────────────────────────
+# openpyxl удаляет <x14:dataValidations> при load/save.
+# Восстанавливаем его патчем на уровне ZIP после каждого save.
+
+_X14_EXT_BLOCK = (
+    '<ext uri="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}"'
+    ' xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">'
+    '<x14:dataValidations count="1"'
+    ' xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">'
+    '<x14:dataValidation type="list" allowBlank="1"'
+    ' showInputMessage="1" showErrorMessage="1">'
+    '<x14:formula1><xm:f>Const!$AE$1:$AE$18</xm:f></x14:formula1>'
+    '<xm:sqref>H1:L1</xm:sqref>'
+    '</x14:dataValidation>'
+    '</x14:dataValidations>'
+    '</ext>'
+)
+
+
+def _inject_x14_dv(xlsm_path: str) -> None:
+    """Восстанавливает x14:dataValidations в листе WV 4.0 после openpyxl save."""
+    import zipfile, io, re as _re
+
+    def _find_sheet_file(zf, name: str) -> str:
+        wb  = zf.read("xl/workbook.xml").decode("utf-8", errors="replace")
+        rel = zf.read("xl/_rels/workbook.xml.rels").decode("utf-8", errors="replace")
+        sheets = _re.findall(r'<sheet[^>]+name="([^"]+)"[^>]+r:id="([^"]+)"', wb)
+        # rels can have Id/Target in either order; also Target may start with /xl/ or xl/
+        rid_to_target = {}
+        for m in _re.finditer(r'<Relationship[^>]+>', rel):
+            tag = m.group()
+            id_m  = _re.search(r'Id="([^"]+)"', tag)
+            tgt_m = _re.search(r'Target="([^"]+)"', tag)
+            if id_m and tgt_m:
+                tgt = tgt_m.group(1).lstrip("/")   # strip leading /
+                if not tgt.startswith("xl/"):
+                    tgt = "xl/" + tgt
+                rid_to_target[id_m.group(1)] = tgt
+        for sname, rid in sheets:
+            if sname == name:
+                return rid_to_target.get(rid, "")
+        return ""
+
+    try:
+        with open(xlsm_path, "rb") as fh:
+            raw = fh.read()
+
+        in_buf, out_buf = io.BytesIO(raw), io.BytesIO()
+
+        with zipfile.ZipFile(in_buf, "r") as zin:
+            sheet_file = _find_sheet_file(zin, "WV 4.0")
+            if not sheet_file:
+                logger.warning("_inject_x14_dv: sheet WV 4.0 not found in %s", xlsm_path)
+                return
+
+            with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == sheet_file:
+                        xml = data.decode("utf-8", errors="replace")
+                        if "x14:dataValidations" not in xml:
+                            if "<extLst>" in xml:
+                                xml = xml.replace("</extLst>",
+                                                  _X14_EXT_BLOCK + "</extLst>", 1)
+                            else:
+                                xml = xml.replace("</worksheet>",
+                                                  "<extLst>" + _X14_EXT_BLOCK
+                                                  + "</extLst></worksheet>", 1)
+                        data = xml.encode("utf-8")
+                    zout.writestr(item, data)
+
+        with open(xlsm_path, "wb") as fh:
+            fh.write(out_buf.getvalue())
+
+        logger.info("_inject_x14_dv: injected into %s", xlsm_path)
+    except Exception as exc:
+        logger.warning("_inject_x14_dv failed (%s): %s", xlsm_path, exc)
 
 
 # ── КП table pre-extension ───────────────────────────────────────────────────
@@ -291,6 +413,7 @@ def _build_sync(products: List, brands: List,
     _extend_kp_table(wb)
 
     wb.save(tmp)
+    _inject_x14_dv(tmp)   # восстанавливаем x14:DV в WV 4.0
     os.replace(tmp, CACHE_PATH)   # atomic replace
     logger.info("excel_cache: rebuilt %s (%d products, %d brands)",
                 CACHE_PATH, len(products), len(brands))

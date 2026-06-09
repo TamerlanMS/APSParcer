@@ -42,11 +42,34 @@ COLS = [
     ("status",     "col_status"),       # 15 — Статус
 ]
 COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100]
-EDITABLE_COLS = {5, 7, 10, 13, 14}     # Кол-во, Константа цена, Цена КП, Коммент., Срок
+EDITABLE_COLS = {5, 6, 7, 8, 9, 10, 11, 13, 14}  # Кол-во, Кратн., Конст.цена, Себес, ΣСеб, КП, ΣКП, Коммент., Срок
 
 
-# Соответствие "rate" (1..5) → ключ цены из БД
-RATE_FIELD = {1: "rrts", 2: "mrc", 3: "opt", 4: "partner", 5: "kaznisa"}
+# Соответствие rate-индекс (1..8) → ключ цены из БД
+RATE_FIELD = {
+    1: "kaznisa",  # Сумма КазНИИСА  (kaznisa × кол-во)
+    2: "kaznisa",  # Цена КазНИИСА
+    3: "rrts",     # РРЦ
+    4: "mrc",      # МРЦ
+    5: "opt",      # Опт
+    6: "rrts",     # Цена ГП  (РРЦ × коэф. ГП)
+    7: "rrts",     # Сумма ГП (РРЦ × коэф. ГП × кол-во)
+    8: "partner",  # Проект
+}
+# Типы расценки, требующие умножения базовой цены на коэффициент ГП
+GP_RATE_TYPES = {6, 7}
+
+# Подписи типов расценки (индекс 1 = RATE_LABELS[0])
+RATE_LABELS = [
+    "Сумма КазНИИСА",  # 1
+    "Цена КазНИИСА",   # 2
+    "РРЦ",             # 3
+    "МРЦ",             # 4
+    "Опт",             # 5
+    "Цена ГП",         # 6
+    "Сумма ГП",        # 7
+    "Проект",          # 8
+]
 
 
 def _make_headers() -> List[str]:
@@ -198,6 +221,7 @@ class PreviewPage(ctk.CTkFrame):
         self._edit_entry = None
         self._filter_mode = "all"
         self._suppress_recalc = False
+        self._rate_str_var = None
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
@@ -317,7 +341,7 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("edited",   background=C_EDITED)
 
         self.tree.bind("<Double-1>", self._on_double_click)
-        self.tree.bind("<Button-1>", self._cancel_edit)
+        self.tree.bind("<Button-1>", self._on_tree_single_click)
 
         # Контекстное меню (правая кнопка мыши)
         self._ctx_menu = tk.Menu(self, tearoff=0)
@@ -362,17 +386,32 @@ class PreviewPage(ctk.CTkFrame):
             ("preview_logistics",  "logistics",     1.03),
             ("preview_nds",        "nds",           1.16),
             ("preview_currency",   "currency_rate", 1.00),
-            ("preview_rate_type",  "rate",          1),
+            ("preview_rate_type",  "rate",          3),   # default = РРЦ (index 3)
         ]
         for col_i, (key, var_key, default) in enumerate(const_items):
             lbl = ctk.CTkLabel(cf, text=t(key), font=FONT_SMALL,
                                 text_color=TEXT_SECONDARY)
             lbl.grid(row=1, column=2 + col_i * 2, padx=(8, 4), pady=(0, 10), sticky="w")
-            var = tk.DoubleVar(value=default)
-            var.trace_add("write", self._on_const_change)
-            entry = ctk.CTkEntry(cf, textvariable=var, width=70, height=30, font=FONT_SMALL)
-            entry.grid(row=1, column=3 + col_i * 2, padx=(0, 8), pady=(0, 10))
-            self.const_vars[var_key] = var
+            if var_key == "rate":
+                # Выпадающий список вместо числового поля
+                self._rate_str_var = ctk.StringVar(value=RATE_LABELS[int(default) - 1])
+                rate_dd = ctk.CTkOptionMenu(
+                    cf, values=RATE_LABELS,
+                    variable=self._rate_str_var,
+                    width=170, height=30,
+                    command=self._on_rate_select,
+                )
+                rate_dd.grid(row=1, column=3 + col_i * 2, padx=(0, 8), pady=(0, 10))
+                # Храним индекс (int) в const_vars для совместимости с остальным кодом
+                var = tk.DoubleVar(value=default)
+                # НЕ трейсим — обновление идёт через _on_rate_select
+                self.const_vars[var_key] = var
+            else:
+                var = tk.DoubleVar(value=default)
+                var.trace_add("write", self._on_const_change)
+                entry = ctk.CTkEntry(cf, textvariable=var, width=70, height=30, font=FONT_SMALL)
+                entry.grid(row=1, column=3 + col_i * 2, padx=(0, 8), pady=(0, 10))
+                self.const_vars[var_key] = var
 
         # Подсказка
         self.hint_lbl = ctk.CTkLabel(cf, text=t("preview_rate_hint"),
@@ -414,6 +453,7 @@ class PreviewPage(ctk.CTkFrame):
             it["_user_edited"]      = False
             it["_user_price"]       = None
             it["_user_const_price"] = None
+            it["_user_seb_price"]   = None
 
         # Подтягиваем константы с сервера
         self._suppress_recalc = True
@@ -463,20 +503,39 @@ class PreviewPage(ctk.CTkFrame):
         self._suppress_recalc = True
         for k in ("margin", "logistics", "nds", "currency_rate", "rate"):
             if k in self.const_vars and k in consts:
-                self.const_vars[k].set(consts[k])
+                if k == "rate":
+                    rate_idx = int(consts[k] or 3)
+                    self.const_vars[k].set(rate_idx)
+                    # Синхронизируем надпись в выпадающем списке
+                    if self._rate_str_var and 1 <= rate_idx <= len(RATE_LABELS):
+                        self._rate_str_var.set(RATE_LABELS[rate_idx - 1])
+                else:
+                    self.const_vars[k].set(consts[k])
         self._suppress_recalc = False
 
     def _on_brand_select(self, brand: str):
         self._load_const_fields(brand)
+
+    def _on_rate_select(self, label: str):
+        """Пользователь выбрал тип расценки из выпадающего списка."""
+        try:
+            idx = RATE_LABELS.index(label) + 1  # 1-based
+        except ValueError:
+            idx = 3
+        self.const_vars["rate"].set(idx)
+        # Запускаем пересчёт вручную (trace не навешан на rate)
+        self._on_const_change()
 
     # ── Расчёт цены ──────────────────────────────────────────────────────────
     def _compute_kp(self, item: dict) -> tuple:
         """
         Возвращает (price_seb, sum_seb, price_kp, sum_kp).
         Формула из WV_template.xlsm:
-            base = выбор по rate-индексу бренда из БД (1=РРЦ,2=МРЦ,3=Опт,4=Партнёр,5=КазНИИСА)
-                   либо ручная константа из G
-            price_seb = base × курс × НДС × лог
+            base = выбор по rate-индексу бренда из БД:
+                   1=Сумма КазНИИСА, 2=Цена КазНИИСА, 3=РРЦ, 4=МРЦ,
+                   5=Опт, 6=Цена ГП (РРЦ×ГП), 7=Сумма ГП, 8=Проект
+                   либо ручная константа из поля G
+            price_seb = base × курс × НДС × лог-ка
             price_kp  = price_seb × маржа
             суммы     = цена × Кол-во,  округление вверх.
         """
@@ -491,23 +550,40 @@ class PreviewPage(ctk.CTkFrame):
                     "logistics":     float(self.const_vars["logistics"].get()),
                     "nds":           float(self.const_vars["nds"].get()),
                     "currency_rate": float(self.const_vars["currency_rate"].get()),
-                    "rate":          int(float(self.const_vars["rate"].get() or 1)),
+                    "rate":          int(float(self.const_vars["rate"].get() or 3)),
+                    "gp":            1.0,
                 }
             except (tk.TclError, ValueError):
                 return 0.0, 0.0, 0.0, 0.0
+
+        rate_type = int(bc.get("rate", 3) or 3)
 
         # Базовая цена
         if item.get("_user_const_price"):
             base = float(item["_user_const_price"])
         else:
-            field = RATE_FIELD.get(bc.get("rate", 1), "rrts")
-            base = bm.get(field) or bm.get("rrts") or bm.get("mrc") or 0
+            field = RATE_FIELD.get(rate_type, "rrts")
+            base = (bm.get(field)
+                    or bm.get("rrts") or bm.get("partner")
+                    or bm.get("mrc")  or bm.get("opt")
+                    or bm.get("kaznisa") or 0)
+            # Для типов ГП умножаем базу на коэффициент ГП
+            if rate_type in GP_RATE_TYPES:
+                gp = float(bc.get("gp", 1.0) or 1.0)
+                base = float(base or 0) * gp
         base = float(base or 0)
         if not base:
             return 0.0, 0.0, 0.0, 0.0
 
-        cur, nds, lo, mg = bc["currency_rate"], bc["nds"], bc["logistics"], bc["margin"]
+        cur = float(bc.get("currency_rate", 1.0) or 1.0)
+        nds = float(bc.get("nds",           1.0) or 1.0)
+        lo  = float(bc.get("logistics",     1.0) or 1.0)
+        mg  = float(bc.get("margin",        1.0) or 1.0)
+
         price_seb = base * cur * nds * lo
+        # Прямая правка цены себес имеет приоритет над рассчитанной
+        if item.get("_user_seb_price") is not None:
+            price_seb = float(item["_user_seb_price"])
         price_kp  = price_seb * mg
         qty       = float(item.get("qty", 1) or 1)
 
@@ -525,20 +601,6 @@ class PreviewPage(ctk.CTkFrame):
         data = items if items is not None else self.items
         for item in data:
             self._insert_row(item)
-        self._adjust_row_height()
-
-    def _adjust_row_height(self):
-        """Set rowheight to fit the tallest cell value across visible rows."""
-        max_lines = 1
-        for iid in self.tree.get_children():
-            for val in self.tree.item(iid, "values"):
-                lines = str(val).count("\n") + 1
-                if lines > max_lines:
-                    max_lines = lines
-        line_px = 18   # pixels per text line at Calibri 12
-        padding = 8    # top+bottom cell padding
-        new_h   = max(28, max_lines * line_px + padding)
-        ttk.Style().configure("APS.Treeview", rowheight=new_h)
         self._adjust_row_height()
 
     def _adjust_row_height(self):
@@ -626,7 +688,7 @@ class PreviewPage(ctk.CTkFrame):
             bc["logistics"]     = float(self.const_vars["logistics"].get())
             bc["nds"]           = float(self.const_vars["nds"].get())
             bc["currency_rate"] = float(self.const_vars["currency_rate"].get())
-            bc["rate"]          = int(float(self.const_vars["rate"].get() or 1))
+            bc["rate"]          = int(float(self.const_vars["rate"].get() or 3))
         except (tk.TclError, ValueError):
             return
         self._recalc_for_brand(brand)
@@ -673,6 +735,13 @@ class PreviewPage(ctk.CTkFrame):
             result.append(item)
         self._populate(result)
 
+    # ── Одиночный клик / завершение редактирования ──────────────────────────
+    def _on_tree_single_click(self, event):
+        """Одиночный клик по таблице: если активно inline-поле — сохраняем его."""
+        if self._edit_entry and self._edit_iid:
+            self._commit_edit(self._edit_entry)
+        # НЕ возвращаем "break" — обычная выборка строки продолжается
+
     # ── Двойной клик ─────────────────────────────────────────────────────────
     def _on_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
@@ -687,7 +756,7 @@ class PreviewPage(ctk.CTkFrame):
         if item is None:
             return
 
-        # Жёлтая строка + клик НЕ по редактируемой колонке → выбор кандидата
+        # Жёлтая строка + клик по нередактируемой колонке → выбор кандидата
         if item.get("status") in ("multiple", "fuzzy") and col_idx not in EDITABLE_COLS:
             cands = item.get("candidates", [])
             if cands:
@@ -704,6 +773,19 @@ class PreviewPage(ctk.CTkFrame):
 
         if col_idx in EDITABLE_COLS:
             self._start_edit(iid, col, col_idx, item)
+        elif item.get("status") in ("multiple", "fuzzy"):
+            # Дополнительная попытка открыть диалог кандидатов если колонка не редактируемая
+            cands = item.get("candidates", [])
+            if cands:
+                dlg = CandidateDialog(self, cands)
+                self.wait_window(dlg)
+                if dlg.selected:
+                    item["best_match"] = dlg.selected
+                    item["status"]     = "exact"
+                    item["_user_edited"] = False
+                    item["_user_price"]  = None
+                    self._refresh_row(iid, item)
+                    self._update_stats()
 
     def _get_item_by_iid(self, iid: str) -> Optional[Dict]:
         for item in self.items:
@@ -766,43 +848,74 @@ class PreviewPage(ctk.CTkFrame):
     def _commit_edit(self, entry):
         if not self._edit_iid:
             return
-        raw = entry.get().strip()
+        try:
+            raw = entry.get().strip()
+        except Exception:
+            self._cancel_edit()
+            return
         iid     = self._edit_iid
         col_idx = self._edit_col
         item    = self._edit_item
         vals    = list(self.tree.item(iid, "values"))
 
-        if col_idx in (13, 14):       # Комментарий / Срок поставки — строка
+        bm = item.setdefault("best_match", {}) or {}
+        item["best_match"] = bm  # гарантируем dict
+
+        if col_idx == 6:              # Кратность (целое) → в best_match
+            try:
+                bm["multiplicity"] = int(float(raw.replace(",", "."))) if raw else None
+            except ValueError:
+                pass
+            vals[6] = bm.get("multiplicity") or ""
+
+        elif col_idx in (13, 14):     # Комментарий / Срок поставки — строка
             key = "comment" if col_idx == 13 else "delivery"
             item[key] = raw
             vals[col_idx] = raw
-        else:                          # числовое поле
+
+        else:                          # Числовые поля: qty(5), const(7), seb(8), seb_sum(9), kp(10), kp_sum(11)
             try:
-                new_val = float(raw.replace(",", "."))
+                new_val = float(raw.replace(",", ".")) if raw else 0.0
             except ValueError:
                 self._cancel_edit()
                 return
             if col_idx == 5:          # Кол-во
                 item["qty"] = new_val
-            elif col_idx == 7:        # Константа цена
+            elif col_idx == 7:        # Константа цена → сбрасываем ручные переопределения
                 item["_user_const_price"] = new_val if new_val else None
+                item["_user_seb_price"]   = None
+                item["_user_edited"] = False
+                item["_user_price"]  = None
+            elif col_idx == 8:        # Цена себес
+                item["_user_seb_price"]   = new_val if new_val else None
+                item["_user_const_price"] = None
+                item["_user_edited"] = False
+                item["_user_price"]  = None
+            elif col_idx == 9:        # Сумма себес → обратный пересчёт на единицу
+                qty_v = float(item.get("qty", 1) or 1)
+                item["_user_seb_price"]   = (new_val / qty_v) if (new_val and qty_v) else None
+                item["_user_const_price"] = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
             elif col_idx == 10:       # Цена КП
                 item["_user_edited"] = True
                 item["_user_price"]  = new_val
-            # Пересчёт всей строки
+            elif col_idx == 11:       # Сумма КП → обратный пересчёт на единицу
+                qty_v = float(item.get("qty", 1) or 1)
+                item["_user_edited"] = True
+                item["_user_price"]  = (new_val / qty_v) if (new_val and qty_v) else None
+            # Пересчёт цен
             seb, seb_sum, kp, kp_sum = self._compute_kp(item)
-            vals[5]  = item.get("qty", 1) if col_idx != 5 else str(new_val)
+            vals[5]  = item.get("qty", 1)
             vals[7]  = item.get("_user_const_price") or ""
             vals[8]  = f"{seb:.2f}"     if seb     else ""
             vals[9]  = f"{seb_sum:.2f}" if seb_sum else ""
             vals[10] = f"{kp:.2f}"      if kp      else ""
             vals[11] = f"{kp_sum:.2f}"  if kp_sum  else ""
 
-        tag = "edited" if (item.get("_user_edited") or item.get("_user_const_price")) else None
-        if tag:
-            self.tree.item(iid, values=vals, tags=(tag,))
+        is_edited = bool(item.get("_user_edited") or item.get("_user_const_price") or item.get("_user_seb_price"))
+        if is_edited:
+            self.tree.item(iid, values=vals, tags=("edited",))
         else:
             cur_tags = self.tree.item(iid, "tags")
             self.tree.item(iid, values=vals, tags=cur_tags)
@@ -937,7 +1050,7 @@ class PreviewPage(ctk.CTkFrame):
 
     @staticmethod
     def _open_file(path: str):
-        """Открывает файл стандартным приложением ОС."""
+        """ÐÑÐºÑÑÐ²Ð°ÐµÑ ÑÐ°Ð¹Ð» ÑÑÐ°Ð½Ð´Ð°ÑÑÐ½ÑÐ¼ Ð¿ÑÐ¸Ð»Ð¾Ð¶ÐµÐ½Ð¸ÐµÐ¼ ÐÐ¡."""
         try:
             if sys.platform.startswith("win"):
                 os.startfile(path)

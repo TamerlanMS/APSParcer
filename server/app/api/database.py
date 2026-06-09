@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import os
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query, Request
@@ -10,10 +11,12 @@ from app.core.audit import write_audit
 from app.core.config import settings
 from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
 from app.services.db_importer import import_products_from_excel, import_constants_from_excel
-from app.services.excel_cache import rebuild_base_template, CACHE_PATH
+from app.services.excel_cache import rebuild_base_template, CACHE_PATH, TEMPLATE_PATH
 from pydantic import BaseModel
 from typing import Optional, List
 import bcrypt
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -198,6 +201,14 @@ async def import_products(
                       resource=file.filename,
                       details=f"added={added}, updated={updated}",
                       ip=ip)
+    # Сохраняем загруженный файл как мастер-шаблон для следующих rebuild
+    try:
+        os.makedirs(os.path.dirname(TEMPLATE_PATH), exist_ok=True)
+        with open(TEMPLATE_PATH, "wb") as _tf:
+            _tf.write(content)
+        logger.info("database: saved new WV template (%d bytes)", len(content))
+    except Exception as _te:
+        logger.warning("database: could not save template: %s", _te)
     # Rebuild cached base template in background (non-blocking)
     asyncio.create_task(rebuild_base_template(db))
     return {"status": "ok", "added": added, "updated": updated}

@@ -185,3 +185,4 @@ class PdfUploadLog(Base):
     uploaded_at  = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     user = relationship("User", foreign_keys=[user_id])
+

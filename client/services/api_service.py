@@ -234,3 +234,4 @@ class ApiService:
     def delete_user(self, user_id: int) -> None:
         r = requests.delete(f"{self._base}/api/v1/users/{user_id}", headers=self._h, timeout=10)
         r.raise_for_status()
+

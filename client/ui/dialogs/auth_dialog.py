@@ -71,7 +71,115 @@ class AuthDialog(ctk.CTkToplevel):
         self._build_header()
         self._build_step1()
         self._build_step2()
+        self._setup_window_paste()
         self._show_step(1)
+
+    # ── Clipboard fix (CustomTkinter / Windows) ──────────────────────────────
+    @staticmethod
+    def _enable_clipboard(entry: ctk.CTkEntry):
+        """
+        Явная поддержка Ctrl+V/C/X/A и правого меню для CTkEntry.
+        На Windows CTkEntry не всегда получает системные события буфера обмена,
+        поэтому читаем/пишем clipboard напрямую через tk-методы.
+        """
+        import tkinter as tk
+
+        try:
+            inner = entry._entry  # внутренний tk.Entry
+        except AttributeError:
+            return
+
+        def _paste(e=None):
+            try:
+                clip = entry.clipboard_get()
+            except Exception:
+                return "break"
+            # Если есть выделение — заменяем его
+            try:
+                inner.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+            inner.insert("insert", clip)
+            return "break"
+
+        def _copy(e=None):
+            try:
+                text = inner.selection_get()
+                entry.clipboard_clear()
+                entry.clipboard_append(text)
+            except Exception:
+                pass
+            return "break"
+
+        def _cut(e=None):
+            _copy()
+            try:
+                inner.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+            return "break"
+
+        def _select_all(e=None):
+            inner.select_range(0, "end")
+            inner.icursor("end")
+            return "break"
+
+        # Горячие клавиши — биндим на Frame-обёртку И на вложенный tk.Entry
+        # (когда _focus_entry отправляет фокус на inner, события идут именно туда)
+        for widget in (entry, inner):
+            for seq in ("<Control-v>", "<Control-V>"):
+                widget.bind(seq, _paste)
+            for seq in ("<Control-c>", "<Control-C>"):
+                widget.bind(seq, _copy)
+            for seq in ("<Control-x>", "<Control-X>"):
+                widget.bind(seq, _cut)
+            for seq in ("<Control-a>", "<Control-A>"):
+                widget.bind(seq, _select_all)
+
+        # Контекстное меню по правой кнопке
+        ctx = tk.Menu(entry, tearoff=0)
+        ctx.add_command(label="Вставить",      command=_paste)
+        ctx.add_command(label="Копировать",    command=_copy)
+        ctx.add_command(label="Вырезать",      command=_cut)
+        ctx.add_separator()
+        ctx.add_command(label="Выделить всё",  command=_select_all)
+
+        def _show_ctx(e):
+            try:
+                ctx.tk_popup(e.x_root, e.y_root)
+            finally:
+                ctx.grab_release()
+
+        entry.bind("<Button-3>", _show_ctx)
+
+    # ── Paste на уровне окна (страховка когда фокус на Frame-обёртке CTkEntry) ─
+    def _setup_window_paste(self):
+        """
+        CTkEntry — это Frame поверх tk.Entry. entry.focus() даёт фокус Frame-у,
+        а не вложенному Entry, из-за чего биндинги на _entry не срабатывают.
+        Решение: обработчик Ctrl+V на самом окне, который ищет нужный _entry.
+        """
+        def _win_paste(e=None):
+            focused = self.focus_get()
+            for ctk_e in (self.server_entry, self.key_entry, self.password_entry):
+                try:
+                    inner = ctk_e._entry
+                except AttributeError:
+                    continue
+                if focused in (ctk_e, inner):
+                    try:
+                        clip = self.clipboard_get()
+                    except Exception:
+                        return "break"
+                    try:
+                        inner.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+                    inner.insert("insert", clip)
+                    return "break"
+
+        self.bind("<Control-v>", _win_paste)
+        self.bind("<Control-V>", _win_paste)
 
     # ── Drag ─────────────────────────────────────────────────────────────────
     def _bind_drag(self, widget):
@@ -145,6 +253,7 @@ class AuthDialog(ctk.CTkToplevel):
                                           height=40, font=FONT_NORMAL,
                                           border_color=NAVY_LIGHT)
         self.server_entry.pack(fill="x", pady=(4, 14))
+        self._enable_clipboard(self.server_entry)
         if self.config.server_url:
             self.server_entry.insert(0, self.config.server_url)
 
@@ -158,6 +267,7 @@ class AuthDialog(ctk.CTkToplevel):
                                        height=40, font=FONT_NORMAL,
                                        show="*", border_color=NAVY_LIGHT)
         self.key_entry.pack(side="left", fill="x", expand=True)
+        self._enable_clipboard(self.key_entry)
         if self.config.api_key:
             self.key_entry.insert(0, self.config.api_key)
 
@@ -229,6 +339,7 @@ class AuthDialog(ctk.CTkToplevel):
             height=40, font=FONT_NORMAL, show="*", border_color=NAVY_LIGHT
         )
         self.password_entry.pack(side="left", fill="x", expand=True)
+        self._enable_clipboard(self.password_entry)
 
         self._show_pw = False
         self.pw_eye_btn = ctk.CTkButton(
@@ -265,6 +376,14 @@ class AuthDialog(ctk.CTkToplevel):
         self.password_entry.bind("<Return>", lambda e: self._try_login())
 
     # ── Navigation ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _focus_entry(ctk_entry):
+        """Фокус на вложенный tk.Entry, а не на Frame-обёртку CTkEntry."""
+        try:
+            ctk_entry._entry.focus_set()
+        except AttributeError:
+            ctk_entry.focus()
+
     def _show_step(self, step: int):
         self._step = step
         self._frame1.pack_forget()
@@ -272,13 +391,13 @@ class AuthDialog(ctk.CTkToplevel):
         if step == 1:
             self._frame1.pack(fill="both", expand=True)
             self._header_step.configure(text="1 / 2")
-            self.server_entry.focus()
+            self.after(50, lambda: self._focus_entry(self.server_entry))
         else:
             self._frame2.pack(fill="both", expand=True)
             self._header_step.configure(text="2 / 2")
             if not self._users_loaded:
                 self._load_users()
-            self.password_entry.focus()
+            self.after(50, lambda: self._focus_entry(self.password_entry))
 
     # ── Step 1 logic ──────────────────────────────────────────────────────────
     def _on_lang_change(self):

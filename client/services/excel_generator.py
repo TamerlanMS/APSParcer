@@ -31,6 +31,8 @@ import os
 import sys
 import shutil
 import openpyxl
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
 from typing import List, Dict, Optional
 
 
@@ -78,6 +80,13 @@ CONST_NDS      = 13  # M — НДС
 CONST_GP       = 14  # N — ГП
 CONST_CUR_NAME = 22  # V — Название валюты
 CONST_CUR_RATE = 23  # W — Курс к тенге (валюты)
+CONST_RATE_LIST_COL = 31   # AE — список типов расценки для data validation
+
+RATE_TYPE_LABELS = [
+    "Сумма КазНИИСА", "Цена КазНИИСА", "РРЦ", "МРЦ",
+    "Опт", "Цена ГП", "Сумма ГП", "Проект",
+]
+
 
 # ── Колонки КП (1-based) ─────────────────────────────────────────────────────
 KP_BRAND      = 1   # A
@@ -127,6 +136,85 @@ def _clear_input_rows(ws, start_row: int = 2, end_row: int = 1000):
             if cell.value is not None and not (
                     isinstance(cell.value, str) and cell.value.startswith("=")):
                 cell.value = None
+
+
+# ── x14:dataValidation (расширенный Excel 2010+) ─────────────────────────────
+# openpyxl удаляет <x14:dataValidations> при load/save.
+# Восстанавливаем его патчем на уровне ZIP после каждого save.
+
+_X14_EXT_BLOCK = (
+    '<ext uri="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}"'
+    ' xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">'
+    '<x14:dataValidations count="1"'
+    ' xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">'
+    '<x14:dataValidation type="list" allowBlank="1"'
+    ' showInputMessage="1" showErrorMessage="1">'
+    '<x14:formula1><xm:f>Const!$AE$1:$AE$18</xm:f></x14:formula1>'
+    '<xm:sqref>H1:L1</xm:sqref>'
+    '</x14:dataValidation>'
+    '</x14:dataValidations>'
+    '</ext>'
+)
+
+
+def _inject_x14_dv(xlsm_path: str) -> None:
+    """Восстанавливает x14:dataValidations в листе WV 4.0 после openpyxl save."""
+    import zipfile, io, re as _re
+
+    def _find_sheet_file(zf, name: str) -> str:
+        wb  = zf.read("xl/workbook.xml").decode("utf-8", errors="replace")
+        rel = zf.read("xl/_rels/workbook.xml.rels").decode("utf-8", errors="replace")
+        sheets = _re.findall(r'<sheet[^>]+name="([^"]+)"[^>]+r:id="([^"]+)"', wb)
+        # rels can have Id/Target in either order; also Target may start with /xl/ or xl/
+        rid_to_target = {}
+        for m in _re.finditer(r'<Relationship[^>]+>', rel):
+            tag = m.group()
+            id_m  = _re.search(r'Id="([^"]+)"', tag)
+            tgt_m = _re.search(r'Target="([^"]+)"', tag)
+            if id_m and tgt_m:
+                tgt = tgt_m.group(1).lstrip("/")   # strip leading /
+                if not tgt.startswith("xl/"):
+                    tgt = "xl/" + tgt
+                rid_to_target[id_m.group(1)] = tgt
+        for sname, rid in sheets:
+            if sname == name:
+                return rid_to_target.get(rid, "")
+        return ""
+
+    try:
+        with open(xlsm_path, "rb") as fh:
+            raw = fh.read()
+
+        in_buf, out_buf = io.BytesIO(raw), io.BytesIO()
+
+        with zipfile.ZipFile(in_buf, "r") as zin:
+            sheet_file = _find_sheet_file(zin, "WV 4.0")
+            if not sheet_file:
+                print(f"[x14_dv] WV 4.0 not found in {xlsm_path}")
+                return
+
+            with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == sheet_file:
+                        xml = data.decode("utf-8", errors="replace")
+                        if "x14:dataValidations" not in xml:
+                            if "<extLst>" in xml:
+                                xml = xml.replace("</extLst>",
+                                                  _X14_EXT_BLOCK + "</extLst>", 1)
+                            else:
+                                xml = xml.replace("</worksheet>",
+                                                  "<extLst>" + _X14_EXT_BLOCK
+                                                  + "</extLst></worksheet>", 1)
+                        data = xml.encode("utf-8")
+                    zout.writestr(item, data)
+
+        with open(xlsm_path, "wb") as fh:
+            fh.write(out_buf.getvalue())
+
+        print(f"[x14_dv] injected into {xlsm_path}")
+    except Exception as exc:
+        print(f"[x14_dv] failed {xlsm_path}: {exc}")
 
 
 def _fill_bd_sheet(wb: openpyxl.Workbook, products: List[Dict]):
@@ -209,6 +297,28 @@ def _fill_const_sheet(wb: openpyxl.Workbook, constants: Dict):
         row = 2 + i
         ws.cell(row=row, column=CONST_CUR_NAME, value=c.get("name", ""))
         ws.cell(row=row, column=CONST_CUR_RATE, value=c.get("rate"))
+
+    # ── Список типов расценки в колонке AE (строки 1-8) ──────────────────────
+    for idx, label in enumerate(RATE_TYPE_LABELS, start=1):
+        ws.cell(row=idx, column=CONST_RATE_LIST_COL, value=label)
+
+    # ── Data validation dropdown в колонке K (Расценка) ──────────────────────
+    ae = get_column_letter(CONST_RATE_LIST_COL)  # "AE"
+    dv_end_row = max(2 + len(brands), 20)
+    rate_dv = DataValidation(
+        type="list",
+        formula1=f"Const!${ae}$1:${ae}$8",
+        allow_blank=True,
+        showDropDown=False,
+    )
+    rate_dv.error       = "Выберите из списка"
+    rate_dv.errorTitle  = "Тип расценки"
+    rate_dv.prompt      = "Выберите тип расценки"
+    rate_dv.promptTitle = "Расценка"
+    for old_dv in [dv for dv in ws.data_validations.dataValidation if "K" in str(dv.sqref)]:
+        ws.data_validations.dataValidation.remove(old_dv)
+    ws.add_data_validation(rate_dv)
+    rate_dv.sqref = f"K2:K{dv_end_row}"
 
 
 def _fill_kp_header(wb: openpyxl.Workbook, manager: str, project: str, client: str):
@@ -704,4 +814,5 @@ def generate_excel(
 
     # 5. Сохраняем файл
     wb.save(out_path)
+    _inject_x14_dv(out_path)   # восстанавливаем x14:DV в WV 4.0
     return out_path
