@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aps_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: aps_db
+      POSTGRES_USER: aps_user
+      POSTGRES_PASSWORD: ${DB_PASS}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aps_user -d aps_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: aps_api:latest
+    container_name: aps_api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aps_user:${DB_PASS}@postgres:5432/aps_db
+      DEBUG: "false"
+      ADMIN_PASSWORD_HASH: ${ADM_PASS_HASH}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-change_me_on_first_login}
+    ports:
+      - "80:8000"
+    volumes:
+      - ./client/assets:/app/assets:ro
+      - ./server/data:/app/data
+    command: >
+      sh -c "
+        python -c 'import asyncio; from app.models import models; from app.core.database import init_db; asyncio.run(init_db())' &&
+        python -c 'import asyncio; from app.core.seed import run_seed; asyncio.run(run_seed())' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+      "
+
+volumes:
+  postgres_data:
