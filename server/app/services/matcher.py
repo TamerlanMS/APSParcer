@@ -10,9 +10,18 @@ logger = logging.getLogger(__name__)
 
 EXACT_SCORE          = 100
 CONTAINS_SCORE       = 95
-FUZZY_THRESHOLD      = 68   # minimum % for article fuzzy match
-NAME_FUZZY_THRESHOLD = 82   # higher bar for name-based matching — avoids false positives
-NAME_PARTIAL_THRESHOLD = 87 # partial_ratio threshold for name fallback
+FUZZY_THRESHOLD      = 80   # minimum % for article fuzzy match (was 68 — raised to avoid single-word matches)
+NAME_FUZZY_THRESHOLD = 93   # very strict — name tokens must be nearly identical (was 85)
+NAME_PARTIAL_THRESHOLD = 96 # partial_ratio threshold for name fallback (was 90)
+
+# Length ratio guard for substring "contains" checks:
+# if the shorter string is < this fraction of the longer, substring match is too vague.
+# E.g. "Камера" (6 ch) in "Камера купольная PTZ IP66 outdoor" (33 ch) → ratio 0.18 → rejected.
+_CONTAINS_LEN_RATIO = 0.70  # was 0.55 — tighter: strings must be within 30% of each other in length
+
+# Minimum character length for a name to qualify for name-based fuzzy matching.
+# Short generic names ("Датчик", "Кабель 10м") match too many products — skip them entirely.
+_NAME_MIN_LEN = 20
 
 
 def normalize(text: str) -> str:
@@ -130,10 +139,12 @@ def find_candidates(
             na = norm_art[i]
             nn = norm_name[i]
 
-            # Article contains
+            # Article contains — only when lengths are reasonably similar
             if na and (norm_q in na or na in norm_q):
-                candidates.append({"product": p, "score": CONTAINS_SCORE, "method": "contains"})
-                continue
+                _len_ratio = min(len(norm_q), len(na)) / max(len(norm_q), len(na), 1)
+                if _len_ratio >= _CONTAINS_LEN_RATIO:
+                    candidates.append({"product": p, "score": CONTAINS_SCORE, "method": "contains"})
+                    continue
 
             # Fuzzy article
             if na:
@@ -158,10 +169,10 @@ def find_candidates(
             return candidates[:5]
 
     # ---- 3. Name-based fallback (only when article search found nothing) ----
-    # Uses stricter thresholds than article matching to avoid false positives:
-    # a name like "Камера уличная" matches dozens of products; we only accept
-    # matches where the names are genuinely very close.
-    if norm_name_q:
+    # Very strict: only engage when the name is specific enough (>= _NAME_MIN_LEN chars)
+    # and scores are very high. Short/generic names ("Датчик", "Кабель ВВГнг") match
+    # dozens of different products — better to return not_found and let the manager decide.
+    if norm_name_q and len(norm_name_q) >= _NAME_MIN_LEN:
         name_cands: List[Dict] = []
 
         # Exact name match (O(1))
@@ -177,10 +188,13 @@ def find_candidates(
             if not nn:
                 continue
 
-            # Name substring (one fully contained in the other)
+            # Name substring (one fully contained in the other) — with length ratio guard
+            # Avoids "Камера" matching "Камера купольная PTZ IP66 30x zoom outdoor"
             if norm_name_q in nn or nn in norm_name_q:
-                name_cands.append({"product": p, "score": CONTAINS_SCORE - 2, "method": "name_contains"})
-                continue
+                _len_ratio = min(len(norm_name_q), len(nn)) / max(len(norm_name_q), len(nn), 1)
+                if _len_ratio >= _CONTAINS_LEN_RATIO:
+                    name_cands.append({"product": p, "score": CONTAINS_SCORE - 2, "method": "name_contains"})
+                    continue
 
             # Strict fuzzy token sort
             s = fuzz.token_sort_ratio(norm_name_q, nn)

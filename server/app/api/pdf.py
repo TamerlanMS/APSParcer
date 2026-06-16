@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Request, Query
@@ -16,6 +17,8 @@ from app.services.matcher import match_items
 from app.services.matcher_ai import match_items_ai
 from app.models.models import PdfUploadLog
 
+logger = logging.getLogger(__name__)
+
 
 class RematchRequest(BaseModel):
     items: List[Dict[str, Any]]
@@ -24,7 +27,7 @@ class RematchRequest(BaseModel):
 router = APIRouter()
 
 MAX_PDF_SIZE = 200 * 1024 * 1024  # 200 MB
-_PDF_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pdf_parser")
+_PDF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pdf_parser")
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -109,9 +112,12 @@ async def parse_pdf_stream(
         try:
             _progress(5, "upload", "Файл получен, запускаем обработку...")
 
+            logger.info("PDF parse START: %s (%d bytes)", fname, len(content))
             pdf_items, project_name = await loop.run_in_executor(
                 _PDF_EXECUTOR, parse_pdf_specification, content, _progress
             )
+            logger.info("PDF parse DONE: %d items, project=%r",
+                        len(pdf_items), (project_name or "")[:60])
 
             if not pdf_items:
                 await write_audit(db, current_user, "parse_pdf",
@@ -123,11 +129,25 @@ async def parse_pdf_stream(
                 ))
                 return
 
-            _progress(75, "match", "Подбор позиций в базе данных...")
-            if use_ai:
-                results = await match_items_ai(pdf_items, db)
-            else:
-                results = await match_items(pdf_items, db)
+            _progress(75, "match", f"Подбор {len(pdf_items)} позиций в базе данных...")
+            logger.info("Matching phase: %d pdf_items, use_ai=%s", len(pdf_items), use_ai)
+            try:
+                if use_ai:
+                    results = await asyncio.wait_for(
+                        match_items_ai(pdf_items, db), timeout=600
+                    )
+                else:
+                    results = await asyncio.wait_for(
+                        match_items(pdf_items, db), timeout=600
+                    )
+            except asyncio.TimeoutError:
+                logger.error("Matching timed out after 600s for %d items", len(pdf_items))
+                await queue.put(json.dumps(
+                    {"error": f"Подбор позиций завис после 10 минут ({len(pdf_items)} позиций). Попробуйте повторить."},
+                    ensure_ascii=False,
+                ))
+                return
+            logger.info("Matching phase done: %d results", len(results))
 
             _progress(92, "save", "Сохранение результатов...")
             await _log_upload(db, current_user, fname, project_name, results)

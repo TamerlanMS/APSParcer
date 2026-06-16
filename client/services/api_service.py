@@ -84,6 +84,52 @@ class ApiService:
         finally:
             self.config.clear_user()
 
+    # ── User management ──────────────────────────────────────────────────────
+
+    def get_roles(self) -> list:
+        """GET /users/roles — список всех ролей."""
+        r = requests.get(
+            f"{self._base}/api/v1/users/roles",
+            headers=self._h, timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_users(self) -> list:
+        """GET /users/ — список всех пользователей (superadmin)."""
+        r = requests.get(
+            f"{self._base}/api/v1/users/",
+            headers=self._h, timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def create_user(self, data: dict) -> dict:
+        """POST /users/ — создать пользователя."""
+        r = requests.post(
+            f"{self._base}/api/v1/users/",
+            json=data, headers=self._h, timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def update_user(self, user_id: int, data: dict) -> dict:
+        """PATCH /users/{id} — обновить пользователя."""
+        r = requests.patch(
+            f"{self._base}/api/v1/users/{user_id}",
+            json=data, headers=self._h, timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def delete_user(self, user_id: int) -> None:
+        """DELETE /users/{id} — деактивировать пользователя."""
+        r = requests.delete(
+            f"{self._base}/api/v1/users/{user_id}",
+            headers=self._h, timeout=10,
+        )
+        r.raise_for_status()
+
     # ── PDF ───────────────────────────────────────────────────────────────────
 
     def parse_pdf_stream(self, pdf_path: str,
@@ -182,6 +228,49 @@ class ApiService:
         """
         r = requests.get(
             f"{self._base}/api/v1/database/base-template",
+            headers=self._h,
+            timeout=120,
+            stream=True,
+        )
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        with open(save_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+        return True
+
+    # ── Excel Template ────────────────────────────────────────────────────────
+
+    def get_excel_template_info(self) -> dict:
+        """GET /admin/excel-template — возвращает мета-информацию об активном шаблоне."""
+        r = requests.get(
+            f"{self._base}/api/v1/admin/excel-template",
+            headers=self._h,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def upload_excel_template(self, file_path: str, description: str = "") -> dict:
+        """POST /admin/excel-template — загружает новый шаблон .xlsm на сервер."""
+        with open(file_path, "rb") as fh:
+            r = requests.post(
+                f"{self._base}/api/v1/admin/excel-template",
+                headers={k: v for k, v in self._h.items() if k.lower() != "content-type"},
+                files={"file": (file_path.split("/")[-1].split("\\")[-1], fh,
+                                "application/vnd.ms-excel.sheet.macroEnabled.12")},
+                data={"description": description},
+                timeout=60,
+            )
+        r.raise_for_status()
+        return r.json()
+
+    def download_excel_template(self, save_path: str) -> bool:
+        """GET /admin/excel-template/download — скачивает текущий шаблон .xlsm."""
+        r = requests.get(
+            f"{self._base}/api/v1/admin/excel-template/download",
             headers=self._h,
             timeout=120,
             stream=True,

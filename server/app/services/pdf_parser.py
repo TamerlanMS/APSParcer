@@ -43,7 +43,7 @@ _OCR_PAGE_TIMEOUT = 45
 _OCR_LANG_CACHE: Optional[str] = None
 
 # GPT-4o-mini Vision OCR — preferred over Tesseract when API key is set
-_VISION_DPI = 72    # 72 DPI = 595x842px on A4 — 4 tiles = ~765 tokens/page (vs 6900 at 100 DPI)
+_VISION_DPI = 100   # 100 DPI = 827x1169px on A4 — detail=high → 4-6 tiles ≈ 1000 tokens/page
 _OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 
 
@@ -242,7 +242,9 @@ def _build_table_from_tsv(data: dict) -> List[List[str]]:
 _RL_LOCK: threading.Lock = threading.Lock()
 _RL_WINDOW: collections.deque = collections.deque()   # (monotonic_ts, tokens)
 _RL_TPM_LIMIT: int = 180_000          # 10 % margin below the 200 K hard limit
-_RL_EST_PER_PAGE: int = 40_000        # observed ~37K input + up to 2048 output per page
+# detail=high, 100 DPI A4-landscape (1169x827px) → ~6 tiles × 170 + 85 = 1105 vision tokens
+# + max 4096 output → ~5200 actual per page; 7000 gives ~25 pages/min headroom
+_RL_EST_PER_PAGE: int = 7_000
 
 
 def _rate_wait(tokens: int = _RL_EST_PER_PAGE) -> None:
@@ -266,11 +268,12 @@ def _rate_wait(tokens: int = _RL_EST_PER_PAGE) -> None:
         time.sleep(max(1.0, sleep_for))
 
 
-def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[List[str]]:
-    """Send a pre-rendered JPEG page to GPT-4o-mini Vision and return a pseudo-table.
+def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dict]:
+    """Send a pre-rendered JPEG page to GPT-4o-mini Vision.
 
-    Accepts raw JPEG bytes so multiple pages can be submitted to a
-    ThreadPoolExecutor without PyMuPDF thread-safety concerns.
+    Returns spec items as List[Dict] with keys:
+      pos, name_raw, article_raw, unit_raw, qty
+    GPT extracts and structures items directly — no post-processing needed.
     Returns [] on any error so the caller safely skips the page.
     """
     if not _OPENAI_API_KEY:
@@ -282,17 +285,29 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Lis
 
     _rate_wait()   # block until token budget allows this request
     b64 = base64.b64encode(jpeg_bytes).decode()
-    # Use pipe-separated format: ~40 % fewer output tokens than JSON arrays
     prompt = (
-        "Page {page}/{total} of a Russian/Kazakh construction specification (scanned PDF).\n"
-        "Extract all table rows visible on this page.\n"
-        "Output ONLY the rows — one row per line, cells separated by | (pipe).\n"
-        "Preserve numbers, codes, and Cyrillic text exactly. Include header rows.\n"
-        "No JSON, no markdown, no explanations — just pipe-separated lines.\n"
-        "Example:\n"
-        "Поз.|Наименование|Ед.|Кол-во\n"
-        "1|Кабель КВВГнг-LS 4х2,5|м|150\n"
-        "2|Труба стальная Ду50|м|30"
+        "Page {page}/{total} of a Russian/Kazakh construction/IT equipment specification (scanned PDF).\n"
+        "Your task: extract EVERY specification line item from ALL tables on this page. "
+        "Do NOT stop early — capture every numbered row until the last one visible.\n\n"
+        "Return ONLY a JSON object: {{\"items\": [...]}}\n"
+        "Each item has these fields:\n"
+        "  pos        — position number string (e.g. \"1\", \"2\", \"1.3\"), empty string if absent\n"
+        "  name_raw   — complete item name/description in Cyrillic/Latin, exactly as written "
+        "(include model, brand, technical specs if printed in the same cell)\n"
+        "  article_raw— article / model code / part number if visible in a separate column, else empty string\n"
+        "  unit_raw   — unit of measure (шт, м, кг, компл, м², л, пара, etc.), default \"шт\"\n"
+        "  qty        — quantity as a plain number string, default \"1\"\n\n"
+        "Rules:\n"
+        "- Include ALL numbered rows — IT equipment, cables, sensors, cameras, switches, etc.\n"
+        "- Skip only: section headers (bold title rows with no qty), page totals, blank rows.\n"
+        "- If a name spans two lines in the PDF, join them with a space.\n"
+        "- If the article/model code appears inside the name cell (not a separate column), copy it to article_raw AND keep it in name_raw.\n"
+        "- If no items found on this page return {{\"items\": []}}.\n\n"
+        "Example output:\n"
+        "{{\"items\": [\n"
+        "  {{\"pos\":\"1\",\"name_raw\":\"Камера IP купольная уличная 4Мп\",\"article_raw\":\"DS-2CD2143G2-I\",\"unit_raw\":\"шт\",\"qty\":\"8\"}},\n"
+        "  {{\"pos\":\"2\",\"name_raw\":\"Коммутатор управляемый PoE 24 порта\",\"article_raw\":\"SG-2424P\",\"unit_raw\":\"шт\",\"qty\":\"2\"}}\n"
+        "]}}"
     ).format(page=page_num, total=total)
 
     try:
@@ -306,17 +321,17 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Lis
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/jpeg;base64,{b64}",
-                            "detail": "low",   # 85 tokens flat vs ~37K for high
+                            "detail": "high",
                         },
                     },
                     {"type": "text", "text": prompt},
                 ],
             }],
-            max_tokens=2048,
+            max_tokens=4096,   # was 2048 — pages with 40+ items need more output tokens
             temperature=0,
+            response_format={"type": "json_object"},
         )
-        raw = (resp.choices[0].message.content or "").strip()
-        # Log actual token usage so we can tune the rate limiter
+        raw = (resp.choices[0].message.content or "{}").strip()
         usage = resp.usage
         if usage:
             logger.info(
@@ -324,23 +339,38 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Lis
                 page_num, total,
                 usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
             )
-        # Parse pipe-separated rows → List[List[str]]
-        table: List[List[str]] = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
+        try:
+            data = json.loads(raw)
+            raw_items = data.get("items", [])
+            if not isinstance(raw_items, list):
+                raw_items = []
+        except Exception:
+            logger.warning("Vision page %d/%d: JSON parse failed: %.120r", page_num, total, raw)
+            return []
+
+        items: List[Dict] = []
+        for it in raw_items:
+            if not isinstance(it, dict):
                 continue
-            cells = [c.strip() for c in line.split("|")]
-            if any(cells):
-                table.append(cells)
-        return table
+            name = str(it.get("name_raw") or "").strip()
+            if not name:
+                continue
+            items.append({
+                "pos":          str(it.get("pos") or "").strip(),
+                "name_raw":     name,
+                "article_raw":  str(it.get("article_raw") or "").strip(),
+                "unit_raw":     str(it.get("unit_raw") or "шт").strip() or "шт",
+                "qty":          str(it.get("qty") or "1").strip() or "1",
+            })
+        logger.info("Vision page %d/%d: extracted %d items", page_num, total, len(items))
+        return items
     except Exception as exc:
         logger.warning("Vision OCR page %d/%d failed: %s", page_num, total, exc)
         return []
 
 
-# Keep old signature as thin wrapper (used nowhere internally now)
-def _ocr_page_with_vision(pix, page_num: int, total: int) -> List[List[str]]:
+# Thin wrapper kept for backward compatibility
+def _ocr_page_with_vision(pix, page_num: int, total: int) -> List[Dict]:
     return _vision_call_bytes(pix.tobytes("jpeg"), page_num, total)
 
 
@@ -461,34 +491,27 @@ def _parse_pdf_with_ocr(
                 tables_by_idx[i] = []
 
     # ── Assemble results in page order ────────────────────────────────────────
+    # Vision now returns structured spec items directly — no table parsing needed.
     all_items: List[Dict] = []
-    last_spec_cols: Optional[Dict] = None
-    best_proj_score: float = 0.0
-    best_proj_name:  str   = ""
+    best_proj_name: str = ""
 
+    # Extract project name from the first page using Vision AI
+    # (title block / stamp is typically on page 0 for scanned PDFs)
+    if use_vision and page_jpegs and page_jpegs[0]:
+        best_proj_name = _extract_project_name_ai_vision(page_jpegs[0])
+        # If page 0 gave nothing, try page 1
+        if not best_proj_name and len(page_jpegs) > 1 and page_jpegs[1]:
+            best_proj_name = _extract_project_name_ai_vision(page_jpegs[1])
+        logger.info("OCR: project name via Vision AI: %r", best_proj_name[:80] if best_proj_name else "(not found)")
+
+    logger.info("Vision OCR: assembling results from %d pages", total_pages)
     for page_idx in range(total_pages):
-        table = tables_by_idx.get(page_idx, [])
-        if not table:
+        page_items = tables_by_idx.get(page_idx, [])
+        if not page_items:
             continue
+        all_items.extend(page_items)
 
-        for row in table[:6]:
-            for cell in row:
-                if not cell:
-                    continue
-                text = re.sub(r"\s+", " ", cell).strip()
-                if len(text) >= 20:
-                    s = _score_project_name(text)
-                    if s > best_proj_score:
-                        best_proj_score = s
-                        best_proj_name  = text[:500]
-
-        items, detected_cols = extract_specification_from_page(
-            table, continuation_cols=last_spec_cols
-        )
-        if detected_cols is not None:
-            last_spec_cols = detected_cols
-        all_items.extend(items)
-
+    # Renumber sequentially (override per-page pos numbers)
     for idx, item in enumerate(all_items, start=1):
         item["pos"] = str(idx)
 
@@ -1005,6 +1028,141 @@ def _extract_tables_fast(page) -> list:
     return permissive_tables if permissive_rows > default_rows else default_tables
 
 
+
+def _score_project_name(text: str) -> float:
+    """Score how likely a text string is a project name (0.0–1.0).
+
+    Used to extract the best project title from a spec PDF.
+    Higher score = more likely to be the project/object name.
+    """
+    if not text:
+        return 0.0
+    text_l = text.lower()
+    score: float = 0.0
+
+    # Keywords common in Russian/Kazakh construction project names
+    _PROJECT_KW = (
+        "проектирование", "строительство", "реконструкция", "здание",
+        "здания", "объект", "объекта", "сооружение", "сооружения",
+        "комплекс", "система", "автоматизация", "оснащение",
+        "монтаж", "установка", "реализация", "разработка",
+    )
+    for kw in _PROJECT_KW:
+        if kw in text_l:
+            score += 0.2
+            break  # one match is enough for a strong signal
+
+    # Longer strings are more likely to be project names (up to +0.3)
+    score += min(len(text) / 200.0, 0.3)
+
+    # Penalise article-like patterns (e.g. "FS-1024E", "ABC-123")
+    if re.search(r"[A-Z]{2,}-\d{2,}", text):
+        score -= 0.4
+
+    # Penalise if most chars are digits/Latin (not a project description)
+    non_cyrillic = len(re.findall(r"[^а-яёА-ЯЁ\s]", text))
+    if non_cyrillic > len(text) * 0.6:
+        score -= 0.3
+
+    return max(0.0, min(score, 1.0))
+
+
+def _extract_project_name_ai(text_pages: List[str]) -> str:
+    """Use GPT-4o-mini to extract the project/object name from PDF text.
+
+    text_pages: text content from the first few PDF pages (non-spec cover pages work best).
+    Returns the project name string, or empty string if not found / API unavailable.
+    """
+    if not _OPENAI_API_KEY:
+        return ""
+
+    combined = "\n\n---\n\n".join(p[:2000] for p in text_pages[:5] if (p or "").strip())
+    if len(combined) < 30:
+        return ""
+
+    prompt = (
+        "Это текст из PDF-документа строительного или IT-проекта (спецификация оборудования).\n"
+        "Найди и напиши ТОЛЬКО официальное наименование объекта/проекта — это название здания, "
+        "сооружения, системы, комплекса или строительного проекта, которое обычно указывается "
+        "в титульном блоке или штампе документа.\n"
+        "Примеры правильного ответа:\n"
+        "  «Многофункциональный жилой комплекс по ул. Абая, 10, г. Алматы»\n"
+        "  «Система видеонаблюдения административного здания Министерства»\n"
+        "  «Реконструкция инженерных систем бизнес-центра Алатау»\n"
+        "Правила:\n"
+        "  - Пиши только само наименование, без кавычек, без вводных слов, без пояснений.\n"
+        "  - Не включай номер документа, шифр, код, дату или ФИО.\n"
+        "  - Если наименование не найдено — ответь строго пустой строкой.\n\n"
+        f"Текст документа:\n{combined}"
+    )
+
+    try:
+        from openai import OpenAI as _OAI
+        _cli = _OAI(api_key=_OPENAI_API_KEY, timeout=30.0)
+        resp = _cli.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=200,
+        )
+        result = (resp.choices[0].message.content or "").strip().strip('"\'«»')
+        logger.info("_extract_project_name_ai → %r", result[:80] if result else "(empty)")
+        if 10 <= len(result) <= 500:
+            return result
+        return ""
+    except Exception as exc:
+        logger.warning("_extract_project_name_ai failed: %s", exc)
+        return ""
+
+
+def _extract_project_name_ai_vision(jpeg_bytes: bytes) -> str:
+    """Use GPT-4o-mini Vision to extract the project name from a scanned PDF page.
+
+    Sends the first page image (likely a title block) to Vision.
+    Returns project name string or empty string.
+    """
+    if not _OPENAI_API_KEY or not jpeg_bytes:
+        return ""
+
+    import base64 as _b64
+    b64 = _b64.b64encode(jpeg_bytes).decode()
+    prompt = (
+        "Это скан первой страницы строительного/IT-проекта.\n"
+        "Найди и напиши ТОЛЬКО официальное наименование объекта или проекта — "
+        "обычно это крупный текст в заголовке или в штампе внизу листа.\n"
+        "Правила: только само наименование, без кавычек, без номеров документа, "
+        "без шифра, без дат и ФИО.\n"
+        "Если не найдено — пустая строка."
+    )
+
+    try:
+        from openai import OpenAI as _OAI
+        _cli = _OAI(api_key=_OPENAI_API_KEY, timeout=30.0)
+        resp = _cli.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}",
+                        "detail": "high",
+                    }},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            temperature=0,
+            max_tokens=200,
+        )
+        result = (resp.choices[0].message.content or "").strip().strip('"\'«»')
+        logger.info("_extract_project_name_ai_vision → %r", result[:80] if result else "(empty)")
+        if 10 <= len(result) <= 500:
+            return result
+        return ""
+    except Exception as exc:
+        logger.warning("_extract_project_name_ai_vision failed: %s", exc)
+        return ""
+
+
 def _is_spec_page_text(page_text: str) -> bool:
     """Return True if the page text indicates this page contains the equipment
     specification (Спецификация Оборудования / .СО sheet type).
@@ -1079,8 +1237,7 @@ def parse_pdf_specification(
 
     all_items: List[Dict] = []
     last_spec_cols: Optional[Dict] = None
-    best_proj_score: float = 0.0
-    best_proj_name:  str   = ""
+    best_proj_name: str = ""
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         total_pages = len(pdf.pages)
@@ -1145,31 +1302,61 @@ def parse_pdf_specification(
             progress_cb(18, "detect",
                         f"Найдено страниц: {len(spec_indices)} из {total_pages}")
 
+        # ── Extract project name via AI ───────────────────────────────────────
+        # Prefer pages that are NOT spec pages (cover/title pages have the project name).
+        # Fall back to first N pages if the entire doc is spec pages.
+        non_spec = [i for i in range(min(total_pages, 10)) if i not in spec_indices]
+        candidate_pages = non_spec[:5] if non_spec else list(range(min(5, total_pages)))
+        ai_proj_name = _extract_project_name_ai([page_texts[i] for i in candidate_pages])
+        if ai_proj_name:
+            best_proj_name = ai_proj_name
+            logger.info("parse_pdf: project name via AI: %r", best_proj_name[:80])
+
         # ── Phase 2: extract tables from spec pages ──────────────────────────
         for i, page_idx in enumerate(spec_indices):
             pct = 20 + int(50 * i / max(len(spec_indices), 1))
             page_num = page_idx + 1
+            logger.info("parse_pdf: Phase2 page %d/%d (idx=%d)",
+                        i + 1, len(spec_indices), page_idx)
             if progress_cb:
                 progress_cb(pct, "extract",
                             f"Извлечение таблиц: страница {page_num}...")
+            logger.info("parse_pdf: progress_cb done page %d", page_num)
 
             page = pdf.pages[page_idx]
+            logger.info("parse_pdf: page obj acquired page %d", page_num)
 
-            # Project-name scoring from cached text
             raw_text = (
                 page_texts[page_idx]
                 if page_idx < len(page_texts)
                 else (page.extract_text() or "")
             )
-            for line in (raw_text or "").splitlines()[:10]:
-                line = re.sub(r"\s+", " ", line).strip()
-                if len(line) >= 20:
-                    s = _score_project_name(line)
-                    if s > best_proj_score:
-                        best_proj_score = s
-                        best_proj_name  = line[:500]
+            logger.info("parse_pdf: raw_text len=%d page %d", len(raw_text or ""), page_num)
 
-            tables = page.extract_tables() or []
+            logger.info("parse_pdf: extract_tables start page %d", page_num)
+            # pdfplumber can hang indefinitely on complex PDFs due to pdfminer
+            # lattice-detection bugs. Run in a daemon thread with hard timeout.
+            import concurrent.futures as _cf_tab
+            _tab_ex = _cf_tab.ThreadPoolExecutor(max_workers=1,
+                                                  thread_name_prefix="tab_ex")
+            try:
+                _tab_fut = _tab_ex.submit(page.extract_tables)
+                tables = _tab_fut.result(timeout=30) or []
+            except _cf_tab.TimeoutError:
+                logger.warning(
+                    "parse_pdf: extract_tables TIMEOUT page %d (30s) — skipping",
+                    page_num,
+                )
+                tables = []
+            except Exception as _tab_exc:
+                logger.warning(
+                    "parse_pdf: extract_tables ERROR page %d: %s", page_num, _tab_exc
+                )
+                tables = []
+            finally:
+                _tab_ex.shutdown(wait=False)
+            logger.info("parse_pdf: extract_tables done page %d — %d table(s)",
+                        page_num, len(tables))
             for table in tables:
                 if not table:
                     continue
@@ -1180,6 +1367,8 @@ def parse_pdf_specification(
                 if detected_cols is not None:
                     last_spec_cols = detected_cols
                 all_items.extend(items)
+            logger.info("parse_pdf: page %d done — %d total items so far",
+                        page_num, len(all_items))
 
     if progress_cb:
         progress_cb(72, "parse", "\u0420\u0430\u0437\u0431\u043e\u0440 \u0438 \u043d\u0443\u043c\u0435\u0440\u0430\u0446\u0438\u044f \u043f\u043e\u0437\u0438\u0446\u0438\u0439...")
@@ -1192,7 +1381,22 @@ def parse_pdf_specification(
         if progress_cb:
             progress_cb(20, "ocr_check",
                         "Проверка: сканированный ли PDF...")
-        if _is_scanned_pdf(pdf_bytes):
+        # _is_scanned_pdf can deadlock if a previous fitz operation is stuck.
+        # Run it in a fresh daemon thread with a hard timeout.
+        import concurrent.futures as _cf
+        _scan_ex = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            _scan_fut = _scan_ex.submit(_is_scanned_pdf, pdf_bytes)
+            _is_scanned = _scan_fut.result(timeout=15)
+        except _cf.TimeoutError:
+            logger.warning("_is_scanned_pdf timed out — assuming scanned PDF")
+            _is_scanned = True
+        except Exception as _e:
+            logger.warning("_is_scanned_pdf error: %s — assuming scanned PDF", _e)
+            _is_scanned = True
+        finally:
+            _scan_ex.shutdown(wait=False)
+        if _is_scanned:
             all_items, best_proj_name = _parse_pdf_with_ocr(
                 pdf_bytes, progress_cb=progress_cb
             )
