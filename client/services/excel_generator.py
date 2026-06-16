@@ -685,6 +685,188 @@ def _extend_wv_formulas(ws, last_data_row: int) -> None:
                 dst_cell.value = src_val.replace(src_row_str, dst_row_str)
 
 
+
+def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
+    """
+    Restores worksheet relationship files that openpyxl silently drops on save.
+
+    Known openpyxl issues:
+      - sheet3.xml.rels (WV 4.0): loses drawing, ctrlProp x2, printerSettings refs
+      - sheet4.xml.rels (КП):     loses drawing2 (wrong file linked), ctrlProp,
+                                   printerSettings, slicer refs
+      - xl/drawings/drawing2.xml: dropped from ZIP entirely
+
+    Without ctrlProp links the "Вкл поиск" / "Выкл поиск" form-control buttons
+    on WV 4.0 lose their macro binding and stop working.
+    """
+    import zipfile, io as _io, re as _re
+
+    def _abs_target(target: str) -> str:
+        if target.startswith("../"):
+            return "/xl/" + target[3:]
+        return target
+
+    def _target_file(target: str) -> str:
+        """Return filename part: /xl/drawings/drawing2.xml -> drawing2.xml"""
+        return target.rstrip("/").split("/")[-1]
+
+    def _parse_rels(xml: str) -> list:
+        """Return list of (rel_type, rid, abs_target) from a rels XML string."""
+        out = []
+        for m in _re.finditer(r'<Relationship\b[^>]*/>', xml):
+            tag  = m.group()
+            id_m = _re.search(r'Id="([^"]+)"', tag)
+            tp_m = _re.search(r'Type="([^"]+)"', tag)
+            tg_m = _re.search(r'Target="([^"]+)"', tag)
+            if id_m and tp_m and tg_m:
+                out.append((tp_m.group(1), id_m.group(1), _abs_target(tg_m.group(1))))
+        return out
+
+    def _rel_target(abs_t: str) -> str:
+        """Convert /xl/path back to ../path for use in .rels files."""
+        if abs_t.startswith("/xl/"):
+            return "../" + abs_t[4:]
+        return abs_t
+
+    def _merge_rels(saved_xml: str, tpl_rels: list) -> str:
+        """
+        Merge template rels into saved_xml:
+          - Skip vmlDrawing (already present as anysvml).
+          - For drawing-type rels: fix the target if a drawing rel already exists;
+            otherwise add a new entry.  Only drawing rels are replaced — printerSettings,
+            table, slicer, ctrlProp etc. are never touched by the drawing fix.
+          - All new entries use relative paths (../…) and safe non-conflicting rIds.
+        """
+        # Build set of target filenames already present
+        existing_targets = set(
+            _target_file(tg)
+            for tg in _re.findall(r'Target="([^"]+)"', saved_xml)
+        )
+        # Track existing rIds to avoid duplicates when inserting
+        existing_rids = set(_re.findall(r'Id="(rId\d+)"', saved_xml))
+        max_rid = max(
+            (int(r[3:]) for r in existing_rids if r[3:].isdigit()),
+            default=0,
+        )
+
+        def _next_rid():
+            nonlocal max_rid
+            max_rid += 1
+            return f"rId{max_rid}"
+
+        inserts = []
+        for (rel_type, rid, abs_target) in tpl_rels:
+            fname  = _target_file(abs_target)
+            rel_t  = _rel_target(abs_target)   # relative path for rels files
+
+            if "vmlDrawing" in rel_type:
+                continue  # already handled by anysvml
+
+            if fname not in existing_targets:
+                # For drawing-type rels: try replacing an EXISTING drawing entry
+                # (e.g. drawing1.xml saved where drawing2.xml is expected).
+                # Only match relationships whose Type ends with "/drawing" — never
+                # touch printerSettings, table, slicer, ctrlProp, etc.
+                if rel_type.endswith("/drawing"):
+                    def _fix_drawing(m, correct_rel=rel_t):
+                        tag = m.group()
+                        type_m = _re.search(r'Type="([^"]+)"', tag)
+                        if not type_m:
+                            return tag
+                        if not type_m.group(1).endswith("/drawing"):
+                            return tag   # skip vmlDrawing and all other types
+                        return _re.sub(r'Target="[^"]+"', f'Target="{correct_rel}"', tag)
+                    new_xml = _re.sub(r'<Relationship\b[^>]*/>', _fix_drawing, saved_xml)
+                    if new_xml != saved_xml:
+                        saved_xml = new_xml
+                        existing_targets.add(fname)
+                        continue
+                # Add as a fresh entry with a safe (non-conflicting) rId
+                use_rid = rid if rid not in existing_rids else _next_rid()
+                inserts.append(
+                    f'<Relationship Id="{use_rid}" Type="{rel_type}" Target="{rel_t}"/>',
+                )
+                existing_targets.add(fname)
+                existing_rids.add(use_rid)
+
+        if inserts:
+            saved_xml = saved_xml.replace("</Relationships>",
+                                          "".join(inserts) + "</Relationships>")
+        return saved_xml
+
+    try:
+        with zipfile.ZipFile(tpl_path, "r") as ztpl:
+            tpl_files  = set(ztpl.namelist())
+            tpl_s3r    = ztpl.read("xl/worksheets/_rels/sheet3.xml.rels").decode("utf-8", errors="replace")
+            tpl_s4r    = ztpl.read("xl/worksheets/_rels/sheet4.xml.rels").decode("utf-8", errors="replace")
+            tpl_d2     = ztpl.read("xl/drawings/drawing2.xml")            if "xl/drawings/drawing2.xml"            in tpl_files else None
+            tpl_d2rels = ztpl.read("xl/drawings/_rels/drawing2.xml.rels") if "xl/drawings/_rels/drawing2.xml.rels" in tpl_files else None
+
+        tpl_s3_rels = _parse_rels(tpl_s3r)
+        tpl_s4_rels = _parse_rels(tpl_s4r)
+
+        with open(out_path, "rb") as fh:
+            raw = fh.read()
+
+        in_buf  = _io.BytesIO(raw)
+        out_buf = _io.BytesIO()
+
+        with zipfile.ZipFile(in_buf, "r") as zin:
+            existing_saved = set(zin.namelist())
+            _d2_added  = tpl_d2     and "xl/drawings/drawing2.xml"            not in existing_saved
+            _d2r_added = tpl_d2rels and "xl/drawings/_rels/drawing2.xml.rels" not in existing_saved
+            ct_xml_orig = ""   # will hold [Content_Types].xml text
+
+            with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+
+                    if item.filename == "xl/worksheets/_rels/sheet3.xml.rels":
+                        xml  = data.decode("utf-8", errors="replace")
+                        xml  = _merge_rels(xml, tpl_s3_rels)
+                        data = xml.encode("utf-8")
+
+                    elif item.filename == "xl/worksheets/_rels/sheet4.xml.rels":
+                        xml  = data.decode("utf-8", errors="replace")
+                        xml  = _merge_rels(xml, tpl_s4_rels)
+                        data = xml.encode("utf-8")
+
+                    elif item.filename == "[Content_Types].xml":
+                        ct_xml_orig = data.decode("utf-8", errors="replace")
+                        # Will be (re-)written after we know which parts were added
+                        continue
+
+                    zout.writestr(item, data)
+
+                # Re-add drawing2.xml if it was dropped from the ZIP
+                if _d2_added:
+                    zout.writestr("xl/drawings/drawing2.xml", tpl_d2)
+                    print("[ws_rels] restored drawing2.xml from template")
+                if _d2r_added:
+                    zout.writestr("xl/drawings/_rels/drawing2.xml.rels", tpl_d2rels)
+                    print("[ws_rels] restored drawing2.xml.rels from template")
+
+                # Patch [Content_Types].xml: register drawing2.xml if newly added
+                ct_xml = ct_xml_orig
+                if _d2_added and "/xl/drawings/drawing2.xml" not in ct_xml:
+                    ct_xml = ct_xml.replace(
+                        "</Types>",
+                        '<Override PartName="/xl/drawings/drawing2.xml"'
+                        ' ContentType="application/vnd.openxmlformats-officedocument'
+                        '.drawing+xml"/></Types>',
+                    )
+                    print("[ws_rels] added drawing2.xml to [Content_Types].xml")
+                zout.writestr("[Content_Types].xml", ct_xml.encode("utf-8"))
+
+        with open(out_path, "wb") as fh:
+            fh.write(out_buf.getvalue())
+
+        print(f"[ws_rels] restored missing worksheet relationships in {out_path}")
+
+    except Exception as exc:
+        print(f"[ws_rels] failed: {exc}")
+
+
 def generate_excel(
     items: List[Dict],
     output_path: str,
@@ -847,4 +1029,5 @@ def generate_excel(
     # 5. Сохраняем файл
     wb.save(out_path)
     _inject_x14_dv(out_path)   # восстанавливаем x14:DV в WV 4.0
+    _restore_missing_rels(tpl, out_path)  # восстанавливаем ctrlProp/drawing rels
     return out_path

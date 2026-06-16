@@ -8,9 +8,11 @@ import re
 
 logger = logging.getLogger(__name__)
 
-EXACT_SCORE     = 100
-CONTAINS_SCORE  = 95
-FUZZY_THRESHOLD = 68   # minimum % for fuzzy match
+EXACT_SCORE          = 100
+CONTAINS_SCORE       = 95
+FUZZY_THRESHOLD      = 68   # minimum % for article fuzzy match
+NAME_FUZZY_THRESHOLD = 82   # higher bar for name-based matching — avoids false positives
+NAME_PARTIAL_THRESHOLD = 87 # partial_ratio threshold for name fallback
 
 
 def normalize(text: str) -> str:
@@ -86,23 +88,28 @@ class _ProductIndex:
 def find_candidates(
     article_raw: str,
     index: _ProductIndex,
-    kaznisa_code_raw: str = '',
+    kaznisa_code_raw: str = '',   # kept for API compatibility, not used for matching
     name_raw: str = '',
 ) -> List[Dict]:
     """Return ranked candidates.
 
-    Steps:
-      1. Exact article match (O(1))
-      2. Exact kaznisa_code match (O(1))
-      3. Substring / fuzzy scan by article query (O(n))
-         Also tries article query against DB names (catches mislabeled fields)
-      4. Name-based fallback using name_raw (runs only when steps 1-3 give nothing)
+    Matching priority:
+      1. Exact article match         (O(1) — authoritative)
+      2. Substring / fuzzy article   (O(n) — model numbers)
+         Also checks article query against DB names (mislabeled fields).
+      3. Name-based fallback         (O(n) — only when article gives nothing)
+         High thresholds (NAME_FUZZY_THRESHOLD / NAME_PARTIAL_THRESHOLD) prevent
+         false positives from generic names that appear in many different products.
+         If no name candidate meets the threshold, returns empty → "not_found",
+         so the manager can select the correct item manually.
+
+    KazNIISA code matching is intentionally disabled: project designers often
+    enter arbitrary or placeholder codes that do not correspond to real DB items.
     """
     norm_q      = normalize(article_raw)
-    norm_code   = normalize(kaznisa_code_raw)
     norm_name_q = normalize(name_raw)
 
-    if not norm_q and not norm_code and not norm_name_q:
+    if not norm_q and not norm_name_q:
         return []
 
     products  = index.products
@@ -117,15 +124,7 @@ def find_candidates(
             candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "exact"})
         return candidates[:1]
 
-    # ---- 2. Exact kaznisa_code match (O(1)) -------------------------------
-    if norm_code and norm_code in index.code_exact:
-        for i in index.code_exact[norm_code]:
-            candidates.append({"product": products[i], "score": 98, "method": "code_exact"})
-        if candidates:
-            candidates.sort(key=lambda x: x['score'], reverse=True)
-            return candidates[:1]
-
-    # ---- 3. Substring / fuzzy scan by article (O(n)) ----------------------
+    # ---- 2. Substring / fuzzy scan by article (O(n)) ----------------------
     if norm_q:
         for i, p in enumerate(products):
             na = norm_art[i]
@@ -158,7 +157,10 @@ def find_candidates(
         if candidates:
             return candidates[:5]
 
-    # ---- 4. Name-based fallback (runs when article search found nothing) ----
+    # ---- 3. Name-based fallback (only when article search found nothing) ----
+    # Uses stricter thresholds than article matching to avoid false positives:
+    # a name like "Камера уличная" matches dozens of products; we only accept
+    # matches where the names are genuinely very close.
     if norm_name_q:
         name_cands: List[Dict] = []
 
@@ -169,26 +171,26 @@ def find_candidates(
             name_cands.sort(key=lambda x: x['score'], reverse=True)
             return name_cands[:1]
 
-        # Substring / fuzzy scan by name (O(n))
+        # Substring / fuzzy scan by name (O(n)) — strict thresholds
         for i, p in enumerate(products):
             nn = norm_name[i]
             if not nn:
                 continue
 
-            # Name substring
+            # Name substring (one fully contained in the other)
             if norm_name_q in nn or nn in norm_name_q:
                 name_cands.append({"product": p, "score": CONTAINS_SCORE - 2, "method": "name_contains"})
                 continue
 
-            # Fuzzy token sort
+            # Strict fuzzy token sort
             s = fuzz.token_sort_ratio(norm_name_q, nn)
-            if s >= FUZZY_THRESHOLD:
+            if s >= NAME_FUZZY_THRESHOLD:
                 name_cands.append({"product": p, "score": s, "method": "name_fuzzy"})
                 continue
 
-            # Partial ratio (good for long names with extra words)
+            # Strict partial ratio
             s2 = fuzz.partial_ratio(norm_name_q, nn)
-            if s2 >= FUZZY_THRESHOLD + 10:
+            if s2 >= NAME_PARTIAL_THRESHOLD:
                 name_cands.append({"product": p, "score": s2, "method": "name_partial"})
 
         name_cands.sort(key=lambda x: x['score'], reverse=True)
@@ -221,9 +223,10 @@ async def match_items(
         )
 
         if not candidates:
-            status     = "not_found"
-            best       = None
-            cands_data = []
+            status       = "not_found"
+            best         = None
+            cands_data   = []
+            match_method = None
         else:
             best_score = candidates[0]['score']
             close      = [c for c in candidates if best_score - c['score'] <= 5]
@@ -235,17 +238,19 @@ async def match_items(
             else:
                 status = "fuzzy"
 
-            best       = product_to_dict(candidates[0]['product'])
-            cands_data = [
+            match_method = candidates[0].get("method")
+            best         = product_to_dict(candidates[0]['product'])
+            cands_data   = [
                 {**product_to_dict(c["product"]), "score": c["score"], "method": c["method"]}
                 for c in candidates
             ]
 
         results.append({
             **item,
-            "status":     status,
-            "best_match": best,
-            "candidates": cands_data,
+            "status":       status,
+            "match_method": match_method,
+            "best_match":   best,
+            "candidates":   cands_data,
         })
 
     return results

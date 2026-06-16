@@ -12,14 +12,14 @@ import logging
 import math
 import os
 import shutil
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import openpyxl
 from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.models.models import Product, BrandConstant, CurrencyRate, Manager
+from app.models.models import Product, BrandConstant, CurrencyRate, Manager, ExcelTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -388,15 +388,32 @@ def _extend_kp_table(wb: openpyxl.Workbook) -> None:
         current_end, target_end, kp_table.ref,
     )
 
+def invalidate_base_template() -> None:
+    """Delete the cached base_template.xlsm so it will be rebuilt on next request."""
+    if os.path.exists(CACHE_PATH):
+        try:
+            os.remove(CACHE_PATH)
+            logger.info("excel_cache: cache invalidated (file deleted)")
+        except OSError as e:
+            logger.warning("excel_cache: could not delete cache: %s", e)
+
+
 def _build_sync(products: List, brands: List,
-                managers: List, currencies: List) -> None:
+                managers: List, currencies: List,
+                template_bytes: Optional[bytes] = None) -> None:
     """CPU-bound: copy template, fill sheets, save. Runs in thread executor."""
-    if not os.path.exists(TEMPLATE_PATH):
-        logger.warning("excel_cache: template not found at %s", TEMPLATE_PATH)
-        return
     os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
     tmp = CACHE_PATH + ".tmp"
-    shutil.copyfile(TEMPLATE_PATH, tmp)
+    if template_bytes:
+        with open(tmp, "wb") as f:
+            f.write(template_bytes)
+        logger.info("excel_cache: using template from database (%d bytes)", len(template_bytes))
+    else:
+        if not os.path.exists(TEMPLATE_PATH):
+            logger.warning("excel_cache: template not found at %s", TEMPLATE_PATH)
+            return
+        shutil.copyfile(TEMPLATE_PATH, tmp)
+        logger.info("excel_cache: using template from filesystem (%s)", TEMPLATE_PATH)
     wb = openpyxl.load_workbook(tmp, keep_vba=True, data_only=False)
 
     if "БД" in wb.sheetnames:
@@ -434,10 +451,21 @@ async def rebuild_base_template(db: AsyncSession) -> None:
         managers   = managers_res.scalars().all()
         currencies = currencies_res.scalars().all()
 
+        # Check for DB template; fall back to filesystem if none uploaded yet
+        tpl_result = await db.execute(
+            select(ExcelTemplate)
+            .where(ExcelTemplate.is_active == True)
+            .order_by(ExcelTemplate.version.desc())
+            .limit(1)
+        )
+        active_tpl = tpl_result.scalar_one_or_none()
+        template_bytes = active_tpl.data if active_tpl else None
+
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None, _build_sync,
-            list(products), list(brands), list(managers), list(currencies)
+            list(products), list(brands), list(managers), list(currencies),
+            template_bytes,
         )
     except Exception as exc:
         logger.error("excel_cache: rebuild failed: %s", exc)

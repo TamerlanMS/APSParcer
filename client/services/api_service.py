@@ -1,3 +1,5 @@
+import json
+import os
 import requests
 from typing import Tuple, Callable, Optional
 from services.config import AppConfig
@@ -84,21 +86,81 @@ class ApiService:
 
     # ── PDF ───────────────────────────────────────────────────────────────────
 
+    def parse_pdf_stream(self, pdf_path: str,
+                         progress_cb: Optional[Callable] = None,
+                         ai_mode: bool = False) -> dict:
+        """POST file to /pdf/parse-stream, read SSE progress events, return result.
+
+        progress_cb(pct: int, stage: str, msg: str) is called for each event.
+        Raises RuntimeError on server error or if stream closes without result.
+        """
+        fname = os.path.basename(pdf_path)
+        if progress_cb:
+            progress_cb(3, "upload", "Отправка файла на сервер...")
+
+        with open(pdf_path, "rb") as f:
+            files = {"file": (fname, f, "application/pdf")}
+            with requests.post(
+                f"{self._base}/api/v1/pdf/parse-stream",
+                files=files,
+                headers=self._h,
+                params={"ai_mode": "true" if ai_mode else "false"},
+                stream=True,
+                timeout=3600,  # 1 hour — OCR of large scanned PDFs can take 20-40 min
+            ) as r:
+                r.raise_for_status()
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode("utf-8", errors="replace")
+                    if not raw_line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(raw_line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if "error" in event:
+                        raise RuntimeError(event["error"])
+                    if "done" in event:
+                        return event["result"]
+                    if progress_cb and "pct" in event:
+                        progress_cb(
+                            int(event["pct"]),
+                            event.get("stage", ""),
+                            event.get("msg", ""),
+                        )
+        raise RuntimeError("Сервер закрыл соединение без результата")
+
     def parse_pdf(self, pdf_path: str,
-                  progress_cb: Optional[Callable] = None) -> dict:
+                  progress_cb: Optional[Callable] = None,
+                  ai_mode: bool = False) -> dict:
+        """Legacy non-streaming parse (kept for compatibility)."""
         with open(pdf_path, "rb") as f:
             fname = pdf_path.replace("\\", "/").split("/")[-1]
             files = {"file": (fname, f, "application/pdf")}
             if progress_cb:
-                progress_cb(15, "sending")
+                progress_cb(15, "sending", "Отправка файла...")
             r = requests.post(
                 f"{self._base}/api/v1/pdf/parse",
                 files=files,
                 headers=self._h,
+                params={"ai_mode": "true" if ai_mode else "false"},
                 timeout=900,
             )
         if progress_cb:
-            progress_cb(90, "processing")
+            progress_cb(90, "processing", "Обработка...")
+        r.raise_for_status()
+        return r.json()
+
+    def rematch_ai(self, items: list) -> dict:
+        """Send items to server AI re-matcher. Returns updated match results."""
+        r = requests.post(
+            f"{self._base}/api/v1/pdf/rematch",
+            json={"items": items},
+            headers=self._h,
+            timeout=300,
+        )
         r.raise_for_status()
         return r.json()
 
@@ -174,64 +236,4 @@ class ApiService:
 
     def import_constants(self, file_path: str, password: str) -> dict:
         with open(file_path, "rb") as f:
-            fname = file_path.replace("\\", "/").split("/")[-1]
-            mime = (
-                "application/vnd.ms-excel.sheet.macroEnabled.12"
-                if fname.lower().endswith(".xlsm")
-                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            files = {"file": (fname, f, mime)}
-            r = requests.post(
-                f"{self._base}/api/v1/database/import/constants",
-                files=files,
-                headers=self._h,
-                params={"password": password},
-                timeout=60,
-            )
-        r.raise_for_status()
-        return r.json()
-
-    def get_logs(self) -> list:
-        r = requests.get(
-            f"{self._base}/api/v1/database/logs",
-            headers=self._h,
-            timeout=10,
-        )
-        r.raise_for_status()
-        return r.json()
-
-    def get_all_products(self) -> list:
-        r = requests.get(
-            f"{self._base}/api/v1/database/products/all",
-            headers=self._h,
-            timeout=120,
-        )
-        r.raise_for_status()
-        return r.json()
-
-    # ── User management ───────────────────────────────────────────────────────
-
-    def get_users(self) -> list:
-        r = requests.get(f"{self._base}/api/v1/users/", headers=self._h, timeout=10)
-        r.raise_for_status()
-        return r.json()
-
-    def get_roles(self) -> list:
-        r = requests.get(f"{self._base}/api/v1/users/roles", headers=self._h, timeout=10)
-        r.raise_for_status()
-        return r.json()
-
-    def create_user(self, data: dict) -> dict:
-        r = requests.post(f"{self._base}/api/v1/users/", json=data, headers=self._h, timeout=10)
-        r.raise_for_status()
-        return r.json()
-
-    def update_user(self, user_id: int, data: dict) -> dict:
-        r = requests.patch(f"{self._base}/api/v1/users/{user_id}", json=data, headers=self._h, timeout=10)
-        r.raise_for_status()
-        return r.json()
-
-    def delete_user(self, user_id: int) -> None:
-        r = requests.delete(f"{self._base}/api/v1/users/{user_id}", headers=self._h, timeout=10)
-        r.raise_for_status()
-
+            fname = file_path.repla

@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     libpoppler-cpp-dev \
     poppler-utils \
     gcc \
+    tesseract-ocr \
+    tesseract-ocr-rus \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

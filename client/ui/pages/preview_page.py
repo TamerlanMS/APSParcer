@@ -19,6 +19,7 @@ C_MULTIPLE = "#FFF3CD"
 C_NOTFOUND = "#F8D7DA"
 C_EDITED   = "#CCE5FF"
 C_SELECT   = "#C8DFFF"
+C_AI       = "#D5F5EE"   # бирюзовый — ИИ-совпадение
 
 
 # Колонки строго в порядке WV 4.0 + два служебных
@@ -40,8 +41,9 @@ COLS = [
     ("comment",    "col_comment"),      # 13 — Комментарии (редактируется)
     ("delivery",   "col_delivery"),     # 14 — Срок поставки (редактируется)
     ("status",     "col_status"),       # 15 — Статус
+    ("method",     "col_method"),       # 16 — Метод подбора
 ]
-COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100]
+COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100, 130]
 EDITABLE_COLS = {5, 6, 7, 8, 9, 10, 11, 13, 14}  # Кол-во, Кратн., Конст.цена, Себес, ΣСеб, КП, ΣКП, Коммент., Срок
 
 
@@ -272,6 +274,14 @@ class PreviewPage(ctk.CTkFrame):
         )
         self.reset_btn.grid(row=0, column=4, padx=(8, 4))
 
+        self.ai_btn = ctk.CTkButton(
+            top, text=t("preview_ai_rematch_btn"), font=FONT_SMALL,
+            fg_color="#17A589", hover_color="#148F77", text_color="white",
+            height=36, width=150, corner_radius=RADIUS_SM,
+            command=self._rematch_ai_all,
+        )
+        self.ai_btn.grid(row=0, column=5, padx=(0, 4))
+
         self.save_btn = ctk.CTkButton(
             top, text=t("preview_save"),
             font=(*FONT_NORMAL[:2], "bold"),
@@ -279,7 +289,7 @@ class PreviewPage(ctk.CTkFrame):
             height=36, width=180, corner_radius=RADIUS_SM,
             state="disabled", command=self._save
         )
-        self.save_btn.grid(row=0, column=5, padx=(0, 16))
+        self.save_btn.grid(row=0, column=6, padx=(0, 16))
 
         # Легенда
         leg = ctk.CTkFrame(self, fg_color="transparent")
@@ -289,6 +299,7 @@ class PreviewPage(ctk.CTkFrame):
             (C_MULTIPLE, "preview_legend_warn"),
             (C_NOTFOUND, "preview_legend_nf"),
             (C_EDITED,   "preview_legend_edit"),
+            (C_AI,       "preview_legend_ai"),
         ]:
             lf = tk.Frame(leg, bg=bg, relief="solid", bd=1)
             lf.pack(side="left", padx=(0, 8))
@@ -328,6 +339,13 @@ class PreviewPage(ctk.CTkFrame):
             self.tree.column(col, width=max(w, min_w), minwidth=min_w,
                              anchor=anchor, stretch=False)
 
+        # Скрываем колонки, которые не нужны на экране предпросмотра
+        # (данные хранятся в vals и попадают в Excel — просто не отображаются)
+        _HIDDEN_COLS = {12, 13, 14}  # kaznisa, comment, delivery
+        self.tree["displaycolumns"] = [
+            f"c{i}" for i in range(len(COLS)) if i not in _HIDDEN_COLS
+        ]
+
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -339,6 +357,7 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("multiple", background=C_MULTIPLE)
         self.tree.tag_configure("notfound", background=C_NOTFOUND)
         self.tree.tag_configure("edited",   background=C_EDITED)
+        self.tree.tag_configure("ai",       background=C_AI)
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
@@ -357,6 +376,16 @@ class PreviewPage(ctk.CTkFrame):
         self._ctx_menu.add_command(
             label=t("ctx_copy_row"),
             command=self._copy_row,
+        )
+        self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(
+            label=t("ctx_ai_rematch"),
+            command=self._rematch_ai_selected,
+        )
+        self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(
+            label=t("ctx_reset_item"),
+            command=self._reset_item_selected,
         )
         self.tree.bind("<Button-3>", self._show_ctx_menu)
 
@@ -617,9 +646,33 @@ class PreviewPage(ctk.CTkFrame):
         new_h    = max(28, max_lines * line_px + padding)
         ttk.Style().configure("APS.Treeview", rowheight=new_h)
 
+    @staticmethod
+    @staticmethod
+    def _method_label(method: str) -> str:
+        """Return a human-readable Russian label for the match method."""
+        if not method:
+            return ""
+        _MAP = {
+            "exact":                    "Артикул (точн.)",
+            "contains":                 "Артикул (вхожд.)",
+            "fuzzy_article":            "Артикул (нечётк.)",
+            "fuzzy_name_from_article":  "Артикул (нечётк.)",
+            "name_exact":               "Название (точн.)",
+            "name_contains":            "Название (вхожд.)",
+            "name_fuzzy":               "Название (нечётк.)",
+            "name_partial":             "Название (частич.)",
+            "kaznisa":                  "КазНИИСА (код)",
+        }
+        if method in _MAP:
+            return _MAP[method]
+        if method.startswith("ai"):
+            return "ИИ"
+        return method
+
     def _insert_row(self, item: dict) -> str:
-        bm     = item.get("best_match") or {}
-        status = item.get("status", "not_found")
+        bm           = item.get("best_match") or {}
+        status       = item.get("status", "not_found")
+        match_method = item.get("match_method")
 
         if status == "exact":
             tag, stxt = "exact",    t("status_exact")
@@ -627,6 +680,10 @@ class PreviewPage(ctk.CTkFrame):
             tag, stxt = "multiple", t("status_multiple")
         elif status == "fuzzy":
             tag, stxt = "multiple", t("status_fuzzy")
+        elif status == "ai_match":
+            ai_conf = item.get("ai_confidence")
+            conf_str = f" ({ai_conf:.0%})" if ai_conf else ""
+            tag, stxt = "ai", t("status_ai_match") + conf_str
         else:
             tag, stxt = "notfound", t("status_nf")
 
@@ -646,6 +703,8 @@ class PreviewPage(ctk.CTkFrame):
         def f(v):
             return f"{v:.2f}" if v else ""
 
+        method_lbl = self._method_label(match_method)
+
         vals = (
             item.get("pos", ""),
             brand,
@@ -663,6 +722,7 @@ class PreviewPage(ctk.CTkFrame):
             item.get("comment", "") or "",
             item.get("delivery", "") or "",
             stxt,
+            method_lbl,
         )
         iid = self.tree.insert("", "end", values=vals, tags=(tag,))
         item["_iid"] = iid
@@ -758,7 +818,7 @@ class PreviewPage(ctk.CTkFrame):
             return
 
         # Жёлтая строка + клик по нередактируемой колонке → выбор кандидата
-        if item.get("status") in ("multiple", "fuzzy") and col_idx not in EDITABLE_COLS:
+        if item.get("status") in ("multiple", "fuzzy", "ai_match") and col_idx not in EDITABLE_COLS:
             cands = item.get("candidates", [])
             if cands:
                 dlg = CandidateDialog(self, cands)
@@ -774,7 +834,7 @@ class PreviewPage(ctk.CTkFrame):
 
         if col_idx in EDITABLE_COLS:
             self._start_edit(iid, col, col_idx, item)
-        elif item.get("status") in ("multiple", "fuzzy"):
+        elif item.get("status") in ("multiple", "fuzzy", "ai_match"):
             # Дополнительная попытка открыть диалог кандидатов если колонка не редактируемая
             cands = item.get("candidates", [])
             if cands:
@@ -968,6 +1028,94 @@ class PreviewPage(ctk.CTkFrame):
         code = values[kaz_idx]  if kaz_idx  < len(values) else ""
         self.clipboard_clear()
         self.clipboard_append(f"{art}\t{code}")
+
+    # ── ИИ-переподбор ────────────────────────────────────────────────────────
+    def _rematch_ai_all(self):
+        """Переподобрать все жёлтые (multiple/fuzzy) и красные (not_found) строки через ИИ."""
+        targets = [
+            item for item in self.items
+            if item.get("status") in ("multiple", "fuzzy", "not_found")
+            and not item.get("_user_edited")
+        ]
+        if not targets:
+            messagebox.showinfo("", "Нет строк для переподбора ИИ.")
+            return
+        self._run_rematch(targets)
+
+    def _rematch_ai_selected(self):
+        """Переподобрать выбранную строку через ИИ (контекстное меню)."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        item = self._get_item_by_iid(sel[0])
+        if item is None:
+            return
+        self._run_rematch([item])
+
+    def _run_rematch(self, targets: list):
+        """Запускает AI re-match в фоновом потоке и обновляет строки по результату."""
+        self.ai_btn.configure(state="disabled", text="⏳ ИИ...")
+
+        payload = [
+            {
+                "name_raw":    it.get("name_raw", ""),
+                "article_raw": it.get("article_raw", ""),
+                "qty":         it.get("qty", 1),
+                "pos":         it.get("pos", ""),
+            }
+            for it in targets
+        ]
+
+        def _worker():
+            try:
+                resp = self.api.rematch_ai(payload)
+                results = resp.get("items", [])
+                self.after(0, lambda: self._apply_rematch(targets, results))
+            except Exception as e:
+                self.after(0, lambda: self._rematch_error(str(e)))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_rematch(self, targets: list, results: list):
+        """Применяет результаты AI re-match к items и перерисовывает строки."""
+        for item, new_data in zip(targets, results):
+            for key in ("status", "best_match", "candidates",
+                        "match_method", "ai_confidence", "ai_used", "ai_reason"):
+                if key in new_data:
+                    item[key] = new_data[key]
+            iid = item.get("_iid")
+            if iid and self.tree.exists(iid):
+                self.tree.delete(iid)
+                self._insert_row(item)
+        self._update_stats()
+        self.ai_btn.configure(state="normal", text=t("preview_ai_rematch_btn"))
+
+    def _rematch_error(self, error: str):
+        self.ai_btn.configure(state="normal", text=t("preview_ai_rematch_btn"))
+        messagebox.showerror("ИИ-переподбор", f"Ошибка:\n{error}")
+
+    def _reset_item_selected(self):
+        """Сбрасывает выбранную позицию к исходным данным из спецификации."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        item = self._get_item_by_iid(sel[0])
+        if item is None:
+            return
+        # Очищаем результаты подбора
+        for key in ("best_match", "candidates", "match_method",
+                    "ai_confidence", "ai_used", "ai_reason",
+                    "_user_edited", "_user_const_price",
+                    "comment", "delivery"):
+            item.pop(key, None)
+        item["status"] = "not_found"
+        # Перерисовываем строку
+        iid = item.get("_iid")
+        if iid and self.tree.exists(iid):
+            self.tree.delete(iid)
+        self._insert_row(item)
+        self._update_stats()
 
     # ── Сохранение ───────────────────────────────────────────────────────────
     def _save(self):

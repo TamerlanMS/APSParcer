@@ -1,5 +1,7 @@
+import asyncio
 import time
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,16 +9,46 @@ from fastapi.responses import JSONResponse
 
 from app.api import pdf, database, auth
 from app.api import users as users_api
+from app.api import excel_template as excel_template_api
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ── Lifespan: background product embedding on startup ─────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run pre-embedding of products in background after startup."""
+    if settings.OPENAI_API_KEY and settings.PINECONE_API_KEY and settings.PINECONE_HOST:
+        async def _embed_task():
+            # Small delay so the server is fully up before heavy work starts
+            await asyncio.sleep(5)
+            try:
+                from app.services.embedder import embed_products_batch
+                n = await embed_products_batch(AsyncSessionLocal)
+                if n:
+                    logger.info("Startup embedding complete: %d products upserted to Pinecone", n)
+                else:
+                    logger.info("Startup embedding: guard conditions not met (not Monday or no recent import)")
+            except Exception as exc:
+                logger.error("Startup embedding failed: %s", exc)
+
+        asyncio.create_task(_embed_task())
+    else:
+        logger.info("OPENAI_API_KEY or PINECONE_API_KEY not set — AI matching disabled")
+
+    yield   # server runs here
+
+
 app = FastAPI(
-    title="APS Parser API",
-    description="Сервис обработки PDF спецификаций АПС",
-    version="1.0.0",
+    title="GQ-Builder API",
+    description="Сервис обработки PDF спецификаций и формирования КП",
+    version="2.0.0",
     docs_url="/docs" if settings.DEBUG else None,
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -67,6 +99,7 @@ app.include_router(auth.router,     prefix="/api/v1/auth",     tags=["auth"])
 app.include_router(users_api.router)                           # has prefix="/api/v1" internally
 app.include_router(pdf.router,      prefix="/api/v1/pdf",      tags=["pdf"])
 app.include_router(database.router, prefix="/api/v1/database", tags=["database"])
+app.include_router(excel_template_api.router, prefix="/api/v1",  tags=["excel-template"])
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

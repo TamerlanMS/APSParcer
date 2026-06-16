@@ -99,7 +99,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="GQ-Builder 0.2",
+    name="GQ-Builder 0.3",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

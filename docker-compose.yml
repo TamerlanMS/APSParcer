@@ -40,6 +40,9 @@ services:
       # JWT secret — generate once with: python -c "import secrets; print(secrets.token_hex(32))"
       # and set in .env as JWT_SECRET_KEY=<value>
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      OPENAI_API_KEY:  ${OPENAI_API_KEY:-}
+      PINECONE_API_KEY: ${PINECONE_API_KEY:-}
+      PINECONE_HOST:    ${PINECONE_HOST:-}
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-change_me_on_first_login}
     ports:

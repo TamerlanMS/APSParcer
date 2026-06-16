@@ -81,6 +81,19 @@ STRINGS = {
         "upload_hist_date": "Дата и время",
         "upload_hist_empty": "История загрузок пуста",
         "upload_hist_error": "Ошибка загрузки истории",
+        "upload_ai_mode":   "ИИ-режим подбора",
+        "upload_ai_hint":   "Семантический поиск",
+        # Progress stages
+        "upload_stage_upload":    "Отправка файла на сервер...",
+        "upload_stage_detect":    "Анализ структуры PDF...",
+        "upload_stage_extract":   "Извлечение таблиц...",
+        "upload_stage_ocr_check": "Проверка: сканированный ли PDF...",
+        "upload_stage_ocr_start": "Запуск OCR-распознавания...",
+        "upload_stage_ocr_page":  "OCR-распознавание страниц...",
+        "upload_stage_parse":     "Разбор позиций...",
+        "upload_stage_match":     "Подбор в базе данных...",
+        "upload_stage_save":      "Сохранение результатов...",
+        "upload_stage_done":      "Готово!",
 
         # Preview page
         "preview_title": "📊  Предпросмотр результатов",
@@ -91,6 +104,7 @@ STRINGS = {
         "preview_legend_warn": "⚠️ Уточнить",
         "preview_legend_nf": "❌ Не найдено",
         "preview_legend_edit": "✏️ Изменено",
+        "preview_legend_ai": "🤖 ИИ-подбор",
         "preview_constants": "Константы расчёта",
         "preview_margin": "Маржа",
         "preview_logistics": "Логистика",
@@ -103,6 +117,8 @@ STRINGS = {
         "ctx_copy_article":  "Копировать артикул",
         "ctx_copy_kaznisa":  "Копировать код КазНИИСА",
         "ctx_copy_row":      "Копировать артикул + код (через Tab)",
+        "ctx_ai_rematch":    "🤖 Подобрать через ИИ",
+        "preview_ai_rematch_btn": "🤖 Подобрать ИИ",
         "preview_filter_all": "Все",
         "preview_filter_warn": "Требуют уточнения",
         "preview_filter_nf": "Не найдены",
@@ -132,6 +148,8 @@ STRINGS = {
         "col_price_kp": "Цена КП",
         "col_sum_kp": "Сумма КП",
         "col_status": "Статус",
+        "col_method":         "Метод",
+        "ctx_reset_item":    "🗑 Сбросить к исходным данным",
         "col_comment": "Комментарий",
 
         # Status labels
@@ -139,6 +157,7 @@ STRINGS = {
         "status_multiple": "⚠️ Несколько",
         "status_fuzzy": "⚠️ Нечёткое",
         "status_nf": "❌ Не найдено",
+        "status_ai_match": "🤖 ИИ-подбор",
 
         "col_mult":          "Кратность",
         "col_const":         "Константа цена",
@@ -231,6 +250,35 @@ STRINGS = {
         "udlg_saving": "⏳ Сохранение...",
         "udlg_no_role": "⚠️ Выберите роль",
 
+        # Excel template page (admin+)
+        "nav_template": "📋  Шаблон Excel",
+        "tpl_title": "📋  Управление шаблоном Excel",
+        "tpl_subtitle": "Шаблон .xlsm используется при каждом создании КП. Загрузите новую версию, чтобы применить изменения сразу.",
+        "tpl_current_header": "Текущий шаблон",
+        "tpl_source_db": "📦 Загружен из базы данных",
+        "tpl_source_fs": "📁 Используется файл по умолчанию (WV_template.xlsm)",
+        "tpl_version": "Версия: {version}",
+        "tpl_filename": "Файл: {filename}",
+        "tpl_size": "Размер: {size}",
+        "tpl_uploaded_by": "Загрузил: {name}",
+        "tpl_uploaded_at": "Дата: {date}",
+        "tpl_description": "Описание: {desc}",
+        "tpl_download_btn": "📥  Скачать текущий шаблон",
+        "tpl_upload_header": "Загрузить новый шаблон",
+        "tpl_upload_desc": "Выберите .xlsm файл для обновления шаблона. После загрузки все новые КП будут создаваться на основе нового шаблона.",
+        "tpl_browse": "📂  Выбрать файл .xlsm",
+        "tpl_no_file": "Файл не выбран",
+        "tpl_description_label": "Комментарий (необязательно):",
+        "tpl_description_ph": "Описание изменений...",
+        "tpl_upload_btn": "🚀  Загрузить шаблон",
+        "tpl_uploading": "⏳ Загрузка шаблона...",
+        "tpl_upload_ok": "✅ Шаблон загружен! Версия {version}",
+        "tpl_upload_error": "❌ Ошибка загрузки: {error}",
+        "tpl_wrong_type": "⚠️ Выберите файл .xlsm",
+        "tpl_loading": "🔄 Загрузка информации...",
+        "tpl_refresh": "🔄  Обновить",
+        "tpl_no_access": "Нет доступа — требуется роль администратора",
+
         # Status bar
         "status_connected": "Подключено: {url}",
         "status_not_conn": "Не подключено",
@@ -317,6 +365,19 @@ STRINGS = {
         "upload_hist_date": "Күн және уақыт",
         "upload_hist_empty": "Жүктеу тарихы бос",
         "upload_hist_error": "Тарихты жүктеу қатесі",
+        "upload_ai_mode":   "ЖИ-іріктеу режімі",
+        "upload_ai_hint":   "Семантикалық іздеу",
+        # Progress stages (KZ)
+        "upload_stage_upload":    "Файл серверге жіберілуде...",
+        "upload_stage_detect":    "PDF құрылымын талдау...",
+        "upload_stage_extract":   "Кестелерді шығару...",
+        "upload_stage_ocr_check": "Тексеру: сканерленген PDF бе...",
+        "upload_stage_ocr_start": "OCR тануды іске қосу...",
+        "upload_stage_ocr_page":  "OCR беттерді тану...",
+        "upload_stage_parse":     "Позицияларды талдау...",
+        "upload_stage_match":     "Деректер қорынан іздеу...",
+        "upload_stage_save":      "Нәтижелерді сақтау...",
+        "upload_stage_done":      "Дайын!",
 
         # Preview page
         "preview_title": "📊  Нәтижелерді алдын ала қарау",
@@ -327,6 +388,7 @@ STRINGS = {
         "preview_legend_warn": "⚠️ Нақтылау керек",
         "preview_legend_nf": "❌ Табылмады",
         "preview_legend_edit": "✏️ Өзгертілді",
+        "preview_legend_ai": "🤖 ЖИ-іріктеу",
         "preview_constants": "Есептеу константалары",
         "preview_margin": "Маржа",
         "preview_logistics": "Логистика",
@@ -338,6 +400,8 @@ STRINGS = {
         "ctx_copy_article":  "Артикулды көшіру",
         "ctx_copy_kaznisa":  "ҚазНИИСА кодын көшіру",
         "ctx_copy_row":      "Артикул + код көшіру (Tab арқылы)",
+        "ctx_ai_rematch":    "🤖 ЖИ арқылы іріктеу",
+        "preview_ai_rematch_btn": "🤖 ЖИ іріктеу",
         "preview_save_error": "Сақтау қатесі",
         "preview_filter_all": "Барлығы",
         "preview_filter_warn": "Нақтылау керек",
@@ -368,6 +432,8 @@ STRINGS = {
         "col_price_kp": "КҰ баға",
         "col_sum_kp": "КҰ сомасы",
         "col_status": "Мәртебе",
+        "col_method":         "Әдіс",
+        "ctx_reset_item":    "🗑 Бастапқы деректерге қайтару",
         "col_comment": "Пікір",
 
         # Status labels
@@ -375,6 +441,7 @@ STRINGS = {
         "status_multiple": "⚠️ Бірнеше",
         "status_fuzzy": "⚠️ Жуықтама",
         "status_nf": "❌ Табылмады",
+        "status_ai_match": "🤖 ЖИ-іріктеу",
 
         "col_mult":          "Еселік",
         "col_const":         "Бекітілген баға",
@@ -406,8 +473,8 @@ STRINGS = {
         "db_import_both_btn": "📥  БД және Константаларды жүктеу",
         "db_drop_label": "Тауарлар дерек қоры («БД» парағы)",
         "db_import_btn": "📥  Деректер қорын импорттау",
-        "db_const_desc": "Константалары бар Excel жүктеңіз («Const» парағы). Коэффициенттер жаңартылады.",
-        "db_const_label": "Константалар файлы («Const» парағы)",
+        "db_const_desc": "Константалары бар Excel жүктеңіз («Сонст» парағы). Коэффициенттер жаңартылады.",
+        "db_const_label": "Константалар файлы («Сонст» парағы)",
         "db_const_btn": "📥  Константаларды импорттау",
         "db_password": "Әкімші құпия сөзі:",
         "db_password_ph": "Құпия сөзді енгізіңіз...",
@@ -461,24 +528,69 @@ STRINGS = {
         "udlg_save": "💾  Сақтау",
         "udlg_cancel": "Болдырмау",
         "udlg_no_name": "⚠️ Аты-жөнін енгізіңіз",
+
+        # Excel template page (admin+)
+        "nav_template": "📋  Excel үлгісі",
+        "tpl_title": "📋  Excel үлгісін басқару",
+        "tpl_subtitle": "КҨ жасалған сайын .xlsm үлгісі қолданылады. Өзгерістерді бірден қолдану үшін жаңа нұсқасын жүктеңіз.",
+        "tpl_current_header": "Ағымдағы үлгі",
+        "tpl_source_db": "📦 Деректер қорынан жүктелген",
+        "tpl_source_fs": "📁 Әдепкі файл қолданылуда (WV_template.xlsm)",
+        "tpl_version": "Нұсқа: {version}",
+        "tpl_filename": "Файл: {filename}",
+        "tpl_size": "Өлшемі: {size}",
+        "tpl_uploaded_by": "Жүктеген: {name}",
+        "tpl_uploaded_at": "Күні: {date}",
+        "tpl_description": "Сипаттамасы: {desc}",
+        "tpl_download_btn": "📥  Ағымдағы үлгіні жүктеу",
+        "tpl_upload_header": "Жаңа үлгі жүктеу",
+        "tpl_upload_desc": "Үлгіні жаңарту үшін .xlsm файлды таңдаңыз. Жүктегеннен кейін барлық жаңа КҨ жаңа үлгі негізінде жасалады.",
+        "tpl_browse": "📂  .xlsm файлды таңдау",
+        "tpl_no_file": "Файл таңдалмаған",
+        "tpl_description_label": "Пікір (міндетті емес):",
+        "tpl_description_ph": "Өзгерістер сипаттамасы...",
+        "tpl_upload_btn": "🚀  Үлгіні жүктеу",
+        "tpl_uploading": "⏳ Үлгі жүктелуде...",
+        "tpl_upload_ok": "✅ Үлгі жүктелді! Нұсқа {version}",
+        "tpl_upload_error": "❌ Жүктеу қатесі: {error}",
+        "tpl_wrong_type": "⚠️ .xlsm файлды таңдаңыз",
+        "tpl_loading": "🔄 Ақпарат жүктелуде...",
+        "tpl_refresh": "🔄  Жаңарту",
+        "tpl_no_access": "Рұқсат жоқ — әкімші рөлі қажет",
     },
 }
 
 
 class Lang:
-    _lang = "ru"
+    _current: str = "ru"
 
     @classmethod
-    def set(cls, lang: str):
-        cls._lang = lang if lang in ("ru", "kz") else "ru"
+    def set(cls, lang: str) -> None:
+        """Switch active language. Falls back to 'ru' for unknown codes."""
+        if lang in STRINGS:
+            cls._current = lang
 
     @classmethod
     def get(cls) -> str:
-        return cls._lang
+        return cls._current
 
 
-def t(key: str, **kwargs) -> str:
-    """Возвращает строку на текущем языке; fallback -> русский."""
-    lang = Lang.get()
-    text = STRINGS.get(lang, {}).get(key) or STRINGS.get("ru", {}).get(key) or key
-    return text.format(**kwargs) if kwargs else text
+def t(key: str, default=None, **kwargs) -> str:
+    """Return localised string for *key* in the active language.
+
+    Falls back to Russian if the key is missing in the active locale.
+    Supports str.format(**kwargs) substitution.
+    ``default`` is returned (instead of the bare key) when the key is absent
+    in every locale.
+    """
+    val = STRINGS.get(Lang.get(), {}).get(key)
+    if val is None:
+        val = STRINGS.get("ru", {}).get(key)
+    if val is None:
+        return default if default is not None else key
+    if kwargs:
+        try:
+            return val.format(**kwargs)
+        except (KeyError, ValueError):
+            return val
+    return val

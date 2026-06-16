@@ -13,6 +13,7 @@ from ui.pages.upload_page import UploadPage
 from ui.pages.preview_page import PreviewPage
 from ui.pages.database_page import DatabasePage
 from ui.pages.users_page import UsersPage
+from ui.pages.template_page import TemplatePage
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -125,9 +126,11 @@ class MainApp(ctk.CTk):
         self.preview_page  = PreviewPage(self.content_frame, self.api, self)
         self.database_page = DatabasePage(self.content_frame, self.api, self)
         self.users_page    = UsersPage(self.content_frame, self.api, self)
+        self.template_page = TemplatePage(self.content_frame, self.api, self)
 
         for page in [self.upload_page, self.preview_page,
-                     self.database_page, self.users_page]:
+                     self.database_page, self.users_page,
+                     self.template_page]:
             page.grid(row=0, column=0, sticky="nsew")
 
         self.statusbar = ctk.CTkLabel(
@@ -141,7 +144,7 @@ class MainApp(ctk.CTk):
     # ── Nav (pack-based для правильного layout) ───────────────────────────────
 
     # Icon-only text for each tab index (used when sidebar is collapsed)
-    _NAV_ICON_ONLY = {0: "📄", 1: "📊", 2: "🗄", 3: "👥"}
+    _NAV_ICON_ONLY = {0: "📄", 1: "📊", 2: "🗄", 3: "👥", 4: "📋"}
 
     def _build_nav(self):
         nav = ctk.CTkFrame(self, fg_color=NAVY, corner_radius=0, width=NAV_W)
@@ -228,6 +231,16 @@ class MainApp(ctk.CTk):
             command=lambda: self._switch_tab(3),
         )
         self.nav_btns.append((self._users_btn, "nav_users", 3))
+
+        self._template_btn = ctk.CTkButton(
+            self._admin_container,
+            text=t("nav_template"), font=FONT_NAV,
+            fg_color="transparent", hover_color=BLUE_MID,
+            text_color=TEXT_NAV, anchor="w",
+            height=50, corner_radius=0, border_width=0,
+            command=lambda: self._switch_tab(4),
+        )
+        self.nav_btns.append((self._template_btn, "nav_template", 4))
 
         # ── User card ─────────────────────────────────────────────────────────
         self._user_card = ctk.CTkFrame(nav, fg_color=NAVY_DARK, corner_radius=8)
@@ -337,17 +350,23 @@ class MainApp(ctk.CTk):
             self._user_role_lbl.configure(text="")
 
         is_super = (self.config.user_role == "superadmin")
-        if is_super:
+        is_admin_up = self.config.user_role in ("superadmin", "administrator")
+        if is_admin_up:
             # Показываем admin-секцию
             self._admin_sep.pack(fill="x", padx=14, pady=(6, 0))
             self._admin_lbl.pack(fill="x", padx=4, pady=(4, 0))
-            self._users_btn.pack(fill="x")
+            if is_super:
+                self._users_btn.pack(fill="x")
+            else:
+                self._users_btn.pack_forget()
+            self._template_btn.pack(fill="x")
         else:
             # Скрываем admin-секцию
             self._admin_sep.pack_forget()
             self._admin_lbl.pack_forget()
             self._users_btn.pack_forget()
-            if self._current_tab == 3:
+            self._template_btn.pack_forget()
+            if self._current_tab in (3, 4):
                 self._switch_tab(0)
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
@@ -355,7 +374,7 @@ class MainApp(ctk.CTk):
     def _switch_tab(self, index: int):
         self._current_tab = index
         pages = [self.upload_page, self.preview_page,
-                 self.database_page, self.users_page]
+                 self.database_page, self.users_page, self.template_page]
         for i, page in enumerate(pages):
             page.lift() if i == index else page.lower()
 
@@ -369,6 +388,8 @@ class MainApp(ctk.CTk):
 
         if index == 3 and self.config.user_role == "superadmin":
             self.users_page.load_users()
+        if index == 4 and self.config.user_role in ("superadmin", "administrator"):
+            self.template_page.load()
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -416,4 +437,5 @@ class MainApp(ctk.CTk):
         self.preview_page.refresh_lang()
         self.database_page.refresh_lang()
         self.users_page.refresh_lang()
+        self.template_page.refresh_lang()
         self._update_statusbar()

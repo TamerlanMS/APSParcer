@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, Text, Boolean,
+    Column, Integer, String, Float, DateTime, Text, Boolean, LargeBinary,
     ForeignKey, Enum as SAEnum
 )
 from sqlalchemy.orm import relationship
@@ -186,3 +186,26 @@ class PdfUploadLog(Base):
 
     user = relationship("User", foreign_keys=[user_id])
 
+
+
+class ExcelTemplate(Base):
+    """
+    Шаблон WV .xlsm, хранимый в БД.
+    Активна одна запись (is_active=True).  
+    При загрузке новой версии старая помечается is_active=False.
+    """
+    __tablename__ = "excel_templates"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    version     = Column(Integer, default=1, nullable=False)
+    filename    = Column(String(300), nullable=False)            # оригинальное имя файла
+    data        = Column(LargeBinary, nullable=False)            # байты .xlsm
+    file_size   = Column(Integer, nullable=False)                # bytes
+    file_hash   = Column(String(64), nullable=False)             # SHA-256
+    description = Column(String(500), nullable=True)             # комментарий менеджера
+    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                         nullable=True, index=True)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    is_active   = Column(Boolean, default=True, nullable=False, index=True)
+
+    uploader = relationship("User", foreign_keys=[uploaded_by])

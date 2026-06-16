@@ -19,6 +19,18 @@ class Settings(BaseSettings):
     SUPERADMIN_USERNAME: str = "admin"
     SUPERADMIN_PASSWORD: str = "change_me_on_first_login"
 
+    # OpenAI — Phase 2 AI matching
+    OPENAI_API_KEY: str = ""
+    OPENAI_EMBED_MODEL: str = "text-embedding-3-small"   # 1536 dims
+    OPENAI_CHAT_MODEL:  str = "gpt-4o-mini"              # reranking
+    AI_CONFIDENCE_THRESHOLD: float = 0.72  # cosine similarity floor
+
+    # Pinecone — vector index (Phase 2)
+    # PINECONE_API_KEY  — API key from console.pinecone.io
+    # PINECONE_HOST     — index host URL, e.g. https://<index>-<project>.svc.<env>.pinecone.io
+    PINECONE_API_KEY: str = ""
+    PINECONE_HOST:    str = ""
+
     DEBUG: bool = False
 
     # Valid API keys for desktop client (backward compat)

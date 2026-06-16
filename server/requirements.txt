@@ -9,3 +9,8 @@ pydantic-settings==2.5.2
 bcrypt==4.2.0
 PyJWT==2.9.0
 python-multipart==0.0.12
+openai>=1.35.0
+pinecone>=3.0.0
+pymupdf==1.24.11
+pytesseract==0.3.13
+Pillow>=10.0.0
