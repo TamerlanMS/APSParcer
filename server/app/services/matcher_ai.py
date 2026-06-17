@@ -3,14 +3,15 @@ matcher_ai.py — Phase 2 AI-powered hybrid matcher.
 
 Matching pipeline per item:
   1. Classic matcher (rapidfuzz) — fast, free, handles exact/fuzzy articles
-  2. If classic returns not_found or low-confidence fuzzy:
+  2. Exact article match → returned as-is (authoritative)
+  3. Everything else (fuzzy, multiple, not_found) → AI verification:
        a. Vector search (Pinecone cosine similarity) — semantic
        b. If top vector score < AI_CONFIDENCE_THRESHOLD → not_found
        c. If single clear winner → return it
        d. If top-3 are close → GPT-4o-mini reranking for final decision
-  3. Returns enriched result dict with ai_reason and ai_confidence fields.
+  4. Returns enriched result dict with ai_reason and ai_confidence fields.
 
-Classic results above CLASSIC_PASSTHROUGH_SCORE skip AI entirely (no extra cost).
+Only exact article matches skip AI — all fuzzy/multiple/not_found are verified by AI.
 """
 from __future__ import annotations
 
@@ -300,8 +301,8 @@ async def match_items_ai(
 
     For each item:
       - Run classic matcher first (free, instant)
-      - If classic is confident (score >= CLASSIC_PASSTHROUGH_SCORE) → keep classic result
-      - Otherwise → try AI (vector + optional GPT reranking)
+      - Exact article match → keep as-is (authoritative, no AI cost)
+      - Fuzzy / multiple / not_found → AI verification (vector + optional GPT reranking)
 
     Returns list of result dicts, same shape as classic match_items() but with
     extra keys: ai_used (bool), ai_confidence (float 0-1), ai_reason (str).
@@ -328,17 +329,13 @@ async def match_items_ai(
         if classic.get("candidates"):
             classic_score = classic["candidates"][0].get("score", 0)
 
-        # Pass through: exact match or high-confidence fuzzy
-        # match_method already propagated from classic_match_items
+        # Pass through ONLY exact article matches — they are authoritative.
+        # Fuzzy/multiple/not_found all go through AI verification.
         if classic_status == "exact":
             final_results.append({**classic, "ai_used": False, "ai_reason": "точное совпадение"})
             continue
 
-        if classic_status in ("fuzzy", "multiple") and classic_score >= CLASSIC_PASSTHROUGH_SCORE:
-            final_results.append({**classic, "ai_used": False, "ai_reason": "высокое текстовое совпадение"})
-            continue
-
-        # Everything else: invoke AI
+        # Everything else (fuzzy, multiple, not_found): invoke AI
         try:
             ai_result = await _match_one_ai(item, classic, db)
             final_results.append(ai_result)

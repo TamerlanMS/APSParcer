@@ -1180,7 +1180,9 @@ def _is_spec_page_text(page_text: str) -> bool:
         return False
     tl = page_text.lower()
 
-    has_poz  = "поз." in tl or "поз " in tl
+    # "поз." / "поз " — traditional abbreviation; "позиция" — full word (used
+    # in some project templates, e.g. "6_8.1" series from ТехСтройПроект).
+    has_poz  = "поз." in tl or "поз " in tl or "позиция" in tl
     has_naim = "наименование" in tl
     has_kol  = ("кол-во" in tl or "количество" in tl
                or "кол." in tl or "коли-" in tl or "кол-" in tl)
@@ -1189,7 +1191,7 @@ def _is_spec_page_text(page_text: str) -> bool:
     # Guard: any "Ведомость …" page (Ведомость основного комплекта,
     # Ведомость рабочих чертежей, etc.) lists the spec as ONE data row but
     # is NOT the spec itself.  Such pages have "ведомость" in their text AND
-    # lack the "поз." column header that every actual spec sheet carries.
+    # lack the position column header that every actual spec sheet carries.
     if "спецификация оборудования" in tl:
         is_vedomost = "ведомость" in tl
         if is_vedomost and not has_poz:
