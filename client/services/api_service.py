@@ -325,4 +325,19 @@ class ApiService:
 
     def import_constants(self, file_path: str, password: str) -> dict:
         with open(file_path, "rb") as f:
-            fname = file_path.repla
+            fname = file_path.replace("\\", "/").split("/")[-1]
+            mime = (
+                "application/vnd.ms-excel.sheet.macroEnabled.12"
+                if fname.lower().endswith(".xlsm")
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            files = {"file": (fname, f, mime)}
+            r = requests.post(
+                f"{self._base}/api/v1/database/import/constants",
+                files=files,
+                headers=self._h,
+                params={"password": password},
+                timeout=180,
+            )
+        r.raise_for_status()
+        return r.json()
