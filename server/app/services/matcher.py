@@ -23,6 +23,11 @@ _CONTAINS_LEN_RATIO = 0.70  # was 0.55 — tighter: strings must be within 30% o
 # Short generic names ("Датчик", "Кабель 10м") match too many products — skip them entirely.
 _NAME_MIN_LEN = 20
 
+# Minimum fraction of query WORDS that must appear in the DB name for a partial_ratio match.
+# E.g. "Кронштейн монтажный DS-1232ZJ" (3 words) vs DB "Кронштейн" (1 word):
+# coverage = 1/3 = 0.33 < 0.40 → rejected even if partial_ratio = 100.
+_WORD_COVERAGE_MIN = 0.40
+
 
 def normalize(text: str) -> str:
     """Normalize string for comparison."""
@@ -194,7 +199,11 @@ def find_candidates(
                 _len_ratio = min(len(norm_name_q), len(nn)) / max(len(norm_name_q), len(nn), 1)
                 if _len_ratio >= _CONTAINS_LEN_RATIO:
                     name_cands.append({"product": p, "score": CONTAINS_SCORE - 2, "method": "name_contains"})
-                    continue
+                # Always stop here when substring is found — good or bad ratio.
+                # Without this `continue`, a bad-ratio substring falls through to partial_ratio
+                # which returns 100 (since the short string is fully inside the long one), giving
+                # a false "exact" match on a single generic word like "Кронштейн".
+                continue
 
             # Strict fuzzy token sort
             s = fuzz.token_sort_ratio(norm_name_q, nn)
@@ -202,10 +211,17 @@ def find_candidates(
                 name_cands.append({"product": p, "score": s, "method": "name_fuzzy"})
                 continue
 
-            # Strict partial ratio
+            # Strict partial ratio — with word-coverage guard.
+            # partial_ratio finds the best-matching window, so it gives 100 when any word matches.
+            # We additionally require that at least _WORD_COVERAGE_MIN of the QUERY words appear
+            # in the DB name, preventing single-word matches from showing as "Найдено".
             s2 = fuzz.partial_ratio(norm_name_q, nn)
             if s2 >= NAME_PARTIAL_THRESHOLD:
-                name_cands.append({"product": p, "score": s2, "method": "name_partial"})
+                q_tokens = set(norm_name_q.split())
+                n_tokens  = set(nn.split())
+                coverage  = len(q_tokens & n_tokens) / max(len(q_tokens), 1)
+                if coverage >= _WORD_COVERAGE_MIN:
+                    name_cands.append({"product": p, "score": s2, "method": "name_partial"})
 
         name_cands.sort(key=lambda x: x['score'], reverse=True)
         return name_cands[:5]
