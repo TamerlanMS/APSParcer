@@ -361,6 +361,7 @@ class PreviewPage(ctk.CTkFrame):
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
+        self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
 
         # Контекстное меню (правая кнопка мыши)
         self._ctx_menu = tk.Menu(self, tearoff=0)
@@ -845,6 +846,35 @@ class PreviewPage(ctk.CTkFrame):
         self._populate(result)
 
     # ── Одиночный клик / завершение редактирования ──────────────────────────
+    def _on_row_select(self, event=None):
+        """Показывает сырые цены из БД в строке статуса при выборе строки."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        item = next((i for i in self.items if i.get("_iid") == iid), None)
+        if not item:
+            return
+        bm = item.get("best_match") or {}
+        if not bm:
+            return
+        # Форматируем цены из БД
+        def _fmt(v):
+            if v is None: return "—"
+            try: return f"{float(v):,.0f}"
+            except: return str(v)
+        brand  = bm.get("brand") or "не задан"
+        kaznisa = _fmt(bm.get("kaznisa"))
+        rrts   = _fmt(bm.get("rrts"))
+        mrc    = _fmt(bm.get("mrc"))
+        opt    = _fmt(bm.get("opt"))
+        partner = _fmt(bm.get("partner"))
+        info = (
+            f"БД: [{bm.get('article','')}] Бренд={brand}  "
+            f"КазНИИСА={kaznisa}  РРЦ={rrts}  МРЦ={mrc}  Опт={opt}  Проект={partner}"
+        )
+        self.stat_lbl.configure(text=info, text_color="#E67E22")
+
     def _on_tree_single_click(self, event):
         """Одиночный клик по таблице: если активно inline-поле — сохраняем его."""
         if self._edit_entry and self._edit_iid:

@@ -72,6 +72,17 @@ async def import_products_from_excel(
     rows_to_add    = []
     rows_to_update = []
 
+    # Log the header row (row 1) and first data row for diagnostics
+    all_rows = list(ws.iter_rows(min_row=1, values_only=True))
+    if all_rows:
+        header_row = all_rows[0]
+        logger.info("БД sheet header row (%d cols): %s", len(header_row),
+                    [str(v)[:20] if v else "" for v in header_row[:15]])
+    if len(all_rows) > 1:
+        first_data = all_rows[1]
+        logger.info("БД sheet first data row: %s",
+                    [str(v)[:20] if v else "" for v in first_data[:15]])
+
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row or len(row) < 4:
             continue
@@ -127,7 +138,21 @@ async def import_products_from_excel(
 
     await db.commit()
     wb.close()
-    logger.info(f"Import products: +{added} / ~{updated}")
+
+    # Diagnostic: how many imported products have prices?
+    from sqlalchemy import func
+    count_q = await db.execute(
+        select(func.count()).select_from(Product).where(
+            (Product.rrts.isnot(None)) | (Product.kaznisa.isnot(None)) | (Product.mrc.isnot(None))
+        )
+    )
+    with_prices = count_q.scalar() or 0
+    total_q = await db.execute(select(func.count()).select_from(Product))
+    total_p = total_q.scalar() or 0
+    logger.info(
+        "Import products done: +%d / ~%d. In DB now: %d total, %d with prices, %d WITHOUT prices.",
+        added, updated, total_p, with_prices, total_p - with_prices
+    )
     return added, updated
 
 
