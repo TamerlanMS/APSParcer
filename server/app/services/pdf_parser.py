@@ -1081,6 +1081,34 @@ def _score_project_name(text: str) -> float:
     return max(0.0, min(score, 1.0))
 
 
+def _extract_project_name_scored(text_pages: List[str]) -> str:
+    """Non-AI fallback: pick the highest-scoring line from the first pages.
+
+    Uses _score_project_name heuristics (keyword + length + cyrillic ratio).
+    Returns the best candidate line, or "" if nothing scores above threshold.
+    """
+    THRESHOLD = 0.25
+    best_score = 0.0
+    best_line  = ""
+
+    for page_text in text_pages:
+        if not page_text:
+            continue
+        # Split into non-empty lines, try both raw lines and sentence fragments
+        lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+        for line in lines:
+            if len(line) < 10 or len(line) > 300:
+                continue
+            score = _score_project_name(line)
+            if score > best_score:
+                best_score = score
+                best_line  = line
+
+    if best_score >= THRESHOLD and best_line:
+        return best_line
+    return ""
+
+
 def _extract_project_name_ai(text_pages: List[str]) -> str:
     """Use GPT-4o-mini to extract the project/object name from PDF text.
 
@@ -1336,15 +1364,24 @@ def parse_pdf_specification(
             progress_cb(18, "detect",
                         f"Найдено страниц: {len(spec_indices)} из {total_pages}")
 
-        # ── Extract project name via AI ───────────────────────────────────────
+        # ── Extract project name ──────────────────────────────────────────────
         # Prefer pages that are NOT spec pages (cover/title pages have the project name).
         # Fall back to first N pages if the entire doc is spec pages.
         non_spec = [i for i in range(min(total_pages, 10)) if i not in spec_indices]
         candidate_pages = non_spec[:5] if non_spec else list(range(min(5, total_pages)))
-        ai_proj_name = _extract_project_name_ai([page_texts[i] for i in candidate_pages])
+        cand_texts = [page_texts[i] for i in candidate_pages]
+
+        # Attempt 1: AI extraction (GPT-4o-mini)
+        ai_proj_name = _extract_project_name_ai(cand_texts)
         if ai_proj_name:
             best_proj_name = ai_proj_name
             logger.info("parse_pdf: project name via AI: %r", best_proj_name[:80])
+
+        # Attempt 2: score-based fallback (no API needed)
+        if not best_proj_name:
+            best_proj_name = _extract_project_name_scored(cand_texts)
+            if best_proj_name:
+                logger.info("parse_pdf: project name via scoring: %r", best_proj_name[:80])
 
         # ── Phase 2: extract tables from spec pages ──────────────────────────
         for i, page_idx in enumerate(spec_indices):

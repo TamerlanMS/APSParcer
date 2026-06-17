@@ -119,6 +119,12 @@ async def parse_pdf_stream(
             logger.info("PDF parse DONE: %d items, project=%r",
                         len(pdf_items), (project_name or "")[:60])
 
+            # Fallback: если парсер не нашёл имя проекта — берём имя файла без расширения
+            if not project_name:
+                import os as _os
+                project_name = _os.path.splitext(fname)[0].strip()
+                logger.info("project_name fallback → filename: %r", project_name)
+
             if not pdf_items:
                 await write_audit(db, current_user, "parse_pdf",
                                   resource=fname, details="no items found",
