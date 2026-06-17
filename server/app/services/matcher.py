@@ -8,38 +8,65 @@ import re
 
 logger = logging.getLogger(__name__)
 
-EXACT_SCORE          = 100
-CONTAINS_SCORE       = 95
-FUZZY_THRESHOLD      = 80   # minimum % for article fuzzy match (was 68 — raised to avoid single-word matches)
-NAME_FUZZY_THRESHOLD = 93   # very strict — name tokens must be nearly identical (was 85)
-NAME_PARTIAL_THRESHOLD = 96 # partial_ratio threshold for name fallback (was 90)
+EXACT_SCORE            = 100
+CONTAINS_SCORE         = 95
+FUZZY_THRESHOLD        = 80   # minimum % for article fuzzy match
+NAME_FUZZY_THRESHOLD   = 93   # very strict -- name tokens must be nearly identical
+NAME_PARTIAL_THRESHOLD = 96   # partial_ratio threshold for name fallback
 
-# Length ratio guard for substring "contains" checks:
-# if the shorter string is < this fraction of the longer, substring match is too vague.
-# E.g. "Камера" (6 ch) in "Камера купольная PTZ IP66 outdoor" (33 ch) → ratio 0.18 → rejected.
-_CONTAINS_LEN_RATIO = 0.70  # was 0.55 — tighter: strings must be within 30% of each other in length
+# Length ratio guard for substring "contains" checks.
+# If the shorter string is < this fraction of the longer, match is too vague.
+_CONTAINS_LEN_RATIO = 0.70
 
 # Minimum character length for a name to qualify for name-based fuzzy matching.
-# Short generic names ("Датчик", "Кабель 10м") match too many products — skip them entirely.
 _NAME_MIN_LEN = 20
 
 # Minimum fraction of query WORDS that must appear in the DB name for a partial_ratio match.
 # E.g. "Кронштейн монтажный DS-1232ZJ" (3 words) vs DB "Кронштейн" (1 word):
-# coverage = 1/3 = 0.33 < 0.40 → rejected even if partial_ratio = 100.
+# coverage = 1/3 = 0.33 < 0.40 -> rejected even if partial_ratio = 100.
 _WORD_COVERAGE_MIN = 0.40
+
+# KazNIISA codes must have exactly 10 digits (format XXX-XXX-XXXX).
+# Codes with fewer or more digits are arbitrary placeholders -- skip them.
+_KAZNISA_DIGITS_REQUIRED = 10
+
+# Known brand names that PDF designers append to article numbers.
+# E.g. "ВА47-29 1Р 16А IEK" -> try also "ВА47-29 1Р 16А" without the brand.
+_BRAND_SUFFIX_RE = re.compile(
+    r"\s+(IEK|EKF|DEK|HIKVISION|DAHUA|AJAX|BOLID|BOSCH|ABB|LEGRAND|SCHNEIDER|HAGER|"
+    r"REXANT|TDM|KEAZ|TEXENERGO|TEKFOR|ELVERT|ANDELI|CHINT|NOARK|APATOR|EASTEC|"
+    r"WAGO|PHOENIX|SIEMENS|MOELLER|EATON|RITTAL|MEANWELL|DELTA|FLUKE|FLIR|HIOKI)$",
+    re.IGNORECASE,
+)
+
+# Sub-item numbering prefix: "1 / ", "2/ " etc. (assembly щит rows).
+_SUBITEM_PREFIX_RE = re.compile(r"^\d+\s*/\s*", re.UNICODE)
 
 
 def normalize(text: str) -> str:
-    """Normalize string for comparison."""
     if not text:
         return ""
     t = text.upper().strip()
-    t = re.sub(r'[\u2013\u2014\u2212\u2012]', '-', t)
-    t = re.sub(r'[\u00ab\u00bb\u201c\u201d\u201e\u201f\u2018\u2019`]', '', t)
+    t = re.sub(r'[–—−‒]', '-', t)
+    t = re.sub(r'[«»“”„‟‘’`]', '', t)
     t = re.sub(r'[(){}\[\]]', '', t)
     t = re.sub(r'\s+', ' ', t).strip()
     t = re.sub(r'\s+W\d+\.\d+$', '', t)
     return t.strip()
+
+
+def _strip_brand_suffix(norm_art: str) -> str:
+    """Remove trailing brand name from a normalized article string.
+    E.g. 'ЩМП-3-0 IP31 IEK' -> 'ЩМП-3-0 IP31'.
+    Returns empty string if nothing was stripped (no change).
+    """
+    stripped = _BRAND_SUFFIX_RE.sub("", norm_art).strip()
+    return stripped if stripped != norm_art else ""
+
+
+def _clean_name_for_match(name_raw: str) -> str:
+    """Strip sub-item numbering prefix ('1 / ', '2/ ' etc.) from assembly sub-rows."""
+    return _SUBITEM_PREFIX_RE.sub("", name_raw.strip())
 
 
 async def get_all_products(db: AsyncSession) -> List[Product]:
@@ -54,7 +81,7 @@ def product_to_dict(p: Product) -> Dict:
         "id":           p.id,
         "article":      (p.article      or "").strip(),
         "name":         (p.name         or "").strip(),
-        "unit":         (p.unit         or "\u0448\u0442.").strip(),
+        "unit":         (p.unit         or "шт.").strip(),
         "brand":        (p.brand        or "").strip(),
         "kaznisa":      p.kaznisa,
         "rrts":         p.rrts,
@@ -65,10 +92,6 @@ def product_to_dict(p: Product) -> Dict:
         "kaznisa_code": (p.kaznisa_code or "").strip(),
     }
 
-
-# ---------------------------------------------------------------------------
-# Pre-normalised product cache
-# ---------------------------------------------------------------------------
 
 class _ProductIndex:
     """Built once per match_items call; holds pre-normalised product strings."""
@@ -82,7 +105,6 @@ class _ProductIndex:
         self.norm_name = [normalize(p.name         or '') for p in products]
         self.norm_code = [normalize(p.kaznisa_code or '') for p in products]
 
-        # O(1) lookup dicts: norm_value -> list of indices
         self.art_exact: Dict[str, List[int]] = {}
         for i, na in enumerate(self.norm_art):
             if na:
@@ -102,26 +124,21 @@ class _ProductIndex:
 def find_candidates(
     article_raw: str,
     index: _ProductIndex,
-    kaznisa_code_raw: str = '',   # kept for API compatibility, not used for matching
+    kaznisa_code_raw: str = '',
     name_raw: str = '',
 ) -> List[Dict]:
     """Return ranked candidates.
 
     Matching priority:
-      1. Exact article match         (O(1) — authoritative)
-      2. Substring / fuzzy article   (O(n) — model numbers)
-         Also checks article query against DB names (mislabeled fields).
-      3. Name-based fallback         (O(n) — only when article gives nothing)
-         High thresholds (NAME_FUZZY_THRESHOLD / NAME_PARTIAL_THRESHOLD) prevent
-         false positives from generic names that appear in many different products.
-         If no name candidate meets the threshold, returns empty → "not_found",
-         so the manager can select the correct item manually.
-
-    KazNIISA code matching is intentionally disabled: project designers often
-    enter arbitrary or placeholder codes that do not correspond to real DB items.
+      1.  Exact article match         (O(1) -- authoritative)
+      1b. Exact article after brand-suffix strip  ('ВА47-29 IEK' -> 'ВА47-29')
+      1c. Exact KazNIISA code match   (O(1) -- only 10-digit codes, only when article missing)
+      2.  Substring / fuzzy article   (O(n) -- model numbers, tries stripped variant too)
+      3.  Name-based fallback         (O(n) -- only when article gives nothing)
     """
-    norm_q      = normalize(article_raw)
-    norm_name_q = normalize(name_raw)
+    norm_q = normalize(article_raw)
+    # Strip assembly sub-item prefix ("1 / Корпус...") before name matching
+    norm_name_q = normalize(_clean_name_for_match(name_raw))
 
     if not norm_q and not norm_name_q:
         return []
@@ -138,28 +155,58 @@ def find_candidates(
             candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "exact"})
         return candidates[:1]
 
+    # ---- 1b. Exact article match after brand-suffix strip -----------------
+    # Handles "ЩМП-3-0 IP31 IEK" where DB stores "ЩМП-3-0 IP31"
+    norm_q_stripped = _strip_brand_suffix(norm_q) if norm_q else ""
+    if norm_q_stripped and norm_q_stripped in index.art_exact:
+        for i in index.art_exact[norm_q_stripped]:
+            candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "exact"})
+        return candidates[:1]
+
+    # ---- 1c. Exact KazNIISA code match (O(1)) -- only when article missing -
+    # Only used as a fallback; code matching is less reliable than article matching.
+    # Guard: the code must contain EXACTLY 10 digits (standard format XXX-XXX-XXXX).
+    # Codes with fewer/more digits are arbitrary placeholders -- skip them entirely.
+    if not norm_q and kaznisa_code_raw:
+        norm_code_q  = normalize(kaznisa_code_raw)
+        _digits_only = re.sub(r'\D', '', norm_code_q)
+        if len(_digits_only) == _KAZNISA_DIGITS_REQUIRED and norm_code_q in index.code_exact:
+            for i in index.code_exact[norm_code_q]:
+                candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "code_exact"})
+            return candidates[:1]
+
     # ---- 2. Substring / fuzzy scan by article (O(n)) ----------------------
-    if norm_q:
+    # Try both the original norm_q and the brand-stripped variant so that
+    # 'ВА47-29 1Р 16А 4,5КА С IEK' can still fuzzy-match 'ВА47-29 1Р 16А 4,5КА С'.
+    queries_to_try = [q for q in (norm_q, norm_q_stripped) if q]
+    if queries_to_try:
         for i, p in enumerate(products):
             na = norm_art[i]
             nn = norm_name[i]
 
-            # Article contains — only when lengths are reasonably similar
-            if na and (norm_q in na or na in norm_q):
-                _len_ratio = min(len(norm_q), len(na)) / max(len(norm_q), len(na), 1)
-                if _len_ratio >= _CONTAINS_LEN_RATIO:
-                    candidates.append({"product": p, "score": CONTAINS_SCORE, "method": "contains"})
-                    continue
+            matched = False
+            for nq in queries_to_try:
+                # Article contains check -- only when lengths are reasonably similar
+                if na and (nq in na or na in nq):
+                    _len_ratio = min(len(nq), len(na)) / max(len(nq), len(na), 1)
+                    if _len_ratio >= _CONTAINS_LEN_RATIO:
+                        candidates.append({"product": p, "score": CONTAINS_SCORE, "method": "contains"})
+                        matched = True
+                        break
 
-            # Fuzzy article
-            if na:
-                s = fuzz.token_sort_ratio(norm_q, na)
-                if s >= FUZZY_THRESHOLD:
-                    candidates.append({"product": p, "score": s, "method": "fuzzy_article"})
-                    continue
+                # Fuzzy article
+                if na:
+                    s = fuzz.token_sort_ratio(nq, na)
+                    if s >= FUZZY_THRESHOLD:
+                        candidates.append({"product": p, "score": s, "method": "fuzzy_article"})
+                        matched = True
+                        break
+
+            if matched:
+                continue
 
             # Article query vs DB name (catches mislabeled article fields)
-            if nn:
+            if norm_q and nn:
                 s = fuzz.partial_ratio(norm_q, nn)
                 if s >= FUZZY_THRESHOLD + 10:
                     candidates.append({"product": p, "score": s, "method": "fuzzy_name_from_article"})
@@ -176,7 +223,7 @@ def find_candidates(
     # ---- 3. Name-based fallback (only when article search found nothing) ----
     # Very strict: only engage when the name is specific enough (>= _NAME_MIN_LEN chars)
     # and scores are very high. Short/generic names ("Датчик", "Кабель ВВГнг") match
-    # dozens of different products — better to return not_found and let the manager decide.
+    # dozens of different products -- better to return not_found and let the manager decide.
     if norm_name_q and len(norm_name_q) >= _NAME_MIN_LEN:
         name_cands: List[Dict] = []
 
@@ -187,20 +234,20 @@ def find_candidates(
             name_cands.sort(key=lambda x: x['score'], reverse=True)
             return name_cands[:1]
 
-        # Substring / fuzzy scan by name (O(n)) — strict thresholds
+        # Substring / fuzzy scan by name (O(n)) -- strict thresholds
         for i, p in enumerate(products):
             nn = norm_name[i]
             if not nn:
                 continue
 
-            # Name substring (one fully contained in the other) — with length ratio guard
-            # Avoids "Камера" matching "Камера купольная PTZ IP66 30x zoom outdoor"
+            # Name substring -- with length ratio guard.
+            # Avoids "Камера" matching "Камера купольная PTZ IP66 30x zoom outdoor".
             if norm_name_q in nn or nn in norm_name_q:
                 _len_ratio = min(len(norm_name_q), len(nn)) / max(len(norm_name_q), len(nn), 1)
                 if _len_ratio >= _CONTAINS_LEN_RATIO:
                     name_cands.append({"product": p, "score": CONTAINS_SCORE - 2, "method": "name_contains"})
-                # Always stop here when substring is found — good or bad ratio.
-                # Without this `continue`, a bad-ratio substring falls through to partial_ratio
+                # Always stop here when substring is found -- good or bad ratio.
+                # Without this continue, a bad-ratio substring falls through to partial_ratio
                 # which returns 100 (since the short string is fully inside the long one), giving
                 # a false "exact" match on a single generic word like "Кронштейн".
                 continue
@@ -211,7 +258,7 @@ def find_candidates(
                 name_cands.append({"product": p, "score": s, "method": "name_fuzzy"})
                 continue
 
-            # Strict partial ratio — with word-coverage guard.
+            # Strict partial ratio -- with word-coverage guard.
             # partial_ratio finds the best-matching window, so it gives 100 when any word matches.
             # We additionally require that at least _WORD_COVERAGE_MIN of the QUERY words appear
             # in the DB name, preventing single-word matches from showing as "Найдено".
@@ -269,18 +316,24 @@ async def match_items(
                 status = "fuzzy"
 
             match_method = candidates[0].get("method")
-            best         = product_to_dict(candidates[0]['product'])
-            cands_data   = [
+
+            cands_data = [
                 {**product_to_dict(c["product"]), "score": c["score"], "method": c["method"]}
                 for c in candidates
             ]
+            best = product_to_dict(candidates[0]["product"])
 
         results.append({
-            **item,
-            "status":       status,
-            "match_method": match_method,
-            "best_match":   best,
-            "candidates":   cands_data,
+            "pos":              item.get("pos"),
+            "name_raw":         item.get("name_raw", ""),
+            "article_raw":      item.get("article_raw", ""),
+            "kaznisa_code_raw": item.get("kaznisa_code_raw", ""),
+            "qty":              item.get("qty", 1),
+            "unit":             item.get("unit", ""),
+            "status":           status,
+            "match_method":     match_method,
+            "best":             best,
+            "candidates":       cands_data,
         })
 
     return results
