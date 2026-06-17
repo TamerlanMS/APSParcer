@@ -524,6 +524,30 @@ class PreviewPage(ctk.CTkFrame):
         self.save_btn.configure(state="normal")
         self._no_data_lbl.lower()
 
+        # Diagnostic: check if matched products have price data in DB
+        self._check_prices_in_db()
+
+    def _check_prices_in_db(self):
+        """Diagnostic: fetch prices for matched products and print a summary to console."""
+        try:
+            articles = [
+                (it.get("best_match") or {}).get("article", "")
+                for it in self.items
+                if it.get("best_match") and it.get("status") != "not_found"
+            ]
+            articles = [a for a in articles if a]
+            if not articles:
+                return
+            prices = self.api.get_product_prices(articles[:50])  # limit to 50 for speed
+            no_price = [p for p in prices if not any(p.get(f) for f in ("kaznisa","rrts","mrc","opt","partner"))]
+            with_price = [p for p in prices if any(p.get(f) for f in ("kaznisa","rrts","mrc","opt","partner"))]
+            print(f"[Prices] Checked {len(prices)} matched products: "
+                  f"{len(with_price)} have prices, {len(no_price)} have NO prices in DB.")
+            for p in no_price[:5]:
+                print(f"  NO PRICE: {p.get('article')} / {p.get('name')} (brand={p.get('brand')})")
+        except Exception as e:
+            print(f"[Prices] Diagnostic check failed: {e}")
+
     def _load_const_fields(self, brand: str):
         """Загружает значения констант выбранного бренда в поля ввода."""
         consts = self.brand_consts.get(brand.upper())
@@ -705,6 +729,18 @@ class PreviewPage(ctk.CTkFrame):
 
         method_lbl = self._method_label(match_method)
 
+        # Detect matched items with no price in DB → annotate method label
+        _price_fields = ("kaznisa", "rrts", "mrc", "opt", "partner")
+        _no_price_in_db = (
+            bool(bm)
+            and status not in ("not_found",)
+            and not any(bm.get(f) for f in _price_fields)
+            and not item.get("_user_const_price")
+            and not item.get("_user_price")
+        )
+        if _no_price_in_db:
+            method_lbl = (method_lbl + " | нет цены в БД") if method_lbl else "нет цены в БД"
+
         vals = (
             item.get("pos", ""),
             brand,
@@ -733,7 +769,19 @@ class PreviewPage(ctk.CTkFrame):
         exact = sum(1 for i in self.items if i.get("status") == "exact")
         warn  = sum(1 for i in self.items if i.get("status") in ("multiple","fuzzy"))
         nf    = sum(1 for i in self.items if i.get("status") == "not_found")
-        self.stat_lbl.configure(text=t("preview_stat", total=total, exact=exact, warn=warn, nf=nf))
+        # Count matched items that have no price in DB
+        no_price = sum(
+            1 for i in self.items
+            if i.get("best_match") and i.get("status") != "not_found"
+            and not any(
+                i.get("best_match", {}).get(f)
+                for f in ("kaznisa", "rrts", "mrc", "opt", "partner")
+            )
+        )
+        stat_text = t("preview_stat", total=total, exact=exact, warn=warn, nf=nf)
+        if no_price:
+            stat_text += f"  |  ⚠ нет цены в БД: {no_price}"
+        self.stat_lbl.configure(text=stat_text)
 
     # ── Реакция на изменение констант ────────────────────────────────────────
     def _on_const_change(self, *_):

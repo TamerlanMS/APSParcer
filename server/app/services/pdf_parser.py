@@ -540,11 +540,15 @@ def normalize_article(text: str) -> str:
     text = text.strip().upper()
     text = re.sub(r"[–—]", "-", text)
     text = re.sub(r"\s+", " ", text)
-    # Discard word-fragment overflow: Cyrillic-only text with no digits or Latin
-    # characters is almost certainly a name-column fragment that spilled into
-    # the article column (e.g. "ТРОЙСТВО)", "ОЙСТВО)").
+    # Discard word-fragment overflow: Cyrillic-only text that is long or
+    # contains parentheses is almost certainly a name-column fragment that
+    # spilled into the article column (e.g. "ТРОЙСТВО)", "ОЙСТВО)").
+    # Short compact codes like "СПЛП", "СК", "ПП-П" are valid Russian article
+    # abbreviations and must be preserved — they contain no digits or Latin
+    # but are genuine product codes in Russian spec documents.
     if not re.search(r"[0-9A-Z]", text):
-        return ""
+        if " " in text or len(text) >= 8 or re.search(r"[(){}[\]]", text):
+            return ""
     return text
 
 
@@ -703,11 +707,21 @@ def _cell(row: List, idx: Optional[int]) -> str:
     return str(row[idx]).replace("\n", " ").strip()
 
 
+_STAMP_CODE_RE = re.compile(
+    r"^(изм|лист|подпись|дата|инв|взам|формат|кол\.уч|гип|проверил|выполнил|утвердил|н\.конт|н\.к\.|рп |стадия|согласов|разработ)",
+    re.IGNORECASE,
+)
+
+
 def _get_code(row: List, code_idx: Optional[int]) -> str:
     if code_idx is None:
         return ""
     primary = _cell(row, code_idx)
     if not primary:
+        return ""
+    # Reject values that are clearly title-block / stamp-area text bleeding
+    # into the code column (e.g. "Изм.", "Лист", "Подпись и дата").
+    if _STAMP_CODE_RE.match(primary.strip()):
         return ""
     # Убираем пробелы между цифрами итеративно ("2 4 8" → "248")
     cleaned = primary
@@ -1167,11 +1181,16 @@ def _is_spec_page_text(page_text: str) -> bool:
     """Return True if the page text indicates this page contains the equipment
     specification (Спецификация Оборудования / .СО sheet type).
 
-    Two signals are checked — either is sufficient:
+    Three signals are checked — any one is sufficient:
       1. Explicit header "спецификация оборудования" present on the page.
-      2. Document number contains ".со" suffix (sheet type marker) AND the
-         page also has all three spec-table header words
-         ("поз.", "наименование", "кол-во" / "количество").
+      2. Document number contains ".со" (Cyrillic) OR ".co" (Latin) suffix
+         (sheet type marker) AND the page has all three mandatory spec-table
+         column keywords ("поз.", "наименование", "кол-во" / "количество").
+      3. Page has all three mandatory spec-table column keywords AND also has
+         the equipment-spec article column marker "тип, марка" or "тип,марка".
+         This catches continuation sheets (Лист 2, Лист 3…) that repeat the
+         full column header row but do not repeat the title "Спецификация
+         оборудования" — common in multi-page spec tables.
 
     If neither signal fires the function returns False and the page is
     skipped when spec pages were found elsewhere in the document.
@@ -1200,9 +1219,22 @@ def _is_spec_page_text(page_text: str) -> bool:
 
     # Signal 2 — .СО document-type suffix in the title block stamp, plus all
     # three mandatory spec-table column keywords.
-    if ".со" in tl:
+    # Note: some PDFs use Latin "CO" instead of Cyrillic "СО" in the stamp,
+    # so we check both — ".со" (Cyrillic) and ".co" (Latin only when followed
+    # by a word boundary to avoid matching ".com", ".country", etc.).
+    _has_so_suffix = ".со" in tl or bool(re.search(r"\.co(?!\w)", tl))
+    if _has_so_suffix:
         if has_poz and has_naim and has_kol:
             return True
+
+    # Signal 3 — continuation sheet with full column header row.
+    # Multi-page spec tables repeat the column header on every sheet but do not
+    # repeat "Спецификация оборудования".  The article column "Тип, марка,
+    # обозначение" is very spec-specific — using it as an extra guard prevents
+    # false matches on cable-journal or drawing-list pages.
+    has_type_col = "тип, марка" in tl or "тип,марка" in tl or "тип марка" in tl
+    if has_poz and has_naim and has_kol and has_type_col:
+        return True
 
     return False
 
@@ -1373,7 +1405,7 @@ def parse_pdf_specification(
                         page_num, len(all_items))
 
     if progress_cb:
-        progress_cb(72, "parse", "\u0420\u0430\u0437\u0431\u043e\u0440 \u0438 \u043d\u0443\u043c\u0435\u0440\u0430\u0446\u0438\u044f \u043f\u043e\u0437\u0438\u0446\u0438\u0439...")
+        progress_cb(72, "parse", "Разбор и нумерация позиций...")
 
     logger.info("Extracted %d positions, project=%r",
                 len(all_items), best_proj_name[:60] if best_proj_name else "")

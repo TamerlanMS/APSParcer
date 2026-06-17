@@ -266,6 +266,39 @@ async def get_base_template(
     )
 
 
+
+# ─── Product price lookup (diagnostic) ──────────────────────────────────────────
+
+@router.get("/products/prices")
+async def get_product_prices(
+    articles: str = Query(default="", description="Comma-separated list of articles"),
+    db: AsyncSession = Depends(get_db),
+    _auth: str = Depends(verify_any_auth),
+):
+    """Return price fields for specified product articles. Used for diagnostics."""
+    if not articles:
+        return {"products": []}
+    art_list = [a.strip() for a in articles.split(",") if a.strip()]
+    result = await db.execute(
+        select(Product).where(Product.article.in_(art_list))
+    )
+    prods = result.scalars().all()
+    return {
+        "products": [
+            {
+                "article":  p.article,
+                "name":     p.name,
+                "brand":    p.brand,
+                "kaznisa":  p.kaznisa,
+                "rrts":     p.rrts,
+                "mrc":      p.mrc,
+                "opt":      p.opt,
+                "partner":  p.partner,
+            }
+            for p in prods
+        ]
+    }
+
 # ─── Constants ─────────────────────────────────────────────────────────────────
 
 @router.get("/constants")

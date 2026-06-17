@@ -323,6 +323,17 @@ async def match_items(
             ]
             best = product_to_dict(candidates[0]["product"])
 
+            # Log if matched product has no price data (helps diagnose empty price columns)
+            _price_vals = {k: best.get(k) for k in ("kaznisa", "rrts", "mrc", "opt", "partner")}
+            if not any(_price_vals.values()):
+                logger.warning(
+                    "Matched product has NO prices: article=%r name=%r brand=%r — "
+                    "kaznisa=%s rrts=%s mrc=%s opt=%s partner=%s",
+                    best.get("article"), best.get("name"), best.get("brand"),
+                    _price_vals["kaznisa"], _price_vals["rrts"],
+                    _price_vals["mrc"], _price_vals["opt"], _price_vals["partner"],
+                )
+
         results.append({
             "pos":              item.get("pos"),
             "name_raw":         item.get("name_raw", ""),
