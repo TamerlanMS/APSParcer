@@ -343,7 +343,7 @@ async def match_items(
             "unit":             item.get("unit", ""),
             "status":           status,
             "match_method":     match_method,
-            "best":             best,
+            "best_match":       best,
             "candidates":       cands_data,
         })
 
