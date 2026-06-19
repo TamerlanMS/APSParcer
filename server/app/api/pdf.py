@@ -15,6 +15,7 @@ from app.core.audit import write_audit
 from app.services.pdf_parser import parse_pdf_specification
 from app.services.matcher import match_items
 from app.services.matcher_ai import match_items_ai
+from app.services.tech_params import extract_tech_params
 from app.models.models import PdfUploadLog
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,16 @@ async def parse_pdf_stream(
                     ensure_ascii=False,
                 ))
                 return
+
+            # Extract tech params with AI (Phase 2.2) — only when AI mode is on
+            if use_ai and settings.OPENAI_API_KEY:
+                _progress(72, "tech_params", "Извлечение технических параметров...")
+                try:
+                    await extract_tech_params(pdf_items)
+                    tp_count = sum(1 for it in pdf_items if it.get("tech_params"))
+                    logger.info("Tech params extracted: %d/%d items", tp_count, len(pdf_items))
+                except Exception as _tp_exc:
+                    logger.warning("extract_tech_params failed (non-fatal): %s", _tp_exc)
 
             _progress(75, "match", f"Подбор {len(pdf_items)} позиций в базе данных...")
             logger.info("Matching phase: %d pdf_items, use_ai=%s", len(pdf_items), use_ai)

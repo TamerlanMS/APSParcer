@@ -96,18 +96,18 @@ pyinstaller aps_parser.spec
 
 Выдавайте каждому сотруднику отдельный ключ:
 
-| № | Ключ |
-|---|------|
-| 1 | `APS-K1-X7mN2pQrL9vW4bYcJ6sT8uE3fH5kZ` |
-| 2 | `APS-K2-R4nD8wA1mK7vP3xB9yU6tF2hG5jQ0` |
-| 3 | `APS-K3-V9cL5eN2rM8wT4zK1pX7yB3sF6dH0` |
-| 4 | `APS-K4-Q2jH8mR5tW7nL4cX1bY9vP6kD3sE0` |
-| 5 | `APS-K5-B6wF1pK9eL3rN8mH5xQ2yV7tJ4cU0` |
-| 6 | `APS-K6-T3sY7vM2kB8nR5wL1eH9xP4jQ6fD0` |
-| 7 | `APS-K7-N5eP2bL8wK4rH7mQ1xT9yJ3vF6cS0` |
-| 8 | `APS-K8-H8kQ3mN6tB1rL9eW5xV2yP4jD7sF0` |
-| 9 | `APS-K9-L1xB7eW4mK2rN9pH6tQ8yV3jF5cD0` |
-| 10 | `APS-K10-P4yN9vL7bK3wH2mR8xQ5eT1jF6sD0` |
+| № | Ключ                                     |
+|---|------------------------------------------|
+| 1 | `APS-K1-X7mN2pQrL9vW4bYcJ6sT8uE3fH5kZ` 1 |
+| 2 | `APS-K2-R4nD8wA1mK7vP3xB9yU6tF2hG5jQ0` 1 |
+| 3 | `APS-K3-V9cL5eN2rM8wT4zK1pX7yB3sF6dH0` 1 |
+| 4 | `APS-K4-Q2jH8mR5tW7nL4cX1bY9vP6kD3sE0` 1 |
+| 5 | `APS-K5-B6wF1pK9eL3rN8mH5xQ2yV7tJ4cU0` 1 |
+| 6 | `APS-K6-T3sY7vM2kB8nR5wL1eH9xP4jQ6fD0`   |
+| 7 | `APS-K7-N5eP2bL8wK4rH7mQ1xT9yJ3vF6cS0`   |
+| 8 | `APS-K8-H8kQ3mN6tB1rL9eW5xV2yP4jD7sF0`   |
+| 9 | `APS-K9-L1xB7eW4mK2rN9pH6tQ8yV3jF5cD0`   |
+| 10 | `APS-K10-P4yN9vL7bK3wH2mR8xQ5eT1jF6sD0`  |
 
 Чтобы отозвать ключ — удалите его из `settings.API_KEYS` в `config.py` и перезапустите сервер.
 

@@ -19,7 +19,8 @@ C_MULTIPLE = "#FFF3CD"
 C_NOTFOUND = "#F8D7DA"
 C_EDITED   = "#CCE5FF"
 C_SELECT   = "#C8DFFF"
-C_AI       = "#D5F5EE"   # бирюзовый — ИИ-совпадение
+C_AI       = "#D5F5EE"   # бирюзовый — ИИ-совпадение (высокая уверенность)
+C_AI_LOW   = "#FFF0DC"   # янтарный  — ИИ-совпадение (низкая уверенность, требует проверки)
 
 
 # Колонки строго в порядке WV 4.0 + два служебных
@@ -76,6 +77,110 @@ RATE_LABELS = [
 
 def _make_headers() -> List[str]:
     return [t(key) for _k, key in COLS]
+
+
+# ── Лёгкий тултип для Treeview ────────────────────────────────────────────────
+
+class _TreeTooltip:
+    """Показывает тултип с AI-объяснением при наведении на строку Treeview."""
+
+    DELAY_MS   = 500    # задержка перед появлением (мс)
+    BG_COLOR   = "#2C3E50"
+    FG_COLOR   = "#FFFFFF"
+    FONT       = ("Calibri", 11)
+    MAX_WIDTH  = 520    # символов
+
+    def __init__(self, tree: ttk.Treeview, item_getter):
+        """
+        tree        — ttk.Treeview виджет
+        item_getter — callable(iid) → item dict или None
+        """
+        self._tree        = tree
+        self._get_item    = item_getter
+        self._tip_window: Optional[tk.Toplevel] = None
+        self._last_iid: Optional[str] = None
+        self._after_id: Optional[str] = None
+
+        tree.bind("<Motion>",   self._on_motion,  add="+")
+        tree.bind("<Leave>",    self._hide,        add="+")
+        tree.bind("<Button-1>", self._hide,        add="+")
+
+    # ── handlers ──────────────────────────────────────────────────────────────
+
+    def _on_motion(self, event):
+        iid = self._tree.identify_row(event.y)
+        if iid == self._last_iid:
+            return
+        self._hide()
+        if not iid:
+            return
+        item = self._get_item(iid)
+        if not item:
+            return
+        text = self._build_text(item)
+        if not text:
+            return
+        self._last_iid = iid
+        # Debounce: show after DELAY_MS without moving
+        self._after_id = self._tree.after(
+            self.DELAY_MS, lambda: self._show(event.x_root, event.y_root, text)
+        )
+
+    def _hide(self, event=None):
+        if self._after_id:
+            self._tree.after_cancel(self._after_id)
+            self._after_id = None
+        if self._tip_window:
+            self._tip_window.destroy()
+            self._tip_window = None
+        self._last_iid = None
+
+    def _show(self, x: int, y: int, text: str):
+        if self._tip_window:
+            return
+        tip = tk.Toplevel(self._tree)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x + 14}+{y + 10}")
+        tip.attributes("-topmost", True)
+
+        lbl = tk.Label(
+            tip, text=text, justify="left",
+            background=self.BG_COLOR, foreground=self.FG_COLOR,
+            font=self.FONT, relief="flat",
+            padx=10, pady=6, wraplength=self.MAX_WIDTH,
+        )
+        lbl.pack()
+        self._tip_window = tip
+
+    # ── content builder ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_text(item: dict) -> str:
+        parts = []
+
+        ai_reason = (item.get("ai_reason") or "").strip()
+        ai_conf   = item.get("ai_confidence")
+        ai_used   = item.get("ai_used", False)
+        ai_low    = item.get("ai_low_confidence", False)
+        downgraded = item.get("ai_downgraded", False)
+
+        if ai_used and ai_reason:
+            conf_str = f"  ({ai_conf:.0%})" if ai_conf else ""
+            prefix   = "⚠ " if (ai_low or downgraded) else "🤖 "
+            parts.append(f"{prefix}ИИ: {ai_reason}{conf_str}")
+
+        # Tech params
+        tech = item.get("tech_params") or {}
+        if tech:
+            tp = "  |  ".join(f"{k}: {v}" for k, v in list(tech.items())[:7])
+            parts.append(f"⚙ Техпараметры: {tp}")
+
+        # Best match info
+        bm = item.get("best_match") or {}
+        if bm and bm.get("name"):
+            parts.append(f"БД: {bm.get('article','')} — {bm.get('name','')[:100]}")
+
+        return "\n".join(parts)
 
 
 class CandidateDialog(ctk.CTkToplevel):
@@ -358,10 +463,16 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("notfound", background=C_NOTFOUND)
         self.tree.tag_configure("edited",   background=C_EDITED)
         self.tree.tag_configure("ai",       background=C_AI)
+        self.tree.tag_configure("ai_low",   background=C_AI_LOW)
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_row_select)
+
+        # Тултип с AI-объяснением при наведении
+        def _item_by_iid(iid):
+            return next((i for i in self.items if i.get("_iid") == iid), None)
+        self._tooltip = _TreeTooltip(self.tree, _item_by_iid)
 
         # Контекстное меню (правая кнопка мыши)
         self._ctx_menu = tk.Menu(self, tearoff=0)
@@ -672,7 +783,6 @@ class PreviewPage(ctk.CTkFrame):
         ttk.Style().configure("APS.Treeview", rowheight=new_h)
 
     @staticmethod
-    @staticmethod
     def _method_label(method: str) -> str:
         """Return a human-readable Russian label for the match method."""
         if not method:
@@ -686,6 +796,7 @@ class PreviewPage(ctk.CTkFrame):
             "name_contains":            "Название (вхожд.)",
             "name_fuzzy":               "Название (нечётк.)",
             "name_partial":             "Название (частич.)",
+            "code_exact":               "КазНИИСА (код)",
             "kaznisa":                  "КазНИИСА (код)",
         }
         if method in _MAP:
@@ -706,9 +817,12 @@ class PreviewPage(ctk.CTkFrame):
         elif status == "fuzzy":
             tag, stxt = "multiple", t("status_fuzzy")
         elif status == "ai_match":
-            ai_conf = item.get("ai_confidence")
-            conf_str = f" ({ai_conf:.0%})" if ai_conf else ""
-            tag, stxt = "ai", t("status_ai_match") + conf_str
+            ai_conf     = item.get("ai_confidence")
+            ai_low_conf = item.get("ai_low_confidence", False)
+            conf_str    = f" ({ai_conf:.0%})" if ai_conf else ""
+            warn_str    = " ⚠" if ai_low_conf else ""
+            tag         = "ai_low" if ai_low_conf else "ai"
+            stxt        = t("status_ai_match") + conf_str + warn_str
         else:
             tag, stxt = "notfound", t("status_nf")
 
@@ -766,10 +880,13 @@ class PreviewPage(ctk.CTkFrame):
         return iid
 
     def _update_stats(self):
-        total = len(self.items)
-        exact = sum(1 for i in self.items if i.get("status") == "exact")
-        warn  = sum(1 for i in self.items if i.get("status") in ("multiple","fuzzy"))
-        nf    = sum(1 for i in self.items if i.get("status") == "not_found")
+        total    = len(self.items)
+        exact    = sum(1 for i in self.items if i.get("status") == "exact")
+        warn     = sum(1 for i in self.items if i.get("status") in ("multiple", "fuzzy"))
+        ai_match = sum(1 for i in self.items if i.get("status") == "ai_match")
+        ai_low   = sum(1 for i in self.items if i.get("ai_low_confidence"))
+        nf       = sum(1 for i in self.items if i.get("status") == "not_found")
+        downgraded = sum(1 for i in self.items if i.get("ai_downgraded"))
         # Count matched items that have no price in DB
         no_price = sum(
             1 for i in self.items
@@ -780,6 +897,12 @@ class PreviewPage(ctk.CTkFrame):
             )
         )
         stat_text = t("preview_stat", total=total, exact=exact, warn=warn, nf=nf)
+        if ai_match:
+            stat_text += f"  |  🤖 ИИ: {ai_match}"
+            if ai_low:
+                stat_text += f" (⚠ низкая уверенность: {ai_low})"
+        if downgraded:
+            stat_text += f"  |  ↓ опущено ИИ: {downgraded}"
         if no_price:
             stat_text += f"  |  ⚠ нет цены в БД: {no_price}"
         self.stat_lbl.configure(text=stat_text)
@@ -847,7 +970,7 @@ class PreviewPage(ctk.CTkFrame):
 
     # ── Одиночный клик / завершение редактирования ──────────────────────────
     def _on_row_select(self, event=None):
-        """Показывает сырые цены из БД в строке статуса при выборе строки."""
+        """Показывает сырые цены из БД и техпараметры в строке статуса при выборе строки."""
         sel = self.tree.selection()
         if not sel:
             return
@@ -856,23 +979,44 @@ class PreviewPage(ctk.CTkFrame):
         if not item:
             return
         bm = item.get("best_match") or {}
-        if not bm:
-            return
+
         # Форматируем цены из БД
         def _fmt(v):
             if v is None: return "—"
             try: return f"{float(v):,.0f}"
             except: return str(v)
-        brand  = bm.get("brand") or "не задан"
-        kaznisa = _fmt(bm.get("kaznisa"))
-        rrts   = _fmt(bm.get("rrts"))
-        mrc    = _fmt(bm.get("mrc"))
-        opt    = _fmt(bm.get("opt"))
-        partner = _fmt(bm.get("partner"))
-        info = (
-            f"БД: [{bm.get('article','')}] Бренд={brand}  "
-            f"КазНИИСА={kaznisa}  РРЦ={rrts}  МРЦ={mrc}  Опт={opt}  Проект={partner}"
-        )
+
+        parts = []
+
+        if bm:
+            brand   = bm.get("brand") or "не задан"
+            kaznisa = _fmt(bm.get("kaznisa"))
+            rrts    = _fmt(bm.get("rrts"))
+            mrc     = _fmt(bm.get("mrc"))
+            opt     = _fmt(bm.get("opt"))
+            partner = _fmt(bm.get("partner"))
+            parts.append(
+                f"БД: [{bm.get('article','')}] Бренд={brand}  "
+                f"КазНИИСА={kaznisa}  РРЦ={rrts}  МРЦ={mrc}  Опт={opt}  Проект={partner}"
+            )
+
+        # Техпараметры (Phase 2.2)
+        tech_params = item.get("tech_params") or {}
+        if tech_params:
+            tp_str = "  ".join(f"{k}: {v}" for k, v in list(tech_params.items())[:6])
+            parts.append(f"⚙ {tp_str}")
+
+        # AI reason / confidence
+        ai_reason = item.get("ai_reason") or ""
+        ai_conf   = item.get("ai_confidence")
+        if ai_reason and item.get("ai_used"):
+            conf_str = f" ({ai_conf:.0%})" if ai_conf else ""
+            parts.append(f"ИИ: {ai_reason}{conf_str}")
+
+        if not parts:
+            return
+
+        info = "   |   ".join(parts)
         self.stat_lbl.configure(text=info, text_color="#E67E22")
 
     def _on_tree_single_click(self, event):

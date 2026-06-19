@@ -552,20 +552,23 @@ def normalize_article(text: str) -> str:
     return text
 
 
-def extract_qty(raw) -> int:
+def extract_qty(raw) -> float:
+    """Parse quantity from a raw cell string. Supports decimals (0,29 → 0.29)."""
     if raw is None:
-        return 1
+        return 1.0
     s = str(raw).strip().replace("\xa0", " ")
     if not s:
-        return 1
-    m = re.search(r"\d[\d ]*", s)
+        return 1.0
+    # Match number with optional decimal part: "0,29" / "3500" / "1.5"
+    m = re.search(r"\d[\d\s]*[,.]?\d*", s)
     if not m:
-        return 1
-    num = re.sub(r"\s+", "", m.group(0))
+        return 1.0
+    num = re.sub(r"\s+", "", m.group(0)).replace(",", ".")
     try:
-        return int(num)
+        v = float(num)
+        return v if v > 0 else 1.0
     except ValueError:
-        return 1
+        return 1.0
 
 
 HEADER_PATTERNS = {
@@ -1472,8 +1475,15 @@ def parse_pdf_specification(
                 pdf_bytes, progress_cb=progress_cb
             )
 
-    # Renumber sequentially
+    # Renumber sequentially + normalise qty to float
+    # (Vision OCR path returns qty as a raw string like "0,29" or "3500")
     for idx, item in enumerate(all_items, start=1):
         item["pos"] = str(idx)
+        raw_qty = item.get("qty", 1)
+        if not isinstance(raw_qty, (int, float)):
+            item["qty"] = extract_qty(raw_qty)
+        # Normalise unit_raw → unit (Vision uses unit_raw, pdfplumber uses unit)
+        if "unit_raw" in item and "unit" not in item:
+            item["unit"] = item.pop("unit_raw")
 
     return all_items, best_proj_name
