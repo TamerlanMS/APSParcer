@@ -91,6 +91,7 @@ STRINGS = {
         "upload_stage_ocr_start": "Запуск OCR-распознавания...",
         "upload_stage_ocr_page":  "OCR-распознавание страниц...",
         "upload_stage_parse":     "Разбор позиций...",
+        "upload_stage_tech_params": "Извлечение технических параметров...",
         "upload_stage_match":     "Подбор в базе данных...",
         "upload_stage_save":      "Сохранение результатов...",
         "upload_stage_done":      "Готово!",
@@ -279,6 +280,21 @@ STRINGS = {
         "tpl_refresh": "🔄  Обновить",
         "tpl_no_access": "Нет доступа — требуется роль администратора",
 
+        # Upload history count
+        "upload_hist_count": "{count} записей",
+        "upload_hist_count_1": "{count} запись",
+
+        # Preview stats (AI counters)
+        "preview_stat_ai":        "  |  🤖 ИИ: {count}",
+        "preview_stat_ai_low":    " (⚠ низкая уверенность: {count})",
+        "preview_stat_downgraded":"  |  ↓ опущено ИИ: {count}",
+        "preview_stat_no_price":  "  |  ⚠ нет цены в БД: {count}",
+
+        # Preview info panel labels
+        "preview_info_db":        "БД",
+        "preview_info_ai":        "ИИ",
+        "preview_info_tech":      "⚙ Техпараметры",
+
         # Status bar
         "status_connected": "Подключено: {url}",
         "status_not_conn": "Не подключено",
@@ -375,6 +391,7 @@ STRINGS = {
         "upload_stage_ocr_start": "OCR тануды іске қосу...",
         "upload_stage_ocr_page":  "OCR беттерді тану...",
         "upload_stage_parse":     "Позицияларды талдау...",
+        "upload_stage_tech_params": "Техникалық параметрлерді шығару...",
         "upload_stage_match":     "Деректер қорынан іздеу...",
         "upload_stage_save":      "Нәтижелерді сақтау...",
         "upload_stage_done":      "Дайын!",
@@ -557,6 +574,21 @@ STRINGS = {
         "tpl_loading": "🔄 Ақпарат жүктелуде...",
         "tpl_refresh": "🔄  Жаңарту",
         "tpl_no_access": "Рұқсат жоқ — әкімші рөлі қажет",
+
+        # Upload history count
+        "upload_hist_count": "{count} жазба",
+        "upload_hist_count_1": "{count} жазба",
+
+        # Preview stats (AI counters)
+        "preview_stat_ai":        "  |  🤖 ЖИ: {count}",
+        "preview_stat_ai_low":    " (⚠ төмен сенімділік: {count})",
+        "preview_stat_downgraded":"  |  ↓ ЖИ түсірді: {count}",
+        "preview_stat_no_price":  "  |  ⚠ ДҚ-да баға жоқ: {count}",
+
+        # Preview info panel labels
+        "preview_info_db":        "ДҚ",
+        "preview_info_ai":        "ЖИ",
+        "preview_info_tech":      "⚙ Техпараметрлер",
     },
 }
 

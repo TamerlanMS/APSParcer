@@ -261,8 +261,9 @@ class UploadPage(ctk.CTkFrame):
                 r.get("uploaded_at", "—"),
             ))
         count = len(rows)
+        count_key = "upload_hist_count_1" if count == 1 else "upload_hist_count"
         self.hist_status_lbl.configure(
-            text=f"{count} " + ("записей" if count != 1 else "запись"),
+            text=t(count_key, count=count),
             text_color=TEXT_SECONDARY
         )
         self.hist_refresh_btn.configure(state="normal")

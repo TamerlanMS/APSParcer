@@ -167,18 +167,18 @@ class _TreeTooltip:
         if ai_used and ai_reason:
             conf_str = f"  ({ai_conf:.0%})" if ai_conf else ""
             prefix   = "⚠ " if (ai_low or downgraded) else "🤖 "
-            parts.append(f"{prefix}ИИ: {ai_reason}{conf_str}")
+            parts.append(f"{prefix}{t('preview_info_ai')}: {ai_reason}{conf_str}")
 
         # Tech params
         tech = item.get("tech_params") or {}
         if tech:
             tp = "  |  ".join(f"{k}: {v}" for k, v in list(tech.items())[:7])
-            parts.append(f"⚙ Техпараметры: {tp}")
+            parts.append(f"{t('preview_info_tech')}: {tp}")
 
         # Best match info
         bm = item.get("best_match") or {}
         if bm and bm.get("name"):
-            parts.append(f"БД: {bm.get('article','')} — {bm.get('name','')[:100]}")
+            parts.append(f"{t('preview_info_db')}: {bm.get('article','')} — {bm.get('name','')[:100]}")
 
         return "\n".join(parts)
 
@@ -898,13 +898,13 @@ class PreviewPage(ctk.CTkFrame):
         )
         stat_text = t("preview_stat", total=total, exact=exact, warn=warn, nf=nf)
         if ai_match:
-            stat_text += f"  |  🤖 ИИ: {ai_match}"
+            stat_text += t("preview_stat_ai", count=ai_match)
             if ai_low:
-                stat_text += f" (⚠ низкая уверенность: {ai_low})"
+                stat_text += t("preview_stat_ai_low", count=ai_low)
         if downgraded:
-            stat_text += f"  |  ↓ опущено ИИ: {downgraded}"
+            stat_text += t("preview_stat_downgraded", count=downgraded)
         if no_price:
-            stat_text += f"  |  ⚠ нет цены в БД: {no_price}"
+            stat_text += t("preview_stat_no_price", count=no_price)
         self.stat_lbl.configure(text=stat_text)
 
     # ── Реакция на изменение констант ────────────────────────────────────────
@@ -996,7 +996,7 @@ class PreviewPage(ctk.CTkFrame):
             opt     = _fmt(bm.get("opt"))
             partner = _fmt(bm.get("partner"))
             parts.append(
-                f"БД: [{bm.get('article','')}] Бренд={brand}  "
+                f"{t('preview_info_db')}: [{bm.get('article','')}] Бренд={brand}  "
                 f"КазНИИСА={kaznisa}  РРЦ={rrts}  МРЦ={mrc}  Опт={opt}  Проект={partner}"
             )
 
@@ -1004,14 +1004,14 @@ class PreviewPage(ctk.CTkFrame):
         tech_params = item.get("tech_params") or {}
         if tech_params:
             tp_str = "  ".join(f"{k}: {v}" for k, v in list(tech_params.items())[:6])
-            parts.append(f"⚙ {tp_str}")
+            parts.append(f"{t('preview_info_tech')}: {tp_str}")
 
         # AI reason / confidence
         ai_reason = item.get("ai_reason") or ""
         ai_conf   = item.get("ai_confidence")
         if ai_reason and item.get("ai_used"):
             conf_str = f" ({ai_conf:.0%})" if ai_conf else ""
-            parts.append(f"ИИ: {ai_reason}{conf_str}")
+            parts.append(f"{t('preview_info_ai')}: {ai_reason}{conf_str}")
 
         if not parts:
             return
