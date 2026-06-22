@@ -269,6 +269,91 @@ async def get_base_template(
 
 # ─── Product price lookup (diagnostic) ──────────────────────────────────────────
 
+@router.get("/products/search")
+async def search_products(
+    q:       str = Query(default="", description="Поиск по артикулу ИЛИ названию (оба поля)"),
+    article: str = Query(default="", description="Поиск только по артикулу"),
+    name:    str = Query(default="", description="Поиск только по названию"),
+    limit:   int = Query(default=20, ge=1, le=100),
+    db:      AsyncSession = Depends(get_db),
+    _auth:   str = Depends(verify_any_auth),
+):
+    """
+    Поиск товаров по артикулу и/или названию.
+    - article= → поиск только по артикулу (когда заполнено поле «Артикул»)
+    - name=    → поиск только по названию  (когда заполнено поле «Название»)
+    - q=       → поиск по обоим полям (fallback для старых клиентов)
+    Используется в ArticleSearchDialog (Phase 2.6).
+    """
+    from sqlalchemy import or_, and_
+
+    art = (article or "").strip()
+    nm  = (name    or "").strip()
+    qry = (q       or "").strip()
+
+    if not art and not nm and not qry:
+        return {"products": [], "total": 0}
+
+    conditions = []
+    order_extra = []
+
+    if art:
+        # Точный поиск только по полю article (ilike = case-insensitive LIKE)
+        conditions.append(Product.article.ilike(f"%{art}%"))
+        order_extra += [
+            (func.lower(Product.article) == art.lower()).desc(),
+            Product.article.ilike(f"{art}%").desc(),
+        ]
+
+    if nm:
+        conditions.append(Product.name.ilike(f"%{nm}%"))
+
+    if not conditions and qry:
+        # Fallback: ищем по обоим полям одновременно
+        conditions.append(or_(
+            Product.article.ilike(f"%{qry}%"),
+            Product.name.ilike(f"%{qry}%"),
+        ))
+        order_extra += [
+            (func.lower(Product.article) == qry.lower()).desc(),
+            Product.article.ilike(f"{qry}%").desc(),
+        ]
+
+    # article AND name → AND-условие (сужаем выборку)
+    where_clause = (
+        and_(*conditions) if len(conditions) > 1
+        else conditions[0]
+    )
+
+    stmt = select(Product).where(Product.is_active == True, where_clause)
+    if order_extra:
+        stmt = stmt.order_by(*order_extra)
+    stmt = stmt.limit(limit)
+
+    result = await db.execute(stmt)
+    prods = result.scalars().all()
+    return {
+        "products": [
+            {
+                "id":           p.id,
+                "article":      p.article or "",
+                "name":         p.name or "",
+                "brand":        p.brand or "",
+                "unit":         p.unit or "шт.",
+                "kaznisa":      p.kaznisa,
+                "rrts":         p.rrts,
+                "mrc":          p.mrc,
+                "opt":          p.opt,
+                "partner":      p.partner,
+                "multiplicity": p.multiplicity,
+                "kaznisa_code": p.kaznisa_code or "",
+            }
+            for p in prods
+        ],
+        "total": len(prods),
+    }
+
+
 @router.get("/products/prices")
 async def get_product_prices(
     articles: str = Query(default="", description="Comma-separated list of articles"),
@@ -349,7 +434,7 @@ async def update_constant(
     result = await db.execute(select(BrandConstant).where(BrandConstant.brand == brand))
     bc = result.scalar_one_or_none()
     if not bc:
-        raise HTTPException(404, f"Бренд '{brand}' не найден")
+        raise HTTPException(404, f"Бренд \'{brand}\' не найден")
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(bc, field, value)
     await db.commit()

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app.api import pdf, database, auth
 from app.api import users as users_api
 from app.api import excel_template as excel_template_api
+from app.api import corrections as corrections_api
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 
@@ -22,6 +23,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run pre-embedding of products in background after startup."""
+    # ── Auto-create any missing tables (safe: CREATE TABLE IF NOT EXISTS) ──────
+    try:
+        from app.core.database import engine
+        from app.models.models import Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("DB schema check complete (all tables present)")
+    except Exception as exc:
+        logger.error("DB schema check failed: %s", exc)
+
     if settings.OPENAI_API_KEY and settings.PINECONE_API_KEY and settings.PINECONE_HOST:
         async def _embed_task():
             # Small delay so the server is fully up before heavy work starts
@@ -100,6 +111,7 @@ app.include_router(users_api.router)                           # has prefix="/ap
 app.include_router(pdf.router,      prefix="/api/v1/pdf",      tags=["pdf"])
 app.include_router(database.router, prefix="/api/v1/database", tags=["database"])
 app.include_router(excel_template_api.router, prefix="/api/v1",  tags=["excel-template"])
+app.include_router(corrections_api.router, prefix="/api/v1/corrections", tags=["corrections"])
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

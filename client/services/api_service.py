@@ -336,4 +336,116 @@ class ApiService:
 
     def import_constants(self, file_path: str, password: str) -> dict:
         with open(file_path, "rb") as f:
-            fname = file_path.repla
+            fname = file_path.replace("\\", "/").split("/")[-1]
+            mime = (
+                "application/vnd.ms-excel.sheet.macroEnabled.12"
+                if fname.lower().endswith(".xlsm")
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            files = {"file": (fname, f, mime)}
+            r = requests.post(
+                f"{self._base}/api/v1/database/import/constants",
+                files=files,
+                headers=self._h,
+                params={"password": password},
+                timeout=180,
+            )
+        r.raise_for_status()
+        return r.json()
+
+    # ── Corrections (Phase 2.6 — ML learning from manager selections) ─────────
+
+    def record_correction(
+        self,
+        original_name:       str,
+        original_article:    str,
+        original_status:     str,
+        selected_product_id: int,
+        session_id:          str = "",
+    ) -> dict:
+        """
+        Записать исправление/подтверждение менеджера.
+        Вызывается при выборе товара для красной строки или при ✓-подтверждении.
+        Возвращает {"ok": True, "correction_id": ..., "product_id": ..., "indexed": ...}
+        """
+        try:
+            r = requests.post(
+                f"{self._base}/api/v1/corrections/record",
+                json={
+                    "original_name":       original_name,
+                    "original_article":    original_article or "",
+                    "original_status":     original_status or "",
+                    "selected_product_id": selected_product_id,
+                    "session_id":          session_id or "",
+                },
+                headers=self._h,
+                timeout=20,
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def search_products_by_text(self, query: str, article: str = "", top_k: int = 8) -> list:
+        """
+        Поиск товаров в БД по текстовому запросу (через Pinecone vector search).
+        Используется в ArticleSearchDialog для красных строк.
+        Возвращает список: [{"product_id", "article", "name", "similarity"}, ...]
+        """
+        try:
+            r = requests.get(
+                f"{self._base}/api/v1/corrections/search",
+                params={"q": query, "article": article, "top_k": top_k},
+                headers=self._h,
+                timeout=15,
+            )
+            r.raise_for_status()
+            return r.json().get("results", [])
+        except Exception:
+            return []
+
+    def search_products_by_article(self, article: str = "", name: str = "") -> list:
+        """
+        Поиск товаров в БД по артикулу и/или названию.
+        - article → ищет только в поле article (когда заполнено поле «Артикул»)
+        - name    → ищет только в поле name    (когда заполнено поле «Название»)
+        - оба     → AND-условие
+
+        Backward-compat: также отправляет q= для старого сервера без отдельных params.
+        На обновлённом сервере article=/name= имеют приоритет над q=.
+        """
+        if not article and not name:
+            return []
+        params = {"limit": 20}
+        # Новые параметры — для обновлённого сервера (article-only / name-only поиск)
+        if article:
+            params["article"] = article
+        if name:
+            params["name"] = name
+        # Fallback q= — для старого сервера (ищет по обоим полям, хотя бы что-то возвращает)
+        params["q"] = article or name
+        try:
+            r = requests.get(
+                f"{self._base}/api/v1/database/products/search",
+                params=params,
+                headers=self._h,
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return r.json().get("products", [])
+        except Exception:
+            pass
+        return []
+
+    def get_correction_stats(self) -> dict:
+        """Статистика накопленных исправлений. {"total_corrections", "pinecone_indexed", "unique_products"}"""
+        try:
+            r = requests.get(
+                f"{self._base}/api/v1/corrections/stats",
+                headers=self._h,
+                timeout=10,
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            return {"total_corrections": 0, "pinecone_indexed": 0, "unique_products": 0}

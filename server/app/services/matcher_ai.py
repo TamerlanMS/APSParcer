@@ -36,6 +36,7 @@ from app.services.matcher import (
 )
 from app.services.embedder import embed_text, _product_text, _get_pinecone_index
 from app.services.tech_params import tech_params_to_text
+from app.api.corrections import check_corrections
 
 logger = logging.getLogger(__name__)
 
@@ -370,7 +371,54 @@ async def match_items_ai(
             logger.debug("match_items_ai: [%d] EXACT passthrough '%s'", idx + 1, label)
             return {**classic, "ai_used": False, "ai_reason": "точное совпадение"}
 
+        # ── Шаг 0: проверка истории исправлений менеджеров ───────────────────
         async with semaphore:
+            name_raw    = item.get("name_raw", "") or ""
+            article_raw = item.get("article_raw", "") or ""
+            try:
+                correction_product_id = await check_corrections(name_raw, article_raw)
+            except Exception as exc:
+                logger.warning("check_corrections failed for '%s': %s", label, exc)
+                correction_product_id = None
+
+            if correction_product_id is not None:
+                # Загружаем товар из БД и возвращаем как manager_match
+                from sqlalchemy import text as sql_text
+                result = await db.execute(
+                    sql_text("SELECT * FROM products WHERE id = :pid"),
+                    {"pid": correction_product_id},
+                )
+                row = result.mappings().first()
+                if row is not None:
+                    logger.info(
+                        "match_items_ai: [%d] CORRECTION MATCH '%s' → product_id=%d",
+                        idx + 1, label, correction_product_id,
+                    )
+                    product_dict = {
+                        "id":           row["id"],
+                        "article":      (row["article"] or "").strip(),
+                        "name":         (row["name"] or "").strip(),
+                        "unit":         (row["unit"] or "шт.").strip(),
+                        "brand":        (row["brand"] or "").strip(),
+                        "kaznisa":      row["kaznisa"],
+                        "rrts":         row["rrts"],
+                        "mrc":          row["mrc"],
+                        "opt":          row["opt"],
+                        "partner":      row["partner"],
+                        "multiplicity": row["multiplicity"],
+                        "kaznisa_code": (row["kaznisa_code"] or "").strip(),
+                    }
+                    return {
+                        **item,
+                        "status":       "manager_match",
+                        "match_method": "correction_history",
+                        "best_match":   product_dict,
+                        "candidates":   [{**product_dict, "score": 100, "method": "correction"}],
+                        "ai_used":      False,
+                        "ai_reason":    "Подобрано из истории выборов менеджеров",
+                    }
+
+            # ── Стандартный AI-матчинг ────────────────────────────────────────
             logger.info("match_items_ai: [%d/%d] AI '%s'", idx + 1, len(pdf_items), label)
             try:
                 return await _match_one_ai(item, classic, db)

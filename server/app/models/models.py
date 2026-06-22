@@ -209,3 +209,37 @@ class ExcelTemplate(Base):
     is_active   = Column(Boolean, default=True, nullable=False, index=True)
 
     uploader = relationship("User", foreign_keys=[uploaded_by])
+
+
+class ManagerCorrection(Base):
+    """
+    История исправлений менеджеров.
+    Каждый раз когда менеджер вручную выбирает/заменяет товар в предпросмотре —
+    запись сохраняется сюда и индексируется в Pinecone (namespace "corrections").
+    Используется для приоритетного подбора перед стандартным AI-матчингом.
+    """
+    __tablename__ = "manager_corrections"
+
+    id                  = Column(Integer, primary_key=True, index=True)
+    user_id             = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                  nullable=True, index=True)
+    username            = Column(String(100), nullable=True)   # денормализовано
+    session_id          = Column(String(64), nullable=True, index=True)  # группировка сессии
+
+    # Оригинальный запрос из PDF
+    original_name       = Column(Text, nullable=False)
+    original_article    = Column(String(300), nullable=True)
+    original_status     = Column(String(50), nullable=True)    # not_found / fuzzy / ai_match / ...
+
+    # Выбранный менеджером товар
+    selected_product_id = Column(Integer, ForeignKey("products.id", ondelete="SET NULL"),
+                                  nullable=True, index=True)
+    selected_article    = Column(String(200), nullable=True)   # денормализовано для быстрого поиска
+    selected_name       = Column(Text, nullable=True)          # денормализовано
+
+    # Метаданные
+    pinecone_indexed    = Column(Boolean, default=False)       # True = вектор в Pinecone
+    created_at          = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    user     = relationship("User", foreign_keys=[user_id])
+    product  = relationship("Product", foreign_keys=[selected_product_id])

@@ -106,6 +106,7 @@ STRINGS = {
         "preview_legend_nf": "❌ Не найдено",
         "preview_legend_edit": "✏️ Изменено",
         "preview_legend_ai": "🤖 ИИ-подбор",
+        "preview_legend_manager": "📚 Из истории",
         "preview_constants": "Константы расчёта",
         "preview_margin": "Маржа",
         "preview_logistics": "Логистика",
@@ -295,6 +296,38 @@ STRINGS = {
         "preview_info_ai":        "ИИ",
         "preview_info_tech":      "⚙ Техпараметры",
 
+        # Preview — manager corrections stats (Phase 2.6)
+        "preview_stat_manager":   "  |  📚 Из истории: {count}",
+        "preview_stat_corrected": "  |  ✏️ Исправлено: {count}",
+
+        # ArticleSearchDialog (Phase 2.6)
+        "search_dialog_title":    "Поиск товара в базе данных",
+        "search_dialog_subtitle": "Введите артикул или название — выберите подходящую позицию",
+        "search_article_label":   "Артикул:",
+        "search_name_label":      "Название:",
+        "search_btn":             "🔍 Найти",
+        "search_placeholder_art": "Например: 1SDA071070R1",
+        "search_placeholder_name":"Например: автоматический выключатель",
+        "search_col_article":     "Артикул",
+        "search_col_name":        "Наименование",
+        "search_col_brand":       "Бренд",
+        "search_col_match":       "Совпадение",
+        "search_select_btn":      "✓ Выбрать",
+        "search_cancel_btn":      "Отмена",
+        "search_no_results":      "Ничего не найдено. Попробуйте другой запрос.",
+        "search_searching":       "Поиск...",
+        "search_history_hint":    "📚 Из истории выборов менеджеров",
+
+        # Preview — row action buttons (Phase 2.6)
+        "preview_btn_confirm":    "✓",
+        "preview_btn_search":     "🔍",
+        "preview_btn_confirm_tip":"Подтвердить подбор (обучает модель)",
+        "preview_btn_search_tip": "Найти товар по артикулу",
+
+        # Status labels (Phase 2.6)
+        "status_manager_match":   "📚 Из истории",
+        "status_confirmed":       "✓ Подтверждено",
+
         # Status bar
         "status_connected": "Подключено: {url}",
         "status_not_conn": "Не подключено",
@@ -406,6 +439,7 @@ STRINGS = {
         "preview_legend_nf": "❌ Табылмады",
         "preview_legend_edit": "✏️ Өзгертілді",
         "preview_legend_ai": "🤖 ЖИ-іріктеу",
+        "preview_legend_manager": "📚 Тарихтан",
         "preview_constants": "Есептеу константалары",
         "preview_margin": "Маржа",
         "preview_logistics": "Логистика",
@@ -589,6 +623,38 @@ STRINGS = {
         "preview_info_db":        "ДҚ",
         "preview_info_ai":        "ЖИ",
         "preview_info_tech":      "⚙ Техпараметрлер",
+
+        # Preview — manager corrections stats (Phase 2.6)
+        "preview_stat_manager":   "  |  📚 Тарихтан: {count}",
+        "preview_stat_corrected": "  |  ✏️ Түзетілді: {count}",
+
+        # ArticleSearchDialog (Phase 2.6)
+        "search_dialog_title":    "Деректер қорынан тауар іздеу",
+        "search_dialog_subtitle": "Артикул немесе атауды енгізіңіз — тиісті позицияны таңдаңыз",
+        "search_article_label":   "Артикул:",
+        "search_name_label":      "Атауы:",
+        "search_btn":             "🔍 Іздеу",
+        "search_placeholder_art": "Мысалы: 1SDA071070R1",
+        "search_placeholder_name":"Мысалы: автоматты ажыратқыш",
+        "search_col_article":     "Артикул",
+        "search_col_name":        "Атауы",
+        "search_col_brand":       "Бренд",
+        "search_col_match":       "Сәйкестік",
+        "search_select_btn":      "✓ Таңдау",
+        "search_cancel_btn":      "Болдырмау",
+        "search_no_results":      "Ештеңе табылмады. Басқа сұрауды қолданып көріңіз.",
+        "search_searching":       "Іздеу...",
+        "search_history_hint":    "📚 Менеджерлер таңдау тарихынан",
+
+        # Preview — row action buttons (Phase 2.6)
+        "preview_btn_confirm":    "✓",
+        "preview_btn_search":     "🔍",
+        "preview_btn_confirm_tip":"Іріктеуді растау (модельді оқытады)",
+        "preview_btn_search_tip": "Артикул бойынша тауар іздеу",
+
+        # Status labels (Phase 2.6)
+        "status_manager_match":   "📚 Тарихтан",
+        "status_confirmed":       "✓ Расталды",
     },
 }
 

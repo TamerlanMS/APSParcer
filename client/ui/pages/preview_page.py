@@ -19,8 +19,9 @@ C_MULTIPLE = "#FFF3CD"
 C_NOTFOUND = "#F8D7DA"
 C_EDITED   = "#CCE5FF"
 C_SELECT   = "#C8DFFF"
-C_AI       = "#D5F5EE"   # бирюзовый — ИИ-совпадение (высокая уверенность)
-C_AI_LOW   = "#FFF0DC"   # янтарный  — ИИ-совпадение (низкая уверенность, требует проверки)
+C_AI       = "#B0BEC5"   # серебристый — ИИ-совпадение (высокая уверенность)
+C_AI_LOW   = "#F5F5F5"   # почти белый — ИИ-совпадение (низкая уверенность, требует проверки)
+C_MANAGER  = "#EDE7F6"   # сиреневый — подобрано из истории выборов менеджеров
 
 
 # Колонки строго в порядке WV 4.0 + два служебных
@@ -315,6 +316,224 @@ class SaveKPDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class ArticleSearchDialog(ctk.CTkToplevel):
+    """
+    Диалог поиска товара в базе данных по артикулу или названию.
+    Используется для красных (not_found) строк — менеджер вводит артикул/название
+    и выбирает подходящий товар из предложенных результатов.
+    После выбора товар записывается в историю исправлений (обучение модели).
+    """
+
+    def __init__(self, parent, api: ApiService, item: dict):
+        super().__init__(parent)
+        self.api      = api
+        self.item     = item
+        self.selected = None   # выбранный продукт (dict) или None
+
+        self.title(t("search_dialog_title"))
+        self.geometry("820x540")
+        self.grab_set()
+        self.resizable(True, True)
+        self.minsize(600, 400)
+
+        # Предзаполняем поля из текущей строки
+        self._default_art  = (item.get("article_raw") or "").strip()
+        self._default_name = (item.get("name_raw") or "").strip()
+
+        self._build()
+        # Авто-поиск если есть предзаполненные данные
+        if self._default_art or self._default_name:
+            self.after(150, self._do_search)
+
+    def _build(self):
+        pad = 16
+
+        # Заголовок
+        ctk.CTkLabel(self, text=t("search_dialog_title"),
+                     font=FONT_HEADING, text_color=NAVY).pack(pady=(pad, 2), padx=pad, anchor="w")
+        ctk.CTkLabel(self, text=t("search_dialog_subtitle"),
+                     font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(padx=pad, anchor="w", pady=(0, 8))
+
+        # Поля поиска
+        fields_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+                                     border_width=1, border_color="#E0E0E0")
+        fields_frame.pack(fill="x", padx=pad, pady=(0, 8))
+        fields_frame.grid_columnconfigure(1, weight=1)
+        fields_frame.grid_columnconfigure(3, weight=2)
+
+        ctk.CTkLabel(fields_frame, text=t("search_article_label"),
+                     font=FONT_NORMAL, anchor="e").grid(row=0, column=0, padx=(12, 6), pady=10, sticky="e")
+        self._art_var = tk.StringVar(value=self._default_art)
+        art_entry = ctk.CTkEntry(fields_frame, textvariable=self._art_var,
+                                  placeholder_text=t("search_placeholder_art"),
+                                  height=32, font=FONT_NORMAL)
+        art_entry.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="ew")
+        art_entry.bind("<Return>", lambda e: self._do_search())
+
+        ctk.CTkLabel(fields_frame, text=t("search_name_label"),
+                     font=FONT_NORMAL, anchor="e").grid(row=0, column=2, padx=(0, 6), pady=10, sticky="e")
+        self._name_var = tk.StringVar(value=self._default_name[:80])
+        name_entry = ctk.CTkEntry(fields_frame, textvariable=self._name_var,
+                                   placeholder_text=t("search_placeholder_name"),
+                                   height=32, font=FONT_NORMAL)
+        name_entry.grid(row=0, column=3, padx=(0, 4), pady=10, sticky="ew")
+        name_entry.bind("<Return>", lambda e: self._do_search())
+
+        search_btn = ctk.CTkButton(
+            fields_frame, text=t("search_btn"), font=FONT_NORMAL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=32, width=120, corner_radius=RADIUS_SM,
+            command=self._do_search,
+        )
+        search_btn.grid(row=0, column=4, padx=(4, 12), pady=10)
+
+        # Статус / подсказка
+        self._status_lbl = ctk.CTkLabel(self, text="", font=FONT_SMALL,
+                                         text_color=TEXT_SECONDARY)
+        self._status_lbl.pack(padx=pad, anchor="w", pady=(0, 4))
+
+        # Таблица результатов
+        tree_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+                                   border_width=1, border_color="#E0E0E0")
+        tree_frame.pack(fill="both", expand=True, padx=pad, pady=(0, 8))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        cols = ["article", "name", "brand", "unit", "rrts", "mrc"]
+        hdrs = [t("search_col_article"), t("search_col_name"),
+                t("search_col_brand"), "Ед.", "РРЦ", "МРЦ"]
+        style = ttk.Style()
+        style.configure("Search.Treeview", rowheight=26, font=("Calibri", 12))
+        style.configure("Search.Treeview.Heading", font=("Calibri", 12, "bold"),
+                        background=NAVY, foreground="white")
+        style.map("Search.Treeview", background=[("selected", C_SELECT)])
+
+        self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                   style="Search.Treeview", selectmode="browse")
+        for col, hdr, w in zip(cols, hdrs, [170, 300, 100, 50, 90, 90]):
+            self._tree.heading(col, text=hdr)
+            self._tree.column(col, width=w, minwidth=40, stretch=(col == "name"), anchor="w")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        self._tree.bind("<Double-1>", lambda e: self._ok())
+
+        # Хранилище результатов
+        self._results: list = []
+
+        # Кнопки
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(pady=(0, pad), padx=pad, fill="x")
+
+        ctk.CTkButton(btn_row, text=t("search_cancel_btn"),
+                      fg_color="#AEB6BF", hover_color="#95A5A6",
+                      width=130, command=self.destroy).pack(side="right", padx=(8, 0))
+        self._ok_btn = ctk.CTkButton(btn_row, text=t("search_select_btn"),
+                                      fg_color=NAVY_LIGHT, hover_color=NAVY,
+                                      width=150, command=self._ok, state="disabled")
+        self._ok_btn.pack(side="right")
+
+        # Авто-выделение первой строки при нажатии Enter
+        self.bind("<Return>", lambda e: self._ok() if self._results else None)
+
+    def _do_search(self, _=None):
+        art  = self._art_var.get().strip()
+        name = self._name_var.get().strip()
+        if not art and not name:
+            return
+
+        self._status_lbl.configure(text=t("search_searching"))
+        self._tree.delete(*self._tree.get_children())
+        self._results = []
+        self._ok_btn.configure(state="disabled")
+
+        def _worker():
+            try:
+                # 1. Поиск в БД: article= и name= — раздельные поля (не смешиваем)
+                db_results = self.api.search_products_by_article(article=art, name=name)
+                # 2. Семантический поиск из истории (только если мало прямых результатов)
+                sem_results = []
+                if name and len(db_results) < 5:
+                    sem_results = self.api.search_products_by_text(name, art, top_k=5)
+                self.after(0, lambda: self._show_results(db_results, sem_results))
+            except Exception as exc:
+                self.after(0, lambda: self._status_lbl.configure(
+                    text=f"Ошибка поиска: {exc}", text_color="#E74C3C"
+                ))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_results(self, db_results: list, sem_results: list):
+        """Отображает результаты поиска в таблице."""
+        self._tree.delete(*self._tree.get_children())
+        self._results = []
+        seen_ids = set()
+
+        def _add(p, tag=""):
+            pid = p.get("id") or p.get("product_id")
+            if not pid or pid in seen_ids:
+                return
+            seen_ids.add(pid)
+            self._results.append(p)
+            def _fmt(v):
+                return f"{float(v):,.0f}" if v else "—"
+            self._tree.insert("", "end", tags=(tag,) if tag else (), values=(
+                p.get("article", ""),
+                (p.get("name") or "")[:120],
+                p.get("brand", ""),
+                p.get("unit", "шт."),
+                _fmt(p.get("rrts")),
+                _fmt(p.get("mrc")),
+            ))
+
+        # Сначала прямые совпадения из БД
+        for p in db_results:
+            _add(p, "db")
+
+        # Затем семантические — с пометкой
+        if sem_results:
+            for s in sem_results:
+                # sem_results возвращают только {product_id, article, name, similarity}
+                # Если нет полных данных — пропускаем
+                if s.get("product_id") and s.get("article"):
+                    _add({"id": s["product_id"], "article": s["article"],
+                           "name": s.get("name", ""), "brand": "", "unit": "шт."}, "sem")
+
+        self._tree.tag_configure("db",  background=C_EXACT)
+        self._tree.tag_configure("sem", background=C_MANAGER)
+
+        if self._results:
+            children = self._tree.get_children()
+            if children:
+                self._tree.selection_set(children[0])
+                self._tree.focus(children[0])
+            self._ok_btn.configure(state="normal")
+            hint = t("search_history_hint") if sem_results else ""
+            self._status_lbl.configure(
+                text=f"Найдено: {len(self._results)} позиций.  {hint}",
+                text_color=TEXT_SECONDARY,
+            )
+        else:
+            self._ok_btn.configure(state="disabled")
+            self._status_lbl.configure(text=t("search_no_results"), text_color="#E74C3C")
+
+    def _ok(self):
+        sel = self._tree.selection()
+        if not sel:
+            children = self._tree.get_children()
+            if len(children) == 1:
+                sel = (children[0],)
+            else:
+                return
+        idx = self._tree.index(sel[0])
+        if 0 <= idx < len(self._results):
+            self.selected = self._results[idx]
+        self.destroy()
+
+
 class PreviewPage(ctk.CTkFrame):
     def __init__(self, parent, api: ApiService, app):
         super().__init__(parent, fg_color=BG_MAIN, corner_radius=0)
@@ -329,6 +548,9 @@ class PreviewPage(ctk.CTkFrame):
         self._filter_mode = "all"
         self._suppress_recalc = False
         self._rate_str_var = None
+        # Уникальный идентификатор сессии для группировки исправлений
+        import uuid
+        self._session_id = str(uuid.uuid4())[:16]
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
@@ -405,6 +627,7 @@ class PreviewPage(ctk.CTkFrame):
             (C_NOTFOUND, "preview_legend_nf"),
             (C_EDITED,   "preview_legend_edit"),
             (C_AI,       "preview_legend_ai"),
+            (C_MANAGER,  "preview_legend_manager"),
         ]:
             lf = tk.Frame(leg, bg=bg, relief="solid", bd=1)
             lf.pack(side="left", padx=(0, 8))
@@ -464,6 +687,7 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("edited",   background=C_EDITED)
         self.tree.tag_configure("ai",       background=C_AI)
         self.tree.tag_configure("ai_low",   background=C_AI_LOW)
+        self.tree.tag_configure("manager",  background=C_MANAGER)
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
@@ -493,6 +717,15 @@ class PreviewPage(ctk.CTkFrame):
         self._ctx_menu.add_command(
             label=t("ctx_ai_rematch"),
             command=self._rematch_ai_selected,
+        )
+        self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(
+            label=t("preview_btn_confirm_tip"),
+            command=self._confirm_selected_row,
+        )
+        self._ctx_menu.add_command(
+            label=t("preview_btn_search_tip"),
+            command=self._search_and_replace_selected,
         )
         self._ctx_menu.add_separator()
         self._ctx_menu.add_command(
@@ -801,11 +1034,27 @@ class PreviewPage(ctk.CTkFrame):
         }
         if method in _MAP:
             return _MAP[method]
+        if method == "correction_history":
+            return "📚 История"
         if method.startswith("ai"):
             return "ИИ"
         return method
 
-    def _insert_row(self, item: dict) -> str:
+    def _redraw_row(self, item: dict):
+        """
+        Перерисовывает строку на её текущей позиции — без перемещения вниз.
+        Если строка ещё не в таблице — добавляет в конец (обычный _insert_row).
+        """
+        old_iid = item.get("_iid")
+        if old_iid and self.tree.exists(old_iid):
+            pos = self.tree.index(old_iid)   # запоминаем позицию
+            self.tree.delete(old_iid)
+            item["_iid"] = None
+            self._insert_row(item, position=pos)
+        else:
+            self._insert_row(item)
+
+    def _insert_row(self, item: dict, position: object = "end") -> str:
         bm           = item.get("best_match") or {}
         status       = item.get("status", "not_found")
         match_method = item.get("match_method")
@@ -823,6 +1072,8 @@ class PreviewPage(ctk.CTkFrame):
             warn_str    = " ⚠" if ai_low_conf else ""
             tag         = "ai_low" if ai_low_conf else "ai"
             stxt        = t("status_ai_match") + conf_str + warn_str
+        elif status == "manager_match":
+            tag, stxt = "manager", t("status_manager_match")
         else:
             tag, stxt = "notfound", t("status_nf")
 
@@ -830,12 +1081,20 @@ class PreviewPage(ctk.CTkFrame):
             tag = "edited"
 
         seb, seb_sum, kp, kp_sum = self._compute_kp(item)
-        qty = item.get("qty", 1)
+        qty_raw = item.get("qty", 1)
         brand = bm.get("brand", "")
         article = (bm.get("article", "") or item.get("article_raw", "")).replace("\n", " ").strip()
         name    = (bm.get("name",    "") or item.get("name_raw", "")).replace("\n", " ").strip()
         unit    = bm.get("unit", "шт.") if bm else "шт."
         mult    = bm.get("multiplicity") or ""
+
+        # Предупреждение о несовпадении единиц: PDF-единица vs единица в БД
+        pdf_unit = (item.get("unit") or "").strip().lower()
+        db_unit  = unit.strip().lower()
+        if pdf_unit and bm and pdf_unit != db_unit and pdf_unit not in ("шт", "шт.", ""):
+            qty = f"{qty_raw} ({item.get('unit', '')}≠{unit})"
+        else:
+            qty = qty_raw
         kaznisa_code = bm.get("kaznisa_code") or ""
         const_price  = item.get("_user_const_price") or ""
 
@@ -875,7 +1134,7 @@ class PreviewPage(ctk.CTkFrame):
             stxt,
             method_lbl,
         )
-        iid = self.tree.insert("", "end", values=vals, tags=(tag,))
+        iid = self.tree.insert("", position, values=vals, tags=(tag,))
         item["_iid"] = iid
         return iid
 
@@ -886,23 +1145,29 @@ class PreviewPage(ctk.CTkFrame):
         ai_match = sum(1 for i in self.items if i.get("status") == "ai_match")
         ai_low   = sum(1 for i in self.items if i.get("ai_low_confidence"))
         nf       = sum(1 for i in self.items if i.get("status") == "not_found")
-        downgraded = sum(1 for i in self.items if i.get("ai_downgraded"))
+        downgraded  = sum(1 for i in self.items if i.get("ai_downgraded"))
+        manager_m   = sum(1 for i in self.items if i.get("status") == "manager_match")
+        corrected   = sum(1 for i in self.items if i.get("_corrected_by_manager"))
         # Count matched items that have no price in DB
         no_price = sum(
             1 for i in self.items
-            if i.get("best_match") and i.get("status") != "not_found"
+            if i.get("best_match") and i.get("status") not in ("not_found",)
             and not any(
                 i.get("best_match", {}).get(f)
                 for f in ("kaznisa", "rrts", "mrc", "opt", "partner")
             )
         )
         stat_text = t("preview_stat", total=total, exact=exact, warn=warn, nf=nf)
+        if manager_m:
+            stat_text += t("preview_stat_manager", count=manager_m)
         if ai_match:
             stat_text += t("preview_stat_ai", count=ai_match)
             if ai_low:
                 stat_text += t("preview_stat_ai_low", count=ai_low)
         if downgraded:
             stat_text += t("preview_stat_downgraded", count=downgraded)
+        if corrected:
+            stat_text += t("preview_stat_corrected", count=corrected)
         if no_price:
             stat_text += t("preview_stat_no_price", count=no_price)
         self.stat_lbl.configure(text=stat_text)
@@ -1040,41 +1305,122 @@ class PreviewPage(ctk.CTkFrame):
             return
 
         # Жёлтая строка + клик по нередактируемой колонке → выбор кандидата
-        if item.get("status") in ("multiple", "fuzzy", "ai_match") and col_idx not in EDITABLE_COLS:
+        if item.get("status") in ("multiple", "fuzzy", "ai_match", "manager_match") and col_idx not in EDITABLE_COLS:
             cands = item.get("candidates", [])
             if cands:
                 dlg = CandidateDialog(self, cands)
                 self.wait_window(dlg)
                 if dlg.selected:
-                    item["best_match"] = dlg.selected
-                    item["status"]     = "exact"
-                    item["_user_edited"] = False
-                    item["_user_price"]  = None
-                    self._refresh_row(iid, item)
-                    self._update_stats()
+                    self._apply_correction(item, iid, dlg.selected, confirm_only=False)
+            return
+
+        # Красная строка + клик по нередактируемой колонке → поиск в БД
+        if item.get("status") == "not_found" and col_idx not in EDITABLE_COLS:
+            self._open_article_search(item, iid)
             return
 
         if col_idx in EDITABLE_COLS:
             self._start_edit(iid, col, col_idx, item)
-        elif item.get("status") in ("multiple", "fuzzy", "ai_match"):
-            # Дополнительная попытка открыть диалог кандидатов если колонка не редактируемая
+        elif item.get("status") in ("multiple", "fuzzy", "ai_match", "manager_match"):
             cands = item.get("candidates", [])
             if cands:
                 dlg = CandidateDialog(self, cands)
                 self.wait_window(dlg)
                 if dlg.selected:
-                    item["best_match"] = dlg.selected
-                    item["status"]     = "exact"
-                    item["_user_edited"] = False
-                    item["_user_price"]  = None
-                    self._refresh_row(iid, item)
-                    self._update_stats()
+                    self._apply_correction(item, iid, dlg.selected, confirm_only=False)
+        elif item.get("status") == "not_found":
+            self._open_article_search(item, iid)
 
     def _get_item_by_iid(self, iid: str) -> Optional[Dict]:
         for item in self.items:
             if item.get("_iid") == iid:
                 return item
         return None
+
+    # ── Phase 2.6: Исправления менеджеров ───────────────────────────────────
+
+    def _apply_correction(self, item: dict, iid: str, selected_product: dict, confirm_only: bool = False):
+        """
+        Применяет выбор менеджера к строке и записывает исправление.
+        confirm_only=True — просто подтверждает текущий матч без смены товара.
+        confirm_only=False — меняет best_match на selected_product.
+        """
+        orig_status = item.get("status", "not_found")
+
+        if not confirm_only:
+            # Применяем выбранный товар
+            item["best_match"] = selected_product
+            item["status"]     = "exact"
+            item["_user_edited"] = False
+            item["_user_price"]  = None
+            item["_corrected_by_manager"] = True
+
+        # Записываем исправление в фоне (не блокируем UI)
+        product_id = (selected_product or item.get("best_match") or {}).get("id")
+        if product_id:
+            orig_name    = item.get("name_raw", "") or ""
+            orig_article = item.get("article_raw", "") or ""
+
+            def _record():
+                try:
+                    self.api.record_correction(
+                        original_name       = orig_name,
+                        original_article    = orig_article,
+                        original_status     = orig_status,
+                        selected_product_id = int(product_id),
+                        session_id          = self._session_id,
+                    )
+                except Exception as e:
+                    print(f"[Correction] record failed: {e}")
+
+            import threading
+            threading.Thread(target=_record, daemon=True).start()
+
+        if not confirm_only:
+            # Перерисовываем строку с зелёным статусом (на том же месте)
+            self._redraw_row(item)
+        else:
+            # Только подтверждение — отмечаем флагом, обновляем метод
+            item["_corrected_by_manager"] = True
+            item["match_method"] = "confirmed"
+            if iid and self.tree.exists(iid):
+                vals = list(self.tree.item(iid, "values"))
+                vals[16] = "✓ " + (vals[16] or "")
+                self.tree.item(iid, values=vals)
+
+        self._update_stats()
+
+    def _confirm_selected_row(self):
+        """Контекстное меню: подтвердить текущий подбор (обучает модель)."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        item = self._get_item_by_iid(iid)
+        if not item:
+            return
+        bm = item.get("best_match")
+        if not bm or not bm.get("id"):
+            messagebox.showinfo(t("search_dialog_title"), "Нет подобранного товара для подтверждения.")
+            return
+        self._apply_correction(item, iid, bm, confirm_only=True)
+
+    def _search_and_replace_selected(self):
+        """Контекстное меню: поиск товара в БД по артикулу/названию."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        item = self._get_item_by_iid(iid)
+        if item:
+            self._open_article_search(item, iid)
+
+    def _open_article_search(self, item: dict, iid: str):
+        """Открывает ArticleSearchDialog для поиска замены товара."""
+        dlg = ArticleSearchDialog(self, self.api, item)
+        self.wait_window(dlg)
+        if dlg.selected:
+            self._apply_correction(item, iid, dlg.selected, confirm_only=False)
 
     def _refresh_row(self, iid: str, item: dict):
         # Полная перерисовка строки после смены кандидата
@@ -1098,9 +1444,9 @@ class PreviewPage(ctk.CTkFrame):
             item.get("comment", "") or "",
             item.get("delivery", "") or "",
             t("status_exact"),
+            self._method_label(item.get("match_method")),
         )
         self.tree.item(iid, values=vals, tags=("exact",))
-        # Снимаем выделение, иначе цвет SELECT перекрывает зелёный тег
         try:
             self.tree.selection_remove(iid)
         except Exception:
@@ -1142,52 +1488,57 @@ class PreviewPage(ctk.CTkFrame):
         vals    = list(self.tree.item(iid, "values"))
 
         bm = item.setdefault("best_match", {}) or {}
-        item["best_match"] = bm  # гарантируем dict
+        item["best_match"] = bm
 
-        if col_idx == 6:              # Кратность (целое) → в best_match
+        if col_idx == 6:
             try:
                 bm["multiplicity"] = int(float(raw.replace(",", "."))) if raw else None
             except ValueError:
                 pass
             vals[6] = bm.get("multiplicity") or ""
 
-        elif col_idx in (13, 14):     # Комментарий / Срок поставки — строка
+        elif col_idx in (13, 14):
             key = "comment" if col_idx == 13 else "delivery"
             item[key] = raw
             vals[col_idx] = raw
 
-        else:                          # Числовые поля: qty(5), const(7), seb(8), seb_sum(9), kp(10), kp_sum(11)
+        else:
             try:
-                new_val = float(raw.replace(",", ".")) if raw else 0.0
+                # Очищаем предупреждение "(м≠упак)" если оно есть в ячейке
+                clean_raw = raw.split("(")[0].strip() if "(" in raw else raw
+                new_val = float(clean_raw.replace(",", ".")) if clean_raw else 0.0
             except ValueError:
                 self._cancel_edit()
                 return
-            if col_idx == 5:          # Кол-во
+            if col_idx == 5:
                 item["qty"] = new_val
-            elif col_idx == 7:        # Константа цена → сбрасываем ручные переопределения
+                # После ручной правки qty — сбрасываем unit чтобы убрать предупреждение (м≠упак)
+                bm_unit = (item.get("best_match") or {}).get("unit", "")
+                if bm_unit:
+                    item["unit"] = bm_unit
+            elif col_idx == 7:
                 item["_user_const_price"] = new_val if new_val else None
                 item["_user_seb_price"]   = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
-            elif col_idx == 8:        # Цена себес
+            elif col_idx == 8:
                 item["_user_seb_price"]   = new_val if new_val else None
                 item["_user_const_price"] = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
-            elif col_idx == 9:        # Сумма себес → обратный пересчёт на единицу
+            elif col_idx == 9:
                 qty_v = float(item.get("qty", 1) or 1)
                 item["_user_seb_price"]   = (new_val / qty_v) if (new_val and qty_v) else None
                 item["_user_const_price"] = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
-            elif col_idx == 10:       # Цена КП
+            elif col_idx == 10:
                 item["_user_edited"] = True
                 item["_user_price"]  = new_val
-            elif col_idx == 11:       # Сумма КП → обратный пересчёт на единицу
+            elif col_idx == 11:
                 qty_v = float(item.get("qty", 1) or 1)
                 item["_user_edited"] = True
                 item["_user_price"]  = (new_val / qty_v) if (new_val and qty_v) else None
-            # Пересчёт цен
             seb, seb_sum, kp, kp_sum = self._compute_kp(item)
             vals[5]  = item.get("qty", 1)
             vals[7]  = item.get("_user_const_price") or ""
@@ -1212,7 +1563,6 @@ class PreviewPage(ctk.CTkFrame):
 
     # ── Контекстное меню / копирование ───────────────────────────────────────
     def _show_ctx_menu(self, event):
-        """Показывает контекстное меню по правому клику; выделяет строку под курсором."""
         iid = self.tree.identify_row(event.y)
         if iid:
             self.tree.selection_set(iid)
@@ -1223,11 +1573,9 @@ class PreviewPage(ctk.CTkFrame):
             self._ctx_menu.grab_release()
 
     def _copy_cell(self, col_key: str):
-        """Копирует значение указанной колонки выбранной строки в буфер обмена."""
         sel = self.tree.selection()
         if not sel:
             return
-        # col_key — это id колонки в Treeview (совпадает с первым элементом COLS)
         col_ids = [c for c, _ in COLS]
         if col_key not in col_ids:
             return
@@ -1238,7 +1586,6 @@ class PreviewPage(ctk.CTkFrame):
         self.clipboard_append(str(value))
 
     def _copy_row(self):
-        """Копирует всю строку (артикул + код КазНИИСА) в буфер через Tab."""
         sel = self.tree.selection()
         if not sel:
             return
@@ -1253,7 +1600,6 @@ class PreviewPage(ctk.CTkFrame):
 
     # ── ИИ-переподбор ────────────────────────────────────────────────────────
     def _rematch_ai_all(self):
-        """Переподобрать все жёлтые (multiple/fuzzy) и красные (not_found) строки через ИИ."""
         targets = [
             item for item in self.items
             if item.get("status") in ("multiple", "fuzzy", "not_found")
@@ -1265,7 +1611,6 @@ class PreviewPage(ctk.CTkFrame):
         self._run_rematch(targets)
 
     def _rematch_ai_selected(self):
-        """Переподобрать выбранную строку через ИИ (контекстное меню)."""
         sel = self.tree.selection()
         if not sel:
             return
@@ -1275,9 +1620,7 @@ class PreviewPage(ctk.CTkFrame):
         self._run_rematch([item])
 
     def _run_rematch(self, targets: list):
-        """Запускает AI re-match в фоновом потоке и обновляет строки по результату."""
         self.ai_btn.configure(state="disabled", text="⏳ ИИ...")
-
         payload = [
             {
                 "name_raw":    it.get("name_raw", ""),
@@ -1300,16 +1643,13 @@ class PreviewPage(ctk.CTkFrame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_rematch(self, targets: list, results: list):
-        """Применяет результаты AI re-match к items и перерисовывает строки."""
         for item, new_data in zip(targets, results):
             for key in ("status", "best_match", "candidates",
-                        "match_method", "ai_confidence", "ai_used", "ai_reason"):
+                        "match_method", "ai_confidence", "ai_used", "ai_reason",
+                        "ai_low_confidence", "ai_downgraded"):
                 if key in new_data:
                     item[key] = new_data[key]
-            iid = item.get("_iid")
-            if iid and self.tree.exists(iid):
-                self.tree.delete(iid)
-                self._insert_row(item)
+            self._redraw_row(item)
         self._update_stats()
         self.ai_btn.configure(state="normal", text=t("preview_ai_rematch_btn"))
 
@@ -1318,31 +1658,59 @@ class PreviewPage(ctk.CTkFrame):
         messagebox.showerror("ИИ-переподбор", f"Ошибка:\n{error}")
 
     def _reset_item_selected(self):
-        """Сбрасывает выбранную позицию к исходным данным из спецификации."""
         sel = self.tree.selection()
         if not sel:
             return
         item = self._get_item_by_iid(sel[0])
         if item is None:
             return
-        # Очищаем результаты подбора
         for key in ("best_match", "candidates", "match_method",
                     "ai_confidence", "ai_used", "ai_reason",
                     "_user_edited", "_user_const_price",
+                    "_corrected_by_manager",
                     "comment", "delivery"):
             item.pop(key, None)
         item["status"] = "not_found"
-        # Перерисовываем строку
-        iid = item.get("_iid")
-        if iid and self.tree.exists(iid):
-            self.tree.delete(iid)
-        self._insert_row(item)
+        self._redraw_row(item)
         self._update_stats()
 
     # ── Сохранение ───────────────────────────────────────────────────────────
     def _save(self):
         if not self.items:
             return
+
+        # ── Проверка несовпадений единиц ─────────────────────────────────────
+        mismatches = []
+        for it in self.items:
+            bm = it.get("best_match") or {}
+            if not bm:
+                continue
+            pdf_u = (it.get("unit") or "").strip().lower()
+            db_u  = (bm.get("unit") or "").strip().lower()
+            if pdf_u and db_u and pdf_u != db_u and pdf_u not in ("шт", "шт."):
+                mismatches.append(it)
+
+        if mismatches:
+            lines = []
+            for it in mismatches[:6]:
+                bm   = it.get("best_match") or {}
+                pos  = it.get("pos", "?")
+                nm   = (it.get("name_raw") or bm.get("name") or "")[:45]
+                qty  = it.get("qty", "?")
+                pu   = it.get("unit", "")
+                du   = bm.get("unit", "")
+                lines.append(f"  • Поз.{pos}  {nm}\n        {qty} {pu} → нужно указать в «{du}»")
+            tail = f"\n  ... и ещё {len(mismatches) - 6}" if len(mismatches) > 6 else ""
+            msg = (
+                f"Найдено {len(mismatches)} строк с несовпадением единиц:\n\n"
+                + "\n".join(lines) + tail
+                + "\n\nДважды кликните по ячейке «Кол-во» чтобы исправить.\n\n"
+                "Сохранить без исправления?"
+            )
+            if not messagebox.askyesno("Несовпадение единиц", msg, icon="warning"):
+                return
+        # ─────────────────────────────────────────────────────────────────────
+
         managers = self.managers or []
         dlg = SaveKPDialog(self, managers)
         self.wait_window(dlg)
@@ -1358,13 +1726,11 @@ class PreviewPage(ctk.CTkFrame):
         if not path:
             return
         try:
-            # Вычисляем цены КП для каждой позиции
             for it in self.items:
                 seb, seb_sum, kp, kp_sum = self._compute_kp(it)
                 it["_computed_kp_price"] = kp
                 it["_computed_kp_sum"]   = kp_sum
 
-            # Пробуем скачать готовый шаблон (БД + Const) с сервера
             import tempfile
             base_tpl = ""
             try:
@@ -1378,11 +1744,7 @@ class PreviewPage(ctk.CTkFrame):
                     print("[Save] Server base template not ready, falling back")
             except Exception as e_tpl:
                 print(f"[Save] base template download: {e_tpl}")
-                if 'tmp_path' in dir() and os.path.exists(tmp_path):
-                    try: os.unlink(tmp_path)
-                    except Exception: pass
 
-            # Если шаблон не скачан — грузим продукты сами (старый путь)
             products = []
             if not base_tpl:
                 try:
