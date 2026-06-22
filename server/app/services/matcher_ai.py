@@ -366,10 +366,16 @@ async def match_items_ai(
         label = (item.get("name_raw") or item.get("article_raw") or "?")[:50]
         classic_status = classic.get("status")
 
-        # Exact article matches are authoritative — skip AI entirely
-        if classic_status == "exact":
-            logger.debug("match_items_ai: [%d] EXACT passthrough '%s'", idx + 1, label)
-            return {**classic, "ai_used": False, "ai_reason": "точное совпадение"}
+        # Exact/multiple/fuzzy — классический матчер уже нашёл кандидата(ов).
+        # Пропускаем ИИ: жёлтые (multiple/fuzzy) должны оставаться на проверке менеджера.
+        if classic_status in ("exact", "multiple", "fuzzy"):
+            reason_map = {
+                "exact":    "точное совпадение",
+                "multiple": "несколько кандидатов — выбор менеджера",
+                "fuzzy":    "нечёткое совпадение классического матчера",
+            }
+            logger.debug("match_items_ai: [%d] %s passthrough '%s'", idx + 1, classic_status.upper(), label)
+            return {**classic, "ai_used": False, "ai_reason": reason_map[classic_status]}
 
         # ── Шаг 0: проверка истории исправлений менеджеров ───────────────────
         async with semaphore:
