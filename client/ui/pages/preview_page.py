@@ -913,16 +913,41 @@ class PreviewPage(ctk.CTkFrame):
 
     def _on_brand_select(self, brand: str):
         self._load_const_fields(brand)
+        # Пересчитываем цены для позиций этого бренда с загруженными константами
+        self._recalc_for_brand(brand.strip().upper())
 
     def _on_rate_select(self, label: str):
-        """Пользователь выбрал тип расценки из выпадающего списка."""
+        """Пользователь выбрал тип расценки — применяем глобально ко всем брендам."""
         try:
             idx = RATE_LABELS.index(label) + 1  # 1-based
         except ValueError:
             idx = 3
         self.const_vars["rate"].set(idx)
-        # Запускаем пересчёт вручную (trace не навешан на rate)
-        self._on_const_change()
+        # Обновляем rate во всех brand_consts (расценка — глобальная настройка)
+        for bc in self.brand_consts.values():
+            bc["rate"] = idx
+        # Также обновляем текущий выбранный бренд (если brand_consts пустой — fallback)
+        brand = self.brand_var.get().strip().upper()
+        if brand and brand != "—":
+            self.brand_consts.setdefault(brand, {})["rate"] = idx
+        # Пересчитываем ВСЕ позиции
+        self._recalc_all()
+
+    def _recalc_all(self):
+        """Пересчитывает цены для всех позиций (вызывается при смене расценки)."""
+        for item in self.items:
+            if item.get("_user_edited"):
+                continue
+            iid = item.get("_iid")
+            if not iid or not self.tree.exists(iid):
+                continue
+            seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+            vals = list(self.tree.item(iid, "values"))
+            vals[8]  = f"{seb:.2f}"     if seb     else ""
+            vals[9]  = f"{seb_sum:.2f}" if seb_sum else ""
+            vals[10] = f"{kp:.2f}"      if kp      else ""
+            vals[11] = f"{kp_sum:.2f}"  if kp_sum  else ""
+            self.tree.item(iid, values=vals)
 
     # ── Расчёт цены ──────────────────────────────────────────────────────────
     def _compute_kp(self, item: dict) -> tuple:
