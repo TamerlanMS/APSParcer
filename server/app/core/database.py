@@ -18,3 +18,11 @@ async def get_db() -> AsyncSession:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # ── Schema migrations (idempotent ALTER TABLE for existing DBs) ──────
+        migrations = [
+            # T85: segment columns added to products and users
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS segment VARCHAR DEFAULT 'ss'",
+            "ALTER TABLE users    ADD COLUMN IF NOT EXISTS segment VARCHAR DEFAULT 'ss'",
+        ]
+        for sql in migrations:
+            await conn.execute(__import__("sqlalchemy").text(sql))

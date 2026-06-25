@@ -48,6 +48,7 @@ async def import_products_from_excel(
     file_bytes: bytes,
     db: AsyncSession,
     filename: str = "import.xlsm",
+    segment: str = "ss",
 ) -> Tuple[int, int]:
     wb = _open_workbook(file_bytes)
 
@@ -66,7 +67,10 @@ async def import_products_from_excel(
     added = 0
     updated = 0
 
-    existing = await db.execute(select(Product.article, Product.id))
+    # Загружаем только товары этого сегмента — не трогаем другие сегменты
+    existing = await db.execute(
+        select(Product.article, Product.id).where(Product.segment == segment)
+    )
     existing_map = {row[0]: row[1] for row in existing.fetchall() if row[0]}
 
     rows_to_add    = []
@@ -108,7 +112,8 @@ async def import_products_from_excel(
         data = dict(
             num=num, article=article, name=name, unit=unit,
             kaznisa=kaznisa, rrts=rrts, mrc=mrc, opt=opt, partner=partner,
-            brand=brand, multiplicity=mult, kaznisa_code=code, is_active=True
+            brand=brand, multiplicity=mult, kaznisa_code=code,
+            segment=segment, is_active=True,
         )
 
         if article in existing_map:
@@ -130,10 +135,11 @@ async def import_products_from_excel(
 
     db.add(ImportLog(
         filename=filename,
+        segment=segment,
         rows_added=added,
         rows_updated=updated,
         status="success",
-        message=f"Добавлено: {added}, обновлено: {updated}"
+        message=f"[{segment}] Добавлено: {added}, обновлено: {updated}"
     ))
 
     await db.commit()

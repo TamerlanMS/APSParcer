@@ -5,8 +5,26 @@ from app.models.models import Product
 from typing import List, Dict, Optional
 import logging
 import re
+import time
 
 logger = logging.getLogger(__name__)
+
+# ── In-process product index cache ───────────────────────────────────────────
+# Хранит построенный _ProductIndex, чтобы не грузить 120k строк из БД
+# при каждом PDF-парсинге. Инвалидируется вызовом invalidate_product_cache()
+# после импорта новой базы товаров.
+
+_CACHE_TTL_SEC   = 6 * 3600   # запасной TTL — 6 часов
+_cached_index: Optional["_ProductIndex"]   = None
+_cache_ts: float                           = 0.0
+
+
+def invalidate_product_cache() -> None:
+    """Сбросить кэш индекса товаров (вызывать после импорта базы)."""
+    global _cached_index, _cache_ts
+    _cached_index = None
+    _cache_ts     = 0.0
+    logger.info("product cache: invalidated")
 
 EXACT_SCORE            = 100
 CONTAINS_SCORE         = 95
@@ -76,6 +94,21 @@ async def get_all_products(db: AsyncSession) -> List[Product]:
     return result.scalars().all()
 
 
+async def get_product_index(db: AsyncSession) -> "_ProductIndex":
+    """Возвращает кэшированный _ProductIndex; загружает из БД только при промахе кэша."""
+    global _cached_index, _cache_ts
+    now = time.monotonic()
+    if _cached_index is not None and (now - _cache_ts) < _CACHE_TTL_SEC:
+        logger.debug("product cache: HIT (%d products)", len(_cached_index.products))
+        return _cached_index
+    logger.info("product cache: MISS — loading all products from DB")
+    all_products  = await get_all_products(db)
+    _cached_index = _ProductIndex(all_products)
+    _cache_ts     = now
+    logger.info("product cache: built index for %d products", len(all_products))
+    return _cached_index
+
+
 def product_to_dict(p: Product) -> Dict:
     return {
         "id":           p.id,
@@ -83,6 +116,7 @@ def product_to_dict(p: Product) -> Dict:
         "name":         (p.name         or "").strip(),
         "unit":         (p.unit         or "шт.").strip(),
         "brand":        (p.brand        or "").strip(),
+        "segment":      (p.segment      or "ss").strip(),
         "kaznisa":      p.kaznisa,
         "rrts":         p.rrts,
         "mrc":          p.mrc,
@@ -279,25 +313,39 @@ def find_candidates(
 async def match_items(
     pdf_items: List[Dict],
     db: AsyncSession,
+    segments: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Find DB candidates for every PDF position.
     Products are fetched once and pre-normalised; exact lookups use O(1) dicts.
     Falls back to name-based search when article search yields no candidates.
+
+    segments: список сегментов для поиска (["ss"] по умолчанию).
+              При нескольких сегментах — cross-segment exact дубли → status="multiple".
     """
-    all_products = await get_all_products(db)
-    index        = _ProductIndex(all_products)
-    logger.info("match_items: %d PDF items vs %d products", len(pdf_items), len(all_products))
+    if not segments:
+        segments = ["ss"]
+    search_all = set(segments)
+
+    index = await get_product_index(db)
+    logger.info("match_items: %d PDF items vs %d products, segments=%s",
+                len(pdf_items), len(index.products), segments)
 
     results = []
 
     for item in pdf_items:
-        candidates = find_candidates(
+        all_candidates = find_candidates(
             item.get("article_raw", "") or "",
             index,
             kaznisa_code_raw=item.get("kaznisa_code_raw", "") or "",
             name_raw=item.get("name_raw", "") or "",
         )
+
+        # Фильтруем кандидатов по выбранным сегментам
+        candidates = [
+            c for c in all_candidates
+            if (c["product"].segment or "ss") in search_all
+        ]
 
         if not candidates:
             status       = "not_found"
@@ -309,7 +357,18 @@ async def match_items(
             close      = [c for c in candidates if best_score - c['score'] <= 5]
 
             if best_score >= EXACT_SCORE:
-                status = "exact"
+                # Проверяем cross-segment дубли: одинаковый артикул в разных сегментах
+                exact_segs = {(c["product"].segment or "ss") for c in close
+                              if c["score"] >= EXACT_SCORE}
+                if len(exact_segs) > 1:
+                    # Одинаковый артикул найден в нескольких сегментах — требуется выбор
+                    status = "multiple"
+                    logger.debug(
+                        "cross-segment duplicate: article=%r segments=%s",
+                        candidates[0]["product"].article, exact_segs
+                    )
+                else:
+                    status = "exact"
             elif len(close) > 1:
                 status = "multiple"
             else:

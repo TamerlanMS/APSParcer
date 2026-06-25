@@ -145,15 +145,40 @@ class UserDialog(ctk.CTkToplevel):
         self._role_labels = role_labels
         self._role_values = role_values
 
+        # Сегмент
+        SEG_LABELS = [t("seg_ss"), t("seg_os"), t("seg_sil")]
+        SEG_VALUES = ["ss", "os", "sil"]
+        ctk.CTkLabel(form, text=t("udlg_segment"),
+                     font=FONT_NORMAL, text_color=NAVY, anchor="w"
+                     ).grid(row=10, column=0, sticky="w", pady=(10, 0))
+        cur_seg = self.user.get("segment", "ss") or "ss"
+        try:
+            cur_seg_label = SEG_LABELS[SEG_VALUES.index(cur_seg)]
+        except (ValueError, IndexError):
+            cur_seg_label = SEG_LABELS[0]
+        self._seg_var = ctk.StringVar(value=cur_seg_label)
+        self.seg_combo = ctk.CTkComboBox(
+            form, variable=self._seg_var,
+            values=SEG_LABELS,
+            height=38, font=FONT_NORMAL,
+            border_color=NAVY_LIGHT,
+            button_color=NAVY_LIGHT, button_hover_color=NAVY,
+            dropdown_font=FONT_NORMAL,
+            state="readonly",
+        )
+        self.seg_combo.grid(row=11, column=0, sticky="ew", pady=(2, 0))
+        self._seg_labels = SEG_LABELS
+        self._seg_values = SEG_VALUES
+
         # Пароль
         pwd_key = "udlg_password" if self.mode == "create" else "udlg_password_edit"
         pwd_ph  = (t("udlg_password_ph_create") if self.mode == "create"
                    else t("udlg_password_ph_edit"))
         ctk.CTkLabel(form, text=t(pwd_key),
                      font=FONT_NORMAL, text_color=NAVY, anchor="w"
-                     ).grid(row=10, column=0, sticky="w", pady=(10, 0))
+                     ).grid(row=12, column=0, sticky="w", pady=(10, 0))
         pwd_row = ctk.CTkFrame(form, fg_color="transparent")
-        pwd_row.grid(row=11, column=0, sticky="ew", pady=(2, 0))
+        pwd_row.grid(row=13, column=0, sticky="ew", pady=(2, 0))
         pwd_row.grid_columnconfigure(0, weight=1)
         self.e_pwd = ctk.CTkEntry(pwd_row, placeholder_text=pwd_ph,
                                    height=38, font=FONT_NORMAL,
@@ -172,7 +197,7 @@ class UserDialog(ctk.CTkToplevel):
                              variable=self._active_var,
                              font=FONT_NORMAL, text_color=NAVY,
                              fg_color=NAVY_LIGHT, hover_color=NAVY
-                             ).grid(row=12, column=0, sticky="w", pady=(16, 0))
+                             ).grid(row=14, column=0, sticky="w", pady=(16, 0))
         else:
             self._active_var = None
 
@@ -180,7 +205,7 @@ class UserDialog(ctk.CTkToplevel):
         self._status_lbl = ctk.CTkLabel(form, text="",
                                          font=FONT_NORMAL, text_color="#E74C3C",
                                          wraplength=400, anchor="w")
-        self._status_lbl.grid(row=14, column=0, sticky="w", pady=(8, 0))
+        self._status_lbl.grid(row=16, column=0, sticky="w", pady=(8, 0))
 
         # Кнопки
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -221,6 +246,13 @@ class UserDialog(ctk.CTkToplevel):
         except (ValueError, IndexError):
             return ""
 
+    def _get_segment_value(self) -> str:
+        label = self._seg_var.get()
+        try:
+            return self._seg_values[self._seg_labels.index(label)]
+        except (ValueError, IndexError):
+            return "ss"
+
     def _submit(self):
         full_name = self.e_name.get().strip()
         username  = self.e_login.get().strip() if self.mode == "create" else self.user.get("username", "")
@@ -228,6 +260,7 @@ class UserDialog(ctk.CTkToplevel):
         phone     = self.e_phone.get().strip() or None
         password  = self.e_pwd.get()
         role      = self._get_role_value()
+        segment   = self._get_segment_value()
 
         # Валидация
         if not full_name:
@@ -251,10 +284,10 @@ class UserDialog(ctk.CTkToplevel):
 
         if self.mode == "create":
             data = {"full_name": full_name, "username": username,
-                    "password": password, "role": role,
+                    "password": password, "role": role, "segment": segment,
                     "email": email, "phone": phone}
         else:
-            data: dict = {"full_name": full_name, "role": role,
+            data: dict = {"full_name": full_name, "role": role, "segment": segment,
                           "email": email, "phone": phone}
             if password:
                 data["password"] = password
@@ -399,7 +432,7 @@ class UsersPage(ctk.CTkFrame):
                   foreground=[("selected", "white")])
 
         cols = ["full_name", "username", "role_display",
-                "email", "phone", "active", "last_login"]
+                "segment", "email", "phone", "active", "last_login"]
         self.tree = ttk.Treeview(table_frame, columns=cols,
                                   show="headings", style="Users.Treeview",
                                   selectmode="browse")
@@ -408,6 +441,7 @@ class UsersPage(ctk.CTkFrame):
             (t("users_col_name"),       "full_name",    200),
             (t("users_col_login"),      "username",     120),
             (t("users_col_role"),       "role_display", 160),
+            (t("users_col_segment"),    "segment",      130),
             (t("users_col_email"),      "email",        180),
             (t("users_col_phone"),      "phone",        140),
             (t("users_col_active"),     "active",        110),
@@ -471,11 +505,14 @@ class UsersPage(ctk.CTkFrame):
         for u in users:
             active_str = t("users_active") if u.get("is_active") else t("users_inactive")
             tag = "active" if u.get("is_active") else "inactive"
+            seg_code  = u.get("segment", "ss") or "ss"
+            seg_label = t(f"seg_{seg_code}") if seg_code in ("ss","os","sil") else seg_code
             self.tree.insert("", "end", iid=str(u["id"]), tags=(tag,),
                               values=(
                                   u.get("full_name", ""),
                                   u.get("username", ""),
                                   u.get("role_display", u.get("role", "")),
+                                  seg_label,
                                   u.get("email", "") or "—",
                                   u.get("phone", "") or "—",
                                   active_str,

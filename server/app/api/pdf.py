@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -29,6 +29,18 @@ router = APIRouter()
 
 MAX_PDF_SIZE = 200 * 1024 * 1024  # 200 MB
 _PDF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pdf_parser")
+
+
+ALL_SEGMENTS = ["ss", "os", "sil"]
+
+
+def _parse_segments(raw: Optional[str]) -> List[str]:
+    """Разбирает строку "ss,os" или "all" в список валидных сегментов."""
+    if not raw or raw.strip().lower() == "all":
+        return ALL_SEGMENTS
+    segs = [s.strip().lower() for s in raw.split(",") if s.strip()]
+    valid = [s for s in segs if s in ALL_SEGMENTS]
+    return valid if valid else ["ss"]
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -82,6 +94,10 @@ async def parse_pdf_stream(
     request: Request,
     file: UploadFile = File(...),
     ai_mode: bool = Query(False, description="Use AI semantic matching"),
+    segments: Optional[str] = Query(
+        default="ss",
+        description="Сегменты для поиска: 'ss', 'os', 'sil', 'ss,os', 'all'",
+    ),
     db: AsyncSession = Depends(get_db),
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
@@ -104,6 +120,7 @@ async def parse_pdf_stream(
     queue: asyncio.Queue = asyncio.Queue()
     fname = file.filename
     use_ai = ai_mode and bool(settings.OPENAI_API_KEY)
+    seg_list = _parse_segments(segments)
 
     def _progress(pct: int, stage: str, msg: str) -> None:
         payload = json.dumps({"pct": pct, "stage": stage, "msg": msg}, ensure_ascii=False)
@@ -151,11 +168,11 @@ async def parse_pdf_stream(
             try:
                 if use_ai:
                     results = await asyncio.wait_for(
-                        match_items_ai(pdf_items, db), timeout=600
+                        match_items_ai(pdf_items, db, segments=seg_list), timeout=600
                     )
                 else:
                     results = await asyncio.wait_for(
-                        match_items(pdf_items, db), timeout=600
+                        match_items(pdf_items, db, segments=seg_list), timeout=600
                     )
             except asyncio.TimeoutError:
                 logger.error("Matching timed out after 600s for %d items", len(pdf_items))
@@ -217,6 +234,10 @@ async def parse_pdf(
     request: Request,
     file: UploadFile = File(...),
     ai_mode: bool = Query(False, description="Use AI semantic matching (Phase 2)"),
+    segments: Optional[str] = Query(
+        default="ss",
+        description="Сегменты для поиска: 'ss', 'os', 'sil', 'ss,os', 'all'",
+    ),
     db: AsyncSession = Depends(get_db),
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
@@ -252,10 +273,11 @@ async def parse_pdf(
         raise HTTPException(404, "No spec items found in PDF. Check file format.")
 
     use_ai = ai_mode and bool(settings.OPENAI_API_KEY)
+    seg_list = _parse_segments(segments)
     if use_ai:
-        results = await match_items_ai(pdf_items, db)
+        results = await match_items_ai(pdf_items, db, segments=seg_list)
     else:
-        results = await match_items(pdf_items, db)
+        results = await match_items(pdf_items, db, segments=seg_list)
 
     await _log_upload(db, current_user, file.filename, project_name, results)
 

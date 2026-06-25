@@ -64,42 +64,56 @@ async def _vector_search(
     query_vec: List[float],
     db: AsyncSession,
     top_k: int = VECTOR_TOP_K,
+    segments: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Query Pinecone for the top_k closest product vectors.
-    Returns list of dicts: {id, similarity, article, name, brand, unit}.
-    Pinecone client is synchronous → runs in a thread executor.
+    Searches across all requested segment namespaces and merges results.
+    Returns list of dicts: {id, similarity, article, name, brand, unit, segment}.
     """
+    from app.services.embedder import SEGMENT_NAMESPACE
+    if not segments:
+        segments = ["ss"]
+
+    namespaces = [SEGMENT_NAMESPACE.get(s, f"products_{s}") for s in segments]
+
+    all_candidates: List[Dict] = []
     try:
         index = _get_pinecone_index()
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                index.query,
-                vector=query_vec,
-                top_k=top_k,
-                include_metadata=True,
-            ),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        logger.error("Pinecone query timed out after 20s")
-        return []
+        for ns in namespaces:
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        index.query,
+                        vector=query_vec,
+                        top_k=top_k,
+                        include_metadata=True,
+                        namespace=ns,
+                    ),
+                    timeout=20.0,
+                )
+                for match in result.matches:
+                    meta = match.metadata or {}
+                    all_candidates.append({
+                        "id":         int(meta.get("product_id", 0) or match.id.split("_")[-1]),
+                        "similarity": float(match.score),
+                        "article":    meta.get("article", ""),
+                        "name":       meta.get("name", ""),
+                        "brand":      meta.get("brand", ""),
+                        "unit":       meta.get("unit", "шт."),
+                        "segment":    meta.get("segment", ns.replace("products_", "")),
+                    })
+            except asyncio.TimeoutError:
+                logger.error("Pinecone query timed out for namespace '%s'", ns)
+            except Exception as exc:
+                logger.error("Pinecone query failed for namespace '%s': %s", ns, exc)
     except Exception as exc:
-        logger.error("Pinecone query failed: %s", exc)
+        logger.error("Pinecone index error: %s", exc)
         return []
 
-    candidates = []
-    for match in result.matches:
-        meta = match.metadata or {}
-        candidates.append({
-            "id":         int(match.id),
-            "similarity": float(match.score),
-            "article":    meta.get("article", ""),
-            "name":       meta.get("name", ""),
-            "brand":      meta.get("brand", ""),
-            "unit":       meta.get("unit", "шт."),
-        })
-    return candidates
+    # Sort merged results by similarity descending, return top_k
+    all_candidates.sort(key=lambda x: x["similarity"], reverse=True)
+    return all_candidates[:top_k]
 
 
 # ── GPT-4o-mini reranker ──────────────────────────────────────────────────────
@@ -170,6 +184,7 @@ async def _match_one_ai(
     item: Dict,
     classic_result: Dict,
     db: AsyncSession,
+    segments: Optional[List[str]] = None,
 ) -> Dict:
     """
     Applies AI matching on top of a classic result that needs improvement.
@@ -196,8 +211,8 @@ async def _match_one_ai(
         logger.warning("embed_text failed for '%s': %s", query_text[:60], exc)
         return {**classic_result, "ai_used": False}
 
-    # Vector search
-    vector_candidates = await _vector_search(query_vec, db, top_k=VECTOR_TOP_K)
+    # Vector search across requested segments
+    vector_candidates = await _vector_search(query_vec, db, top_k=VECTOR_TOP_K, segments=segments)
 
     if not vector_candidates:
         return {**classic_result, "ai_used": True, "ai_reason": "no embeddings in DB"}
@@ -337,23 +352,18 @@ _AI_SEMAPHORE_SIZE = 6
 async def match_items_ai(
     pdf_items: List[Dict],
     db: AsyncSession,
+    segments: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Hybrid AI matcher for a list of PDF items.
 
-    For each item:
-      - Run classic matcher first (free, instant)
-      - Exact article match → keep as-is (authoritative, no AI cost)
-      - Fuzzy / multiple / not_found → AI verification (vector + optional GPT reranking)
-
-    Processing is parallelised via asyncio.gather + Semaphore(_AI_SEMAPHORE_SIZE),
-    giving ~5-8x speedup over sequential processing for typical specs (30-50 items).
-
-    Returns list of result dicts, same shape as classic match_items() but with
-    extra keys: ai_used (bool), ai_confidence (float 0-1), ai_reason (str).
+    segments: список сегментов для поиска (["ss"] по умолчанию).
+              При нескольких сегментах — cross-segment поиск в нескольких Pinecone namespace.
     """
-    logger.info("match_items_ai: START — %d items", len(pdf_items))
-    classic_results = await classic_match_items(pdf_items, db)
+    if not segments:
+        segments = ["ss"]
+    logger.info("match_items_ai: START — %d items, segments=%s", len(pdf_items), segments)
+    classic_results = await classic_match_items(pdf_items, db, segments=segments)
     logger.info("match_items_ai: classic done")
 
     if not settings.OPENAI_API_KEY:

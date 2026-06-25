@@ -24,7 +24,20 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 25   # items per GPT call — ~3-4K tokens per batch
+BATCH_SIZE      = 15    # items per GPT call — меньше батч → быстрее ответ, меньше truncation
+MAX_TOKENS      = 2000  # на 15 позиций ~60 токенов/позиция = 900 + запас
+CALL_TIMEOUT    = 20.0  # максимум секунд на один GPT-вызов
+
+# Singleton OpenAI client — не создаём новый на каждый батч
+_oai_client = None
+
+
+def _get_client():
+    global _oai_client
+    if _oai_client is None:
+        from openai import AsyncOpenAI
+        _oai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=CALL_TIMEOUT)
+    return _oai_client
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
@@ -110,8 +123,7 @@ async def extract_tech_params(items: List[Dict]) -> None:
 async def _process_batch(batch: List[Dict], offset: int) -> None:
     """Send one batch to GPT-4o-mini and write results back."""
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, timeout=45.0)
+        client = _get_client()
     except Exception as exc:
         logger.error("tech_params: OpenAI client error: %s", exc)
         return
@@ -137,7 +149,7 @@ async def _process_batch(batch: List[Dict], offset: int) -> None:
                 {"role": "user",   "content": prompt},
             ],
             temperature=0,
-            max_tokens=1500,
+            max_tokens=MAX_TOKENS,
             response_format={"type": "json_object"},
         )
         raw = resp.choices[0].message.content or "{}"

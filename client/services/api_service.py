@@ -134,9 +134,11 @@ class ApiService:
 
     def parse_pdf_stream(self, pdf_path: str,
                          progress_cb: Optional[Callable] = None,
-                         ai_mode: bool = False) -> dict:
+                         ai_mode: bool = False,
+                         segments: Optional[list] = None) -> dict:
         """POST file to /pdf/parse-stream, read SSE progress events, return result.
 
+        segments: list of segment codes to search, e.g. ["ss"] or ["ss","os","sil"].
         progress_cb(pct: int, stage: str, msg: str) is called for each event.
         Raises RuntimeError on server error or if stream closes without result.
         """
@@ -144,13 +146,15 @@ class ApiService:
         if progress_cb:
             progress_cb(3, "upload", "Отправка файла на сервер...")
 
+        seg_str = ",".join(segments) if segments else "ss"
+
         with open(pdf_path, "rb") as f:
             files = {"file": (fname, f, "application/pdf")}
             with requests.post(
                 f"{self._base}/api/v1/pdf/parse-stream",
                 files=files,
                 headers=self._h,
-                params={"ai_mode": "true" if ai_mode else "false"},
+                params={"ai_mode": "true" if ai_mode else "false", "segments": seg_str},
                 stream=True,
                 timeout=3600,  # 1 hour — OCR of large scanned PDFs can take 20-40 min
             ) as r:
@@ -315,7 +319,8 @@ class ApiService:
         r.raise_for_status()
         return r.json().get("count", 0)
 
-    def import_products(self, file_path: str, password: str) -> dict:
+    def import_products(self, file_path: str, password: str,
+                        segment: str = "ss") -> dict:
         with open(file_path, "rb") as f:
             fname = file_path.replace("\\", "/").split("/")[-1]
             mime = (
@@ -328,7 +333,7 @@ class ApiService:
                 f"{self._base}/api/v1/database/import/products",
                 files=files,
                 headers=self._h,
-                params={"password": password},
+                params={"password": password, "segment": segment},
                 timeout=180,
             )
         r.raise_for_status()
@@ -350,6 +355,16 @@ class ApiService:
                 params={"password": password},
                 timeout=180,
             )
+        r.raise_for_status()
+        return r.json()
+
+    def start_vectorization(self) -> dict:
+        """Запускает ручную векторизацию товаров в Pinecone (только admin)."""
+        r = requests.post(
+            f"{self._base}/api/v1/database/vectorize",
+            headers=self._h,
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
 
@@ -417,12 +432,10 @@ class ApiService:
         if not article and not name:
             return []
         params = {"limit": 20}
-        # Новые параметры — для обновлённого сервера (article-only / name-only поиск)
         if article:
             params["article"] = article
         if name:
             params["name"] = name
-        # Fallback q= — для старого сервера (ищет по обоим полям, хотя бы что-то возвращает)
         params["q"] = article or name
         try:
             r = requests.get(

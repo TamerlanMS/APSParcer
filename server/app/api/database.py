@@ -11,6 +11,7 @@ from app.core.audit import write_audit
 from app.core.config import settings
 from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
 from app.services.db_importer import import_products_from_excel, import_constants_from_excel
+from app.services.matcher import invalidate_product_cache
 from app.services.excel_cache import rebuild_base_template, CACHE_PATH, TEMPLATE_PATH
 from pydantic import BaseModel
 from typing import Optional, List
@@ -182,17 +183,39 @@ async def import_products(
     request: Request,
     file: UploadFile = File(...),
     password: str = Query(default=""),
+    segment: Optional[str] = Query(default=None, description="Сегмент для импорта: ss/os/sil"),
     db: AsyncSession = Depends(get_db),
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
 ):
-    if not _is_admin_user(current_user):
+    # Пароль нужен только если нет JWT-сессии (клиент без авторизации)
+    if current_user is None:
         check_admin(password)
     _check_excel_file(file)
+
+    # Определяем сегмент для импорта
+    if segment:
+        import_segment = segment
+    elif current_user is not None and not _is_admin_user(current_user):
+        # Менеджер может импортировать только свой сегмент
+        import_segment = getattr(current_user, "segment", None) or "ss"
+    else:
+        # Admin/superadmin без явного segment — default ss (или переданный)
+        import_segment = "ss"
+
+    # Непривилегированный пользователь не может импортировать чужой сегмент
+    if (current_user is not None
+            and not _is_admin_user(current_user)
+            and segment
+            and segment != getattr(current_user, "segment", "ss")):
+        raise HTTPException(403, f"Нельзя импортировать в чужой сегмент ({segment})")
+
     content = await file.read()
     ip = request.client.host if request.client else None
     try:
-        added, updated = await import_products_from_excel(content, db, file.filename)
+        added, updated = await import_products_from_excel(
+            content, db, file.filename, segment=import_segment
+        )
     except ValueError as e:
         await write_audit(db, current_user, "import_products",
                           resource=file.filename, details=str(e), ip=ip, status="error")
@@ -209,6 +232,8 @@ async def import_products(
         logger.info("database: saved new WV template (%d bytes)", len(content))
     except Exception as _te:
         logger.warning("database: could not save template: %s", _te)
+    # Инвалидировать кэш товаров — следующий PDF-матчинг перечитает из БД
+    invalidate_product_cache()
     # Rebuild cached base template in background (non-blocking)
     asyncio.create_task(rebuild_base_template(db))
     return {"status": "ok", "added": added, "updated": updated}
@@ -223,7 +248,8 @@ async def import_constants(
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
 ):
-    if not _is_admin_user(current_user):
+    # Пароль нужен только если нет JWT-сессии (клиент без авторизации)
+    if current_user is None:
         check_admin(password)
     _check_excel_file(file)
     content = await file.read()
@@ -241,6 +267,36 @@ async def import_constants(
     # Rebuild cached base template in background (non-blocking)
     asyncio.create_task(rebuild_base_template(db))
     return {"status": "ok", "brands_updated": count}
+
+
+# ─── Manual vectorization ─────────────────────────────────────────────────────
+
+@router.post("/vectorize")
+async def start_vectorization(
+    segment: Optional[str] = Query(default=None, description="Сегмент для векторизации: ss/os/sil или all"),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Запускает векторизацию товаров в Pinecone (только admin/superadmin)."""
+    if not _is_admin_user(current_user):
+        raise HTTPException(403, "Требуются права администратора")
+
+    from app.core.database import AsyncSessionLocal
+    from app.services.embedder import embed_products_batch
+    from app.models.models import ALL_SEGMENTS
+
+    segs = ALL_SEGMENTS if (not segment or segment == "all") else [segment]
+
+    async def _run():
+        for seg in segs:
+            await embed_products_batch(AsyncSessionLocal, segment=seg, force=True)
+
+    asyncio.create_task(_run())
+    logger.info("vectorize: manual start segments=%s by user=%s",
+                segs, getattr(current_user, "username", "?"))
+    return {"status": "started",
+            "segments": segs,
+            "message": f"Векторизация сегментов {segs} запущена в фоне"}
 
 
 # ─── Base template download ────────────────────────────────────────────────────
@@ -434,7 +490,7 @@ async def update_constant(
     result = await db.execute(select(BrandConstant).where(BrandConstant.brand == brand))
     bc = result.scalar_one_or_none()
     if not bc:
-        raise HTTPException(404, f"Бренд \'{brand}\' не найден")
+        raise HTTPException(404, f"Бренд '{brand}' не найден")
     for field, value in data.model_dump(exclude_none=True).items():
         setattr(bc, field, value)
     await db.commit()

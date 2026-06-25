@@ -83,6 +83,18 @@ STRINGS = {
         "upload_hist_error": "Ошибка загрузки истории",
         "upload_ai_mode":   "ИИ-режим подбора",
         "upload_ai_hint":   "Семантический поиск",
+        # Segments
+        "seg_ss":           "Слаботочные системы",
+        "seg_os":           "Осветительные системы",
+        "seg_sil":          "Силовые системы",
+        "seg_all":          "Все сегменты",
+        "upload_seg_label": "Поиск по сегментам",
+        "upload_seg_all_hint": "Включить поиск по всем 3 базам",
+        # Users page segment
+        "udlg_segment":     "Сегмент",
+        "users_col_segment": "Сегмент",
+        # Database page segment selector
+        "db_import_seg_label": "База данных:",
         # Progress stages
         "upload_stage_upload":    "Отправка файла на сервер...",
         "upload_stage_detect":    "Анализ структуры PDF...",
@@ -416,6 +428,17 @@ STRINGS = {
         "upload_hist_error": "Тарихты жүктеу қатесі",
         "upload_ai_mode":   "ЖИ-іріктеу режімі",
         "upload_ai_hint":   "Семантикалық іздеу",
+        # Segments (KZ)
+        "seg_ss":           "Төмен ток жүйелері",
+        "seg_os":           "Жарықтандыру жүйелері",
+        "seg_sil":          "Күш жүйелері",
+        "seg_all":          "Барлық сегменттер",
+        "upload_seg_label": "Сегменттер бойынша іздеу",
+        "upload_seg_all_hint": "3 деректер қорынан іздеуді қосу",
+        "udlg_segment":     "Сегмент",
+        "users_col_segment": "Сегмент",
+        # Database page segment selector (KZ)
+        "db_import_seg_label": "Деректер қоры:",
         # Progress stages (KZ)
         "upload_stage_upload":    "Файл серверге жіберілуде...",
         "upload_stage_detect":    "PDF құрылымын талдау...",

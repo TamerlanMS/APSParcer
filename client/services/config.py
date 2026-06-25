@@ -13,11 +13,12 @@ class AppConfig:
         self.last_username = ""   # last successfully logged-in username
 
         # Session-only (JWT) — never written to disk
-        self.jwt_token:     str = ""
-        self.user_id:       int = 0
-        self.user_username: str = ""
+        self.jwt_token:      str = ""
+        self.user_id:        int = 0
+        self.user_username:  str = ""
         self.user_full_name: str = ""
-        self.user_role:     str = ""
+        self.user_role:      str = ""
+        self.user_segment:   str = "ss"   # ss / os / sil
 
         self.load()
 
@@ -48,6 +49,7 @@ class AppConfig:
         self.user_username  = data.get("username", "")
         self.user_full_name = data.get("full_name", "")
         self.user_role      = data.get("role", "")
+        self.user_segment   = data.get("segment", "ss") or "ss"
 
     def clear_user(self):
         """Сбрасывает JWT-сессию (logout)."""
@@ -56,6 +58,11 @@ class AppConfig:
         self.user_username  = ""
         self.user_full_name = ""
         self.user_role      = ""
+        self.user_segment   = "ss"
+
+    @property
+    def is_admin(self) -> bool:
+        return self.user_role in ("superadmin", "administrator")
 
     @property
     def is_configured(self) -> bool:

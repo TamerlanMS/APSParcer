@@ -86,11 +86,15 @@ class DatabasePage(ctk.CTkFrame):
             return False
 
     def _apply_role_visibility(self):
-        """Скрывает поле пароля для администраторов."""
+        """Показывает элементы только для администраторов."""
+        if not hasattr(self, "_vectorize_btn"):
+            return
         if self._is_admin():
-            self._pwd_frame.grid_remove()
+            self._vectorize_btn.grid()
+            self._seg_frame.grid()
         else:
-            self._pwd_frame.grid()
+            self._vectorize_btn.grid_remove()
+            self._seg_frame.grid_remove()
 
     def _build(self):
         pad = PAD_MD
@@ -160,17 +164,37 @@ class DatabasePage(ctk.CTkFrame):
         self.db_drop = DropCard(tab, "db_drop_label")
         self.db_drop.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
 
-        # Password row (скрыт для администраторов)
-        self._pwd_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        self._pwd_frame.grid(row=2, column=0, padx=16, sticky="ew")
-        self.db_pwd_lbl = ctk.CTkLabel(self._pwd_frame, text=t("db_password"),
-                                        font=FONT_NORMAL, text_color=NAVY, anchor="w")
-        self.db_pwd_lbl.pack(side="left")
-        self.db_pwd_entry = ctk.CTkEntry(
-            self._pwd_frame, placeholder_text=t("db_password_ph"),
-            show="*", width=260, height=36, font=FONT_NORMAL,
+        # ── Segment selector (только для администраторов) ─────────────────────
+        self._seg_frame = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
+        self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._seg_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self._seg_frame, text=t("db_import_seg_label"),
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+        ).grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")
+
+        seg_labels = [t("seg_ss"), t("seg_os"), t("seg_sil")]
+        self._import_seg_var = ctk.StringVar(value=seg_labels[0])
+        self._import_seg_btn = ctk.CTkSegmentedButton(
+            self._seg_frame,
+            values=seg_labels,
+            variable=self._import_seg_var,
+            font=FONT_SMALL,
+            selected_color=NAVY,
+            selected_hover_color=NAVY_DARK,
+            unselected_color=BG_CARD,
+            unselected_hover_color=BLUE_PALE,
+            text_color="white",
+            text_color_disabled=TEXT_SECONDARY,
+            dynamic_resizing=False,
+            height=32,
         )
-        self.db_pwd_entry.pack(side="left", padx=(12, 0))
+        self._import_seg_btn.grid(row=0, column=1, padx=(0, 12), pady=6, sticky="ew")
+        # map label→code for lookup
+        self._import_seg_labels = seg_labels
+        self._import_seg_codes  = ["ss", "os", "sil"]
+        self._seg_frame.grid_remove()   # скрыт по умолчанию, показывается для admin
 
         # Single combined import button
         self.db_btn = ctk.CTkButton(
@@ -180,7 +204,18 @@ class DatabasePage(ctk.CTkFrame):
             height=44, corner_radius=RADIUS_MD,
             command=self._import_both,
         )
-        self.db_btn.grid(row=3, column=0, padx=16, pady=(16, 8), sticky="ew")
+        self.db_btn.grid(row=3, column=0, padx=16, pady=(8, 8), sticky="ew")
+
+        # Vectorize button (только для администраторов)
+        self._vectorize_btn = ctk.CTkButton(
+            tab, text="🔄  Начать векторизацию",
+            font=FONT_SMALL,
+            fg_color="#5D6D7E", hover_color="#2C3E50",
+            height=36, corner_radius=RADIUS_MD,
+            command=self._start_vectorization,
+        )
+        self._vectorize_btn.grid(row=4, column=0, padx=16, pady=(0, 8), sticky="ew")
+        self._vectorize_btn.grid_remove()  # скрыт по умолчанию
 
     def _build_logs_tab(self):
         tab = self.tabview.tab(t("db_tab_logs"))
@@ -232,14 +267,7 @@ class DatabasePage(ctk.CTkFrame):
         if not path:
             messagebox.showwarning("", t("db_no_file"))
             return
-        if self._is_admin():
-            pwd = ""
-        else:
-            pwd = self.db_pwd_entry.get().strip()
-            if not pwd:
-                messagebox.showwarning("", t("db_password"))
-                return
-        self._run_import_both(path, pwd)
+        self._run_import_both(path, "")
 
     def _run_import_both(self, path: str, pwd: str):
         self._anim_token = getattr(self, "_anim_token", 0) + 1
@@ -254,8 +282,17 @@ class DatabasePage(ctk.CTkFrame):
         def _worker():
             results = {}
             errors  = []
+            # Для администраторов — берём выбранный сегмент; для менеджеров — их сегмент
+            if self._is_admin():
+                label = self._import_seg_var.get()
+                try:
+                    seg = self._import_seg_codes[self._import_seg_labels.index(label)]
+                except (ValueError, IndexError):
+                    seg = "ss"
+            else:
+                seg = getattr(self.app.config, "user_segment", "ss")
             try:
-                results["db"] = self.api.import_products(path, pwd)
+                results["db"] = self.api.import_products(path, pwd, segment=seg)
             except Exception as e:
                 errors.append(f"БД: {e}")
             try:
@@ -298,6 +335,27 @@ class DatabasePage(ctk.CTkFrame):
                 text=f"✅  {msg.split(chr(10))[0]}", text_color="#27AE60")
             messagebox.showinfo("OK", msg)
 
+    def _start_vectorization(self):
+        """Запускает переиндексацию Pinecone для сегмента (только для администраторов)."""
+        if self._is_admin():
+            label = self._import_seg_var.get()
+            try:
+                seg = self._import_seg_codes[self._import_seg_labels.index(label)]
+            except (ValueError, IndexError):
+                seg = "ss"
+        else:
+            seg = getattr(self.app.config, "user_segment", "ss")
+
+        def _worker():
+            try:
+                result = self.api.start_vectorization()
+                msg = result.get("message", "Векторизация запущена")
+                self.after(0, lambda: messagebox.showinfo("Векторизация", msg))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Ошибка векторизации", str(e)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _load_logs(self):
         try:
             logs = self.api.get_logs()
@@ -326,5 +384,9 @@ class DatabasePage(ctk.CTkFrame):
         self.db_btn.configure(text=t("db_import_both_btn"))
         self.db_drop.refresh_lang()
         self.load_logs_btn.configure(text=t("db_load_logs"))
-        self.db_pwd_lbl.configure(text=t("db_password"))
+        # Обновить подписи сегментного переключателя
+        new_labels = [t("seg_ss"), t("seg_os"), t("seg_sil")]
+        self._import_seg_labels = new_labels
+        self._import_seg_btn.configure(values=new_labels)
+        self._import_seg_var.set(new_labels[0])
         self._apply_role_visibility()

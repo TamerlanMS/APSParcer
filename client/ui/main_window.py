@@ -90,6 +90,7 @@ class MainApp(ctk.CTk):
             self._refresh_all_labels()
             self._update_user_panel()
             self.database_page._apply_role_visibility()
+            self.upload_page.on_login()
         except Exception:
             import traceback; traceback.print_exc()
         finally:

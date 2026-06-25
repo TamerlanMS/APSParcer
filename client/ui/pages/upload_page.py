@@ -34,6 +34,10 @@ class UploadPage(ctk.CTkFrame):
         self.app   = app
         self._path    = None
         self._ai_mode = ctk.BooleanVar(value=True)
+        # Segment toggles — default: user's own segment enabled
+        self._seg_ss  = ctk.BooleanVar(value=True)
+        self._seg_os  = ctk.BooleanVar(value=False)
+        self._seg_sil = ctk.BooleanVar(value=False)
         self._processing = False
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -135,9 +139,37 @@ class UploadPage(ctk.CTkFrame):
         )
         self.ai_hint_lbl.grid(row=0, column=2, padx=(0, 14), pady=10)
 
+        # ── Segment toggles ─────────────────────────────────────────────────
+        seg_frame = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+                                 border_width=1, border_color="#D0D3D4")
+        seg_frame.grid(row=6, pady=(0, 12), sticky="ew", padx=pad)
+        seg_frame.grid_columnconfigure((1, 3, 5), weight=1)
+
+        self.seg_lbl = ctk.CTkLabel(
+            seg_frame, text=t("upload_seg_label"),
+            font=(*FONT_NORMAL[:2], "bold"), text_color=NAVY,
+        )
+        self.seg_lbl.grid(row=0, column=0, padx=(14, 12), pady=10, sticky="w")
+
+        seg_defs = [
+            ("_seg_ss_sw",  self._seg_ss,  "seg_ss",  1),
+            ("_seg_os_sw",  self._seg_os,  "seg_os",  3),
+            ("_seg_sil_sw", self._seg_sil, "seg_sil", 5),
+        ]
+        for attr, var, key, col in seg_defs:
+            sw = ctk.CTkSwitch(
+                seg_frame, text=t(key),
+                variable=var, onvalue=True, offvalue=False,
+                progress_color=NAVY_LIGHT, button_color=NAVY,
+                button_hover_color=NAVY_DARK,
+                font=FONT_SMALL,
+            )
+            sw.grid(row=0, column=col, padx=8, pady=10)
+            setattr(self, attr, sw)
+
         # ── Progress block ──────────────────────────────────────────────────
         prog_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        prog_frame.grid(row=6, pady=(0, 4))
+        prog_frame.grid(row=7, pady=(0, 4))
         prog_frame.grid_columnconfigure(0, weight=1)
         prog_frame.grid_remove()
         self._prog_frame = prog_frame
@@ -174,7 +206,7 @@ class UploadPage(ctk.CTkFrame):
             state="disabled",
             command=self._send
         )
-        self.send_btn.grid(row=7, pady=(12, pad))
+        self.send_btn.grid(row=8, pady=(12, pad))
 
     # ── History tab ──────────────────────────────────────────────────────────
 
@@ -314,6 +346,21 @@ class UploadPage(ctk.CTkFrame):
 
     # ── Send ─────────────────────────────────────────────────────────────────
 
+    def _get_selected_segments(self) -> list:
+        """Возвращает список выбранных сегментов; если ничего — берём сегмент пользователя."""
+        segs = []
+        if self._seg_ss.get():  segs.append("ss")
+        if self._seg_os.get():  segs.append("os")
+        if self._seg_sil.get(): segs.append("sil")
+        return segs if segs else [getattr(self.app.cfg, "user_segment", "ss")]
+
+    def on_login(self):
+        """Вызывается после логина — устанавливаем переключатель сегмента пользователя."""
+        seg = getattr(self.app.cfg, "user_segment", "ss")
+        self._seg_ss.set(seg == "ss")
+        self._seg_os.set(seg == "os")
+        self._seg_sil.set(seg == "sil")
+
     def _send(self):
         if not self._path or self._processing:
             return
@@ -322,12 +369,15 @@ class UploadPage(ctk.CTkFrame):
         self.browse_btn.configure(state="disabled")
         self._start_progress()
         ai = self._ai_mode.get()
+        segments = self._get_selected_segments()
 
         def _worker():
             try:
                 def cb(pct, stage, msg):
                     self.after(0, lambda p=pct, s=stage, m=msg: self._on_progress(p, s, m))
-                result = self.api.parse_pdf_stream(self._path, cb, ai_mode=ai)
+                result = self.api.parse_pdf_stream(
+                    self._path, cb, ai_mode=ai, segments=segments
+                )
                 self.after(0, lambda: self._on_done(result))
             except Exception as e:
                 self.after(0, lambda: self._on_error(str(e)))
@@ -407,5 +457,9 @@ class UploadPage(ctk.CTkFrame):
             self.hist_tree.heading(col, text=t(key))
         self.ai_mode_lbl.configure(text="🤖  " + t("upload_ai_mode"))
         self.ai_hint_lbl.configure(text=t("upload_ai_hint"))
+        self.seg_lbl.configure(text=t("upload_seg_label"))
+        self._seg_ss_sw.configure(text=t("seg_ss"))
+        self._seg_os_sw.configure(text=t("seg_os"))
+        self._seg_sil_sw.configure(text=t("seg_sil"))
         if not self._path:
             self.file_lbl.configure(text=t("upload_no_file"))

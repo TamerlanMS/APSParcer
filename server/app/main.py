@@ -33,17 +33,46 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("DB schema check failed: %s", exc)
 
+    # ── Schema migrations (idempotent ALTER TABLE) ────────────────────────────
+    try:
+        from app.core.database import engine
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            # Segment column on products
+            await conn.execute(text(
+                "ALTER TABLE products ADD COLUMN IF NOT EXISTS segment VARCHAR(10) NOT NULL DEFAULT 'ss'"
+            ))
+            # Segment column on users
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS segment VARCHAR(10) DEFAULT 'ss'"
+            ))
+            # Segment column on import_logs
+            await conn.execute(text(
+                "ALTER TABLE import_logs ADD COLUMN IF NOT EXISTS segment VARCHAR(10) DEFAULT 'ss'"
+            ))
+            # Index for fast segment filtering
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_products_segment ON products (segment)"
+            ))
+        logger.info("Schema migrations applied")
+    except Exception as exc:
+        logger.error("Schema migration failed: %s", exc)
+
     if settings.OPENAI_API_KEY and settings.PINECONE_API_KEY and settings.PINECONE_HOST:
         async def _embed_task():
             # Small delay so the server is fully up before heavy work starts
             await asyncio.sleep(5)
             try:
                 from app.services.embedder import embed_products_batch
-                n = await embed_products_batch(AsyncSessionLocal)
-                if n:
-                    logger.info("Startup embedding complete: %d products upserted to Pinecone", n)
-                else:
-                    logger.info("Startup embedding: guard conditions not met (not Monday or no recent import)")
+                from app.models.models import ALL_SEGMENTS
+                total = 0
+                for seg in ALL_SEGMENTS:
+                    n = await embed_products_batch(AsyncSessionLocal, segment=seg)
+                    if n:
+                        logger.info("Startup embedding [%s]: %d products upserted", seg, n)
+                    total += n
+                if not total:
+                    logger.info("Startup embedding: guard conditions not met for any segment")
             except Exception as exc:
                 logger.error("Startup embedding failed: %s", exc)
 

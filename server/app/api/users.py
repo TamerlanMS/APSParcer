@@ -50,6 +50,7 @@ class LoginResponse(BaseModel):
     username: str
     full_name: str
     role: str
+    segment: str = "ss"
 
 class UserOut(BaseModel):
     id: int
@@ -59,6 +60,7 @@ class UserOut(BaseModel):
     phone: Optional[str]
     role: str
     role_display: str
+    segment: str = "ss"
     is_active: bool
     created_at: Optional[datetime]
     last_login_at: Optional[datetime]
@@ -73,6 +75,7 @@ class UserCreate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     role: RoleName
+    segment: str = "ss"
 
     @field_validator("password")
     @classmethod
@@ -86,6 +89,7 @@ class UserUpdate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     role: Optional[RoleName] = None
+    segment: Optional[str] = None
     password: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -106,6 +110,7 @@ def _user_to_out(user: User) -> UserOut:
         phone=user.phone,
         role=user.role.name.value,
         role_display=user.role.display_name,
+        segment=user.segment or "ss",
         is_active=user.is_active,
         created_at=user.created_at,
         last_login_at=user.last_login_at,
@@ -182,6 +187,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         username=user.username,
         full_name=user.full_name,
         role=user.role.name.value,
+        segment=user.segment or "ss",
     )
 
 
@@ -269,6 +275,7 @@ async def create_user(
         phone=body.phone,
         password_hash=hash_password(body.password),
         role_id=role.id,
+        segment=body.segment or "ss",
     )
     db.add(user)
     await db.flush()
@@ -323,6 +330,8 @@ async def update_user(
         if len(body.password) < 6:
             raise HTTPException(400, detail="Пароль должен содержать не менее 6 символов.")
         user.password_hash = hash_password(body.password)
+    if body.segment is not None:
+        user.segment = body.segment
     if body.role is not None:
         role_q = await db.execute(select(Role).where(Role.name == body.role))
         role = role_q.scalar_one_or_none()

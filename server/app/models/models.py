@@ -8,6 +8,22 @@ from app.core.database import Base
 import enum
 
 
+# ─── Сегменты ────────────────────────────────────────────────────────────────
+
+class SegmentType(str, enum.Enum):
+    ss  = "ss"   # Слаботочные системы
+    os  = "os"   # Осветительные системы
+    sil = "sil"  # Силовые системы
+
+SEGMENT_DISPLAY = {
+    "ss":  "Слаботочные системы",
+    "os":  "Осветительные системы",
+    "sil": "Силовые системы",
+}
+
+ALL_SEGMENTS = ["ss", "os", "sil"]
+
+
 # ─── Роли ────────────────────────────────────────────────────────────────────
 
 class RoleName(str, enum.Enum):
@@ -42,6 +58,7 @@ class User(Base):
     phone         = Column(String(100), nullable=True)
     password_hash = Column(String(300), nullable=False)
     role_id       = Column(Integer, ForeignKey("roles.id"), nullable=False)
+    segment       = Column(String(10), nullable=True, default="ss")  # ss/os/sil; NULL = все
     is_active     = Column(Boolean, default=True, nullable=False)
     created_at    = Column(DateTime(timezone=True), server_default=func.now())
     updated_at    = Column(DateTime(timezone=True), onupdate=func.now())
@@ -111,6 +128,7 @@ class Product(Base):
     brand        = Column(String(100), nullable=True, index=True)
     multiplicity = Column(Integer, nullable=True)
     kaznisa_code = Column(String(100), nullable=True)
+    segment      = Column(String(10), nullable=False, default="ss", index=True)  # ss/os/sil
     is_active    = Column(Boolean, default=True)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
     updated_at   = Column(DateTime(timezone=True), onupdate=func.now())
@@ -163,6 +181,7 @@ class ImportLog(Base):
 
     id           = Column(Integer, primary_key=True, index=True)
     filename     = Column(String(300))
+    segment      = Column(String(10), nullable=True, default="ss")   # импортированный сегмент
     rows_added   = Column(Integer, default=0)
     rows_updated = Column(Integer, default=0)
     status       = Column(String(50), default="success")
