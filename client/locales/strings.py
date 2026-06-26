@@ -10,7 +10,7 @@ STRINGS = {
         # Nav
         "nav_upload": "📄  Загрузка PDF",
         "nav_preview": "📊  Предпросмотр",
-        "nav_database": "🗄️   База данных",
+        "nav_database": "🗄  База данных",
         "nav_key_info": "Ключ: ",
         "nav_change_key": "🔑  Сменить ключ",
         "nav_user_label": "👤  {name}",
@@ -355,7 +355,7 @@ STRINGS = {
         # Nav
         "nav_upload": "📄  PDF жүктеу",
         "nav_preview": "📊  Алдын ала қарау",
-        "nav_database": "🗄️   Деректер қоры",
+        "nav_database": "🗄  Деректер қоры",
         "nav_key_info": "Кілт: ",
         "nav_change_key": "🔑  Кілтті өзгерту",
         "nav_user_label": "👤  {name}",

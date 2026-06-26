@@ -120,6 +120,55 @@ async def embed_text(text: str) -> List[float]:
     return vec
 
 
+async def embed_texts_batch(texts: List[str]) -> List[Optional[List[float]]]:
+    """
+    Embed a list of strings in a single OpenAI API call (much faster than N × embed_text).
+
+    Returns a list of vectors in the same order as `texts`.
+    Items that are empty or fail will be None in the result.
+    Hits the in-process cache first; only uncached texts go to the API.
+    """
+    if not texts:
+        return []
+
+    result: List[Optional[List[float]]] = [None] * len(texts)
+    keys   = [t.strip().lower() for t in texts]
+
+    # Fill from cache
+    uncached_idxs: List[int] = []
+    for i, key in enumerate(keys):
+        if not key:
+            continue  # empty string → stays None
+        if key in _embed_cache:
+            result[i] = _embed_cache[key]
+        else:
+            uncached_idxs.append(i)
+
+    if not uncached_idxs:
+        return result
+
+    # Single API call for all uncached texts
+    client = _get_oai_client()
+    batch_inputs = [keys[i] for i in uncached_idxs]
+    try:
+        resp = await client.embeddings.create(
+            model=settings.OPENAI_EMBED_MODEL,
+            input=batch_inputs,
+        )
+        if len(_embed_cache) >= _CACHE_MAX:
+            _embed_cache.clear()
+        for local_idx, api_item in enumerate(resp.data):
+            global_idx = uncached_idxs[local_idx]
+            vec = api_item.embedding
+            _embed_cache[keys[global_idx]] = vec
+            result[global_idx] = vec
+    except Exception as exc:
+        logger.error("embed_texts_batch API call failed: %s", exc)
+        # leave uncached entries as None
+
+    return result
+
+
 # ── Vectorization guards ─────────────────────────────────────────────────────
 
 def _is_segment_day(segment: str) -> bool:
@@ -243,31 +292,36 @@ async def embed_products_batch(
             )
         except Exception as exc:
             logger.error("OpenAI embedding batch [%s][%d] failed: %s", segment, batch_start, exc)
-            break
+            continue
 
         vectors = [item.embedding for item in resp.data]
 
-        # ── Pinecone upsert (sync → run in thread) ────────────────────────────
-        pc_records = [
+        # ── Pinecone upsert ───────────────────────────────────────────────────
+        pc_idx = _get_pinecone_index()
+        if pc_idx is None:
+            logger.error("embed_products_batch [%s]: Pinecone index not available", segment)
+            return upserted
+
+        vectors_to_upsert = [
             {
-                "id":     f"{segment}_{p.id}",   # namespace-prefixed to avoid cross-segment collision
+                "id":     str(p.id),
                 "values": vec,
                 "metadata": {
-                    "product_id": p.id,
-                    "article":    (p.article or "").strip(),
-                    "name":       (p.name    or "").strip(),
-                    "brand":      (p.brand   or "").strip(),
-
-                    "unit":       (p.unit    or "шт.").strip(),
-                    "segment":    segment,
+                    "article":  (p.article  or "").strip(),
+                    "name":     (p.name     or "").strip(),
+                    "brand":    (p.brand    or "").strip(),
+                    "segment":  (p.segment  or "ss").strip(),
                 },
             }
             for p, vec in zip(batch, vectors)
         ]
 
-        for pc_start in range(0, len(pc_records), _PC_BATCH_SIZE):
-            pc_chunk = pc_records[pc_start: pc_start + _PC_BATCH_SIZE]
-            await asyncio.to_thread(index.upsert, vectors=pc_chunk, namespace=namespace)
+        for pc_start in range(0, len(vectors_to_upsert), _PC_BATCH_SIZE):
+            pc_batch = vectors_to_upsert[pc_start: pc_start + _PC_BATCH_SIZE]
+            try:
+                pc_idx.upsert(vectors=pc_batch, namespace=namespace)
+            except Exception as exc:
+                logger.error("Pinecone upsert [%s][%d] failed: %s", segment, pc_start, exc)
 
         upserted += len(batch)
         logger.info(
@@ -276,7 +330,6 @@ async def embed_products_batch(
             min(batch_start + _BATCH_SIZE, len(products)),
             len(products),
         )
-        await asyncio.sleep(0.2)
 
     logger.info("embed_products_batch [%s]: done — %d products in namespace '%s'",
                 segment, upserted, namespace)

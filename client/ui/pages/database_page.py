@@ -90,11 +90,11 @@ class DatabasePage(ctk.CTkFrame):
         if not hasattr(self, "_vectorize_btn"):
             return
         if self._is_admin():
-            self._vectorize_btn.grid()
-            self._seg_frame.grid()
+            self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._vectorize_btn.grid(row=4, column=0, padx=16, pady=(0, 8), sticky="ew")
         else:
-            self._vectorize_btn.grid_remove()
             self._seg_frame.grid_remove()
+            self._vectorize_btn.grid_remove()
 
     def _build(self):
         pad = PAD_MD
@@ -183,10 +183,10 @@ class DatabasePage(ctk.CTkFrame):
             font=FONT_SMALL,
             selected_color=NAVY,
             selected_hover_color=NAVY_DARK,
-            unselected_color=BG_CARD,
-            unselected_hover_color=BLUE_PALE,
+            unselected_color="#5D6D7E",
+            unselected_hover_color="#4A5568",
             text_color="white",
-            text_color_disabled=TEXT_SECONDARY,
+            text_color_disabled="#AABBCC",
             dynamic_resizing=False,
             height=32,
         )

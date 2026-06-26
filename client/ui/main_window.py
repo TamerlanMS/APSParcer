@@ -86,15 +86,24 @@ class MainApp(ctk.CTk):
 
     def _on_auth_success(self):
         Lang.set(self.config.language)
+        print(f"[AUTH] logged in: role={self.config.user_role!r} segment={self.config.user_segment!r}")
         try:
             self._refresh_all_labels()
+        except Exception:
+            import traceback; traceback.print_exc()
+        try:
             self._update_user_panel()
+        except Exception:
+            import traceback; traceback.print_exc()
+        try:
             self.database_page._apply_role_visibility()
+        except Exception:
+            import traceback; traceback.print_exc()
+        try:
             self.upload_page.on_login()
         except Exception:
             import traceback; traceback.print_exc()
-        finally:
-            self._open_main()
+        self._open_main()
 
     def _on_auth_cancel(self):
         sys.exit(0)
@@ -209,6 +218,8 @@ class MainApp(ctk.CTk):
             )
             btn.pack(fill="x", padx=(16, 0))
             self.nav_btns.append((btn, label_key, idx))
+            if idx == 2:
+                self._db_nav_btn = btn  # ссылка для скрытия у директора
 
         # ── Spacer ─────────────────────────────────────────────────────────────
         spacer = ctk.CTkFrame(nav, fg_color="transparent", corner_radius=0)
@@ -369,6 +380,24 @@ class MainApp(ctk.CTk):
             self._template_btn.pack_forget()
             if self._current_tab in (3, 4):
                 self._switch_tab(0)
+
+        # Кнопка "База данных" скрыта для директора
+        is_director = (self.config.user_role == "director")
+        if hasattr(self, "_db_nav_btn"):
+            if is_director:
+                self._db_nav_btn.pack_forget()
+                if self._current_tab == 2:
+                    self._switch_tab(0)
+            else:
+                # Показываем — восстанавливаем позицию после "Предпросмотр"
+                preview_btn = None
+                for btn, key, idx in self.nav_btns:
+                    if idx == 1:
+                        preview_btn = btn
+                        break
+                if preview_btn and not self._db_nav_btn.winfo_ismapped():
+                    self._db_nav_btn.pack(fill="x", padx=(16, 0),
+                                          after=preview_btn)
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
 

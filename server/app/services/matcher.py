@@ -1,4 +1,5 @@
 from rapidfuzz import fuzz
+from rapidfuzz import process as _rfp
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.models import Product
@@ -10,21 +11,20 @@ import time
 logger = logging.getLogger(__name__)
 
 # ── In-process product index cache ───────────────────────────────────────────
-# Хранит построенный _ProductIndex, чтобы не грузить 120k строк из БД
-# при каждом PDF-парсинге. Инвалидируется вызовом invalidate_product_cache()
-# после импорта новой базы товаров.
+# Отдельный _ProductIndex на каждый сегмент (ss/os/sil + "all").
+# Загружаем только нужный сегмент из БД — не весь каталог целиком.
+# Инвалидируется вызовом invalidate_product_cache() после импорта новой базы.
 
-_CACHE_TTL_SEC   = 6 * 3600   # запасной TTL — 6 часов
-_cached_index: Optional["_ProductIndex"]   = None
-_cache_ts: float                           = 0.0
+_CACHE_TTL_SEC = 6 * 3600   # запасной TTL — 6 часов
+# ключ → (index, timestamp)
+_seg_cache: Dict[str, tuple] = {}
 
 
 def invalidate_product_cache() -> None:
     """Сбросить кэш индекса товаров (вызывать после импорта базы)."""
-    global _cached_index, _cache_ts
-    _cached_index = None
-    _cache_ts     = 0.0
-    logger.info("product cache: invalidated")
+    global _seg_cache
+    _seg_cache = {}
+    logger.info("product cache: invalidated (all segments)")
 
 EXACT_SCORE            = 100
 CONTAINS_SCORE         = 95
@@ -87,26 +87,47 @@ def _clean_name_for_match(name_raw: str) -> str:
     return _SUBITEM_PREFIX_RE.sub("", name_raw.strip())
 
 
-async def get_all_products(db: AsyncSession) -> List[Product]:
-    result = await db.execute(
-        select(Product).where(Product.is_active == True)
-    )
+async def get_products_for_segments(
+    db: AsyncSession,
+    segments: List[str],
+) -> List[Product]:
+    """Загружает только товары нужных сегментов из БД."""
+    q = select(Product).where(Product.is_active == True)
+    if segments:
+        from sqlalchemy import or_
+        q = q.where(or_(*(Product.segment == s for s in segments)))
+    result = await db.execute(q)
     return result.scalars().all()
 
 
-async def get_product_index(db: AsyncSession) -> "_ProductIndex":
-    """Возвращает кэшированный _ProductIndex; загружает из БД только при промахе кэша."""
-    global _cached_index, _cache_ts
+async def get_product_index(
+    db: AsyncSession,
+    segments: Optional[List[str]] = None,
+) -> "_ProductIndex":
+    """Возвращает _ProductIndex только для запрошенных сегментов.
+
+    Кэш хранится отдельно для каждого набора сегментов (ключ — frozenset).
+    Это позволяет не грузить все 166K товаров когда менеджеру нужен только
+    один сегмент (~50K).
+    """
+    global _seg_cache
+    segs = sorted(set(segments)) if segments else ["ss"]
+    cache_key = ",".join(segs)
     now = time.monotonic()
-    if _cached_index is not None and (now - _cache_ts) < _CACHE_TTL_SEC:
-        logger.debug("product cache: HIT (%d products)", len(_cached_index.products))
-        return _cached_index
-    logger.info("product cache: MISS — loading all products from DB")
-    all_products  = await get_all_products(db)
-    _cached_index = _ProductIndex(all_products)
-    _cache_ts     = now
-    logger.info("product cache: built index for %d products", len(all_products))
-    return _cached_index
+
+    entry = _seg_cache.get(cache_key)
+    if entry is not None:
+        idx, ts = entry
+        if (now - ts) < _CACHE_TTL_SEC:
+            logger.debug("product cache: HIT key=%s (%d products)", cache_key, len(idx.products))
+            return idx
+
+    logger.info("product cache: MISS key=%s — loading from DB", cache_key)
+    products = await get_products_for_segments(db, segs)
+    idx = _ProductIndex(products)
+    _seg_cache[cache_key] = (idx, now)
+    logger.info("product cache: built index key=%s (%d products)", cache_key, len(products))
+    return idx
 
 
 def product_to_dict(p: Product) -> Dict:
@@ -209,41 +230,41 @@ def find_candidates(
                 candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "code_exact"})
             return candidates[:1]
 
-    # ---- 2. Substring / fuzzy scan by article (O(n)) ----------------------
-    # Try both the original norm_q and the brand-stripped variant so that
-    # 'ВА47-29 1Р 16А 4,5КА С IEK' can still fuzzy-match 'ВА47-29 1Р 16А 4,5КА С'.
+    # ---- 2. Substring / fuzzy scan by article (BATCH -- O(1) Python overhead) ---
+    # Uses rapidfuzz.process.extract which runs all comparisons in C without
+    # per-call Python overhead.  For 110k products this is ~30x faster than a loop.
     queries_to_try = [q for q in (norm_q, norm_q_stripped) if q]
     if queries_to_try:
-        for i, p in enumerate(products):
-            na = norm_art[i]
-            nn = norm_name[i]
+        seen_art: set = set()
 
-            matched = False
-            for nq in queries_to_try:
-                # Article contains check -- only when lengths are reasonably similar
-                if na and (nq in na or na in nq):
+        for nq in queries_to_try:
+            # 2a. Substring contains check -- fast C string search, much cheaper than fuzzy
+            for i, na in enumerate(norm_art):
+                if i in seen_art or not na:
+                    continue
+                if nq in na or na in nq:
                     _len_ratio = min(len(nq), len(na)) / max(len(nq), len(na), 1)
                     if _len_ratio >= _CONTAINS_LEN_RATIO:
-                        candidates.append({"product": p, "score": CONTAINS_SCORE, "method": "contains"})
-                        matched = True
-                        break
+                        candidates.append({"product": products[i], "score": CONTAINS_SCORE, "method": "contains"})
+                        seen_art.add(i)
 
-                # Fuzzy article
-                if na:
-                    s = fuzz.token_sort_ratio(nq, na)
-                    if s >= FUZZY_THRESHOLD:
-                        candidates.append({"product": p, "score": s, "method": "fuzzy_article"})
-                        matched = True
-                        break
+            # 2b. Batch fuzzy on articles -- single C-level call for all 110k strings
+            for _, score, idx in _rfp.extract(
+                nq, norm_art, scorer=fuzz.token_sort_ratio,
+                limit=10, score_cutoff=FUZZY_THRESHOLD,
+            ):
+                if idx not in seen_art:
+                    candidates.append({"product": products[idx], "score": score, "method": "fuzzy_article"})
+                    seen_art.add(idx)
 
-            if matched:
-                continue
-
-            # Article query vs DB name (catches mislabeled article fields)
-            if norm_q and nn:
-                s = fuzz.partial_ratio(norm_q, nn)
-                if s >= FUZZY_THRESHOLD + 10:
-                    candidates.append({"product": p, "score": s, "method": "fuzzy_name_from_article"})
+        # 2c. Article query vs DB name (batch) -- catches mislabeled article fields
+        if norm_q:
+            for _, score, idx in _rfp.extract(
+                norm_q, norm_name, scorer=fuzz.partial_ratio,
+                limit=5, score_cutoff=FUZZY_THRESHOLD + 10,
+            ):
+                if idx not in seen_art:
+                    candidates.append({"product": products[idx], "score": score, "method": "fuzzy_name_from_article"})
 
         candidates.sort(key=lambda x: x['score'], reverse=True)
 
@@ -254,55 +275,56 @@ def find_candidates(
         if candidates:
             return candidates[:5]
 
-    # ---- 3. Name-based fallback (only when article search found nothing) ----
+    # ---- 3. Name-based fallback (batch) ----------------------------------------
     # Very strict: only engage when the name is specific enough (>= _NAME_MIN_LEN chars)
     # and scores are very high. Short/generic names ("Датчик", "Кабель ВВГнг") match
     # dozens of different products -- better to return not_found and let the manager decide.
     if norm_name_q and len(norm_name_q) >= _NAME_MIN_LEN:
         name_cands: List[Dict] = []
+        seen_name: set = set()
 
         # Exact name match (O(1))
         if norm_name_q in index.name_exact:
             for i in index.name_exact[norm_name_q]:
                 name_cands.append({"product": products[i], "score": 99, "method": "name_exact"})
+                seen_name.add(i)
             name_cands.sort(key=lambda x: x['score'], reverse=True)
             return name_cands[:1]
 
-        # Substring / fuzzy scan by name (O(n)) -- strict thresholds
-        for i, p in enumerate(products):
-            nn = norm_name[i]
+        # 3a. Substring check on names -- length-ratio guard prevents generic matches
+        for i, nn in enumerate(norm_name):
             if not nn:
                 continue
-
-            # Name substring -- with length ratio guard.
-            # Avoids "Камера" matching "Камера купольная PTZ IP66 30x zoom outdoor".
             if norm_name_q in nn or nn in norm_name_q:
                 _len_ratio = min(len(norm_name_q), len(nn)) / max(len(norm_name_q), len(nn), 1)
                 if _len_ratio >= _CONTAINS_LEN_RATIO:
-                    name_cands.append({"product": p, "score": CONTAINS_SCORE - 2, "method": "name_contains"})
-                # Always stop here when substring is found -- good or bad ratio.
-                # Without this continue, a bad-ratio substring falls through to partial_ratio
-                # which returns 100 (since the short string is fully inside the long one), giving
-                # a false "exact" match on a single generic word like "Кронштейн".
-                continue
+                    name_cands.append({"product": products[i], "score": CONTAINS_SCORE - 2, "method": "name_contains"})
+                # Always mark seen even on bad ratio: prevents the short string falling
+                # through to partial_ratio which scores 100 for any substring.
+                seen_name.add(i)
 
-            # Strict fuzzy token sort
-            s = fuzz.token_sort_ratio(norm_name_q, nn)
-            if s >= NAME_FUZZY_THRESHOLD:
-                name_cands.append({"product": p, "score": s, "method": "name_fuzzy"})
-                continue
+        # 3b. Batch fuzzy token sort on names
+        for _, score, idx in _rfp.extract(
+            norm_name_q, norm_name, scorer=fuzz.token_sort_ratio,
+            limit=10, score_cutoff=NAME_FUZZY_THRESHOLD,
+        ):
+            if idx not in seen_name:
+                name_cands.append({"product": products[idx], "score": score, "method": "name_fuzzy"})
+                seen_name.add(idx)
 
-            # Strict partial ratio -- with word-coverage guard.
-            # partial_ratio finds the best-matching window, so it gives 100 when any word matches.
-            # We additionally require that at least _WORD_COVERAGE_MIN of the QUERY words appear
-            # in the DB name, preventing single-word matches from showing as "Найдено".
-            s2 = fuzz.partial_ratio(norm_name_q, nn)
-            if s2 >= NAME_PARTIAL_THRESHOLD:
+        # 3c. Batch partial ratio on names (with word-coverage guard)
+        for _, score, idx in _rfp.extract(
+            norm_name_q, norm_name, scorer=fuzz.partial_ratio,
+            limit=10, score_cutoff=NAME_PARTIAL_THRESHOLD,
+        ):
+            if idx not in seen_name:
+                nn = norm_name[idx]
                 q_tokens = set(norm_name_q.split())
                 n_tokens  = set(nn.split())
                 coverage  = len(q_tokens & n_tokens) / max(len(q_tokens), 1)
                 if coverage >= _WORD_COVERAGE_MIN:
-                    name_cands.append({"product": p, "score": s2, "method": "name_partial"})
+                    name_cands.append({"product": products[idx], "score": score, "method": "name_partial"})
+                    seen_name.add(idx)
 
         name_cands.sort(key=lambda x: x['score'], reverse=True)
         return name_cands[:5]
@@ -327,7 +349,8 @@ async def match_items(
         segments = ["ss"]
     search_all = set(segments)
 
-    index = await get_product_index(db)
+    # Загружаем индекс только для нужных сегментов — не весь каталог
+    index = await get_product_index(db, segments=list(search_all))
     logger.info("match_items: %d PDF items vs %d products, segments=%s",
                 len(pdf_items), len(index.products), segments)
 

@@ -782,6 +782,7 @@ def extract_specification_from_page(
 
     items: List[Dict] = []
     auto_num = 0
+    last_section: str = ""   # section header text carried forward for context
 
     for row in table[data_start:]:
         if not isinstance(row, (list, tuple)):
@@ -861,11 +862,26 @@ def extract_specification_from_page(
                         continue
                 else:
                     # Continuation row with no article: merge qty/unit/code only
+                    _row_name_raw = _cell(row, cols.get("name"))
+                    # If this looks like a section header (has a meaningful name but
+                    # no article/code/qty), capture it as context for following items
+                    _cont_qty_raw  = _cell(row, cols.get("qty"))
+                    _cont_code_raw = _get_code(row, cols.get("code"))
+                    _cont_art_raw  = _cell(row, cols.get("article"))
+                    if (
+                        _row_name_raw
+                        and len(_row_name_raw) > 8
+                        and not _cont_art_raw
+                        and not _cont_code_raw
+                        and not _cont_qty_raw
+                    ):
+                        # Looks like a section/category header — save for context
+                        last_section = _row_name_raw.strip()
                     if items:
                         prev = items[-1]
-                        cont_qty  = _cell(row, cols.get("qty"))
+                        cont_qty  = _cont_qty_raw
                         cont_unit = _cell(row, cols.get("unit"))
-                        cont_code = _get_code(row, cols.get("code"))
+                        cont_code = _cont_code_raw
                         # If previous item had no qty (=1 default) and this row has qty — use it
                         if cont_qty and prev["qty"] == 1:
                             prev["qty"] = extract_qty(cont_qty)
@@ -896,6 +912,15 @@ def extract_specification_from_page(
             continue
         # If the article is a ГОСТ/СТ РК reference — clear it, keep the row
         article = _strip_standard_article(article)
+
+        # If name is very short (e.g. "20 мм", "25 мм") and we have a captured
+        # section header, prepend it for better semantic search quality.
+        # E.g. "20 мм" -> "Трубы гофрированные из ПВХ-пластиката 20 мм"
+        if last_section and len(name.strip()) <= 20 and (article or code):
+            # Strip ГОСТ/ТУ suffix from section header before prepending
+            _sec = re.sub(r'\s+(ТУ|ГОСТ|СТ\s+РК)\s+\S+.*$', '', last_section, flags=re.I).strip()
+            if _sec:
+                name = (_sec + " " + name).strip()
 
         items.append({
             "pos":              pos,

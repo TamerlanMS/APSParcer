@@ -190,7 +190,7 @@ async def _process_batch(batch: List[Dict], offset: int) -> None:
             batch[idx]["tech_params"] = clean
 
 
-def tech_params_to_text(tech_params: Dict) -> str:
+def tech_params_to_text(tech_params: dict) -> str:
     """Convert tech_params dict to a compact text string for vector queries."""
     if not tech_params:
         return ""

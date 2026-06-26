@@ -28,13 +28,12 @@ from app.models.models import Product
 from app.services.matcher import (
     match_items as classic_match_items,
     product_to_dict,
-    get_all_products,
     _ProductIndex,
     find_candidates,
     normalize,
     EXACT_SCORE,
 )
-from app.services.embedder import embed_text, _product_text, _get_pinecone_index
+from app.services.embedder import embed_text, embed_texts_batch, _product_text, _get_pinecone_index
 from app.services.tech_params import tech_params_to_text
 from app.api.corrections import check_corrections
 
@@ -185,14 +184,32 @@ async def _match_one_ai(
     classic_result: Dict,
     db: AsyncSession,
     segments: Optional[List[str]] = None,
+    pre_computed_vec: Optional[List[float]] = None,
 ) -> Dict:
     """
     Applies AI matching on top of a classic result that needs improvement.
     Returns an enriched result dict.
+
+    pre_computed_vec: if provided, skip the embedding API call (already batch-embedded).
     """
     article_raw  = item.get("article_raw", "") or ""
     name_raw     = item.get("name_raw", "") or ""
     tech_params  = item.get("tech_params") or {}
+
+    # Strip spec-context prefixes that add noise to the embedding query.
+    # "- на вводе выключатель нагрузки ..." -> "выключатель нагрузки ..."
+    # "- на линий автоматический выключатель ..." -> "автоматический выключатель ..."
+    # "Щит модульный навесной 24 модулей, IP54, в том числе:" -> strip trailing part
+    import re as _re
+    name_clean = name_raw
+    name_clean = _re.sub(
+        r'^\.{0,3}\s*на\s+(?:вводе?|линий?|ответвлении?|отходящих?)\s*',
+        '', name_clean, flags=_re.I,
+    ).strip()
+    name_clean = _re.sub(r',?\s*в\s+том\s+числе\s*[:.]?\s*$', '', name_clean, flags=_re.I).strip()
+    if name_clean:
+        name_raw = name_clean
+
     query_text   = _product_text(article_raw, name_raw)
 
     # Augment query with extracted tech params for richer semantic matching
@@ -204,12 +221,15 @@ async def _match_one_ai(
     if not query_text.strip():
         return {**classic_result, "ai_used": False}
 
-    # Embed the query
-    try:
-        query_vec = await embed_text(query_text)
-    except Exception as exc:
-        logger.warning("embed_text failed for '%s': %s", query_text[:60], exc)
-        return {**classic_result, "ai_used": False}
+    # Use pre-computed vector (batch embed) if available, otherwise call embed_text
+    if pre_computed_vec is not None:
+        query_vec = pre_computed_vec
+    else:
+        try:
+            query_vec = await embed_text(query_text)
+        except Exception as exc:
+            logger.warning("embed_text failed for '%s': %s", query_text[:60], exc)
+            return {**classic_result, "ai_used": False}
 
     # Vector search across requested segments
     vector_candidates = await _vector_search(query_vec, db, top_k=VECTOR_TOP_K, segments=segments)
@@ -346,7 +366,7 @@ async def _match_one_ai(
 
 # Max concurrent AI calls (Pinecone + OpenAI).
 # Higher = faster, but risks rate-limit errors on large specs.
-_AI_SEMAPHORE_SIZE = 6
+_AI_SEMAPHORE_SIZE = 12
 
 
 async def match_items_ai(
@@ -363,12 +383,55 @@ async def match_items_ai(
     if not segments:
         segments = ["ss"]
     logger.info("match_items_ai: START — %d items, segments=%s", len(pdf_items), segments)
+
+    # Classic matching (CPU-bound rapidfuzz) — batch fuzzy in matcher.py cuts this to seconds
     classic_results = await classic_match_items(pdf_items, db, segments=segments)
     logger.info("match_items_ai: classic done")
 
     if not settings.OPENAI_API_KEY:
         logger.warning("match_items_ai: OPENAI_API_KEY not set, returning classic results")
         return [{**r, "ai_used": False} for r in classic_results]
+
+    # ── Batch embed all not_found items BEFORE asyncio.gather ─────────────────
+    # One OpenAI API call instead of N separate calls — ~10x faster for 100 items.
+    import re as _re2
+    def _build_query_text(item: Dict) -> str:
+        article_raw = item.get("article_raw", "") or ""
+        name_raw    = item.get("name_raw", "") or ""
+        tech_params = item.get("tech_params") or {}
+        name_clean  = name_raw
+        name_clean  = _re2.sub(
+            r'^\.{0,3}\s*на\s+(?:вводе?|линий?|ответвлении?|отходящих?)\s*',
+            '', name_clean, flags=_re2.I,
+        ).strip()
+        name_clean = _re2.sub(r',?\s*в\s+том\s+числе\s*[:.?]?\s*$', '', name_clean, flags=_re2.I).strip()
+        if name_clean:
+            name_raw = name_clean
+        from app.services.tech_params import tech_params_to_text
+        tech_text  = tech_params_to_text(tech_params)
+        query_text = _product_text(article_raw, name_raw)
+        if tech_text:
+            query_text = f"{query_text} {tech_text}".strip()
+        return query_text
+
+    # Identify items needing AI (not_found after classic, non-empty query)
+    need_ai_idxs = [
+        i for i, r in enumerate(classic_results)
+        if r.get("status") == "not_found"
+    ]
+    query_texts = [_build_query_text(pdf_items[i]) for i in need_ai_idxs]
+
+    # Batch embed in one API call
+    pre_vecs: dict[int, list] = {}
+    if need_ai_idxs and settings.OPENAI_API_KEY:
+        try:
+            vecs = await embed_texts_batch(query_texts)
+            for i, idx in enumerate(need_ai_idxs):
+                if vecs[i] is not None:
+                    pre_vecs[idx] = vecs[i]
+            logger.info("match_items_ai: batch-embedded %d/%d items", len(pre_vecs), len(need_ai_idxs))
+        except Exception as exc:
+            logger.warning("match_items_ai: batch embed failed (%s), falling back to per-item", exc)
 
     semaphore = asyncio.Semaphore(_AI_SEMAPHORE_SIZE)
 
@@ -437,7 +500,7 @@ async def match_items_ai(
             # ── Стандартный AI-матчинг ────────────────────────────────────────
             logger.info("match_items_ai: [%d/%d] AI '%s'", idx + 1, len(pdf_items), label)
             try:
-                return await _match_one_ai(item, classic, db)
+                return await _match_one_ai(item, classic, db, segments=segments, pre_computed_vec=pre_vecs.get(idx))
             except Exception as exc:
                 logger.error(
                     "AI match failed for item '%s': %s", item.get("article_raw", "?"), exc
