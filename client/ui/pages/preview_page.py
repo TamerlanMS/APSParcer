@@ -669,7 +669,7 @@ class PreviewPage(ctk.CTkFrame):
 
         # Скрываем колонки, которые не нужны на экране предпросмотра
         # (данные хранятся в vals и попадают в Excel — просто не отображаются)
-        _HIDDEN_COLS = {12, 13, 14}  # kaznisa, comment, delivery
+        _HIDDEN_COLS = {13, 14}  # comment, delivery  (kaznisa_code=12 показываем — нужен для сил. систем)
         self.tree["displaycolumns"] = [
             f"c{i}" for i in range(len(COLS)) if i not in _HIDDEN_COLS
         ]
@@ -1120,7 +1120,8 @@ class PreviewPage(ctk.CTkFrame):
             qty = f"{qty_raw} ({item.get('unit', '')}≠{unit})"
         else:
             qty = qty_raw
-        kaznisa_code = bm.get("kaznisa_code") or ""
+        # Если товар найден — берём код из БД; если нет — показываем код из PDF
+        kaznisa_code = bm.get("kaznisa_code") or item.get("kaznisa_code_raw", "") or ""
         const_price  = item.get("_user_const_price") or ""
 
         def f(v):
@@ -1465,7 +1466,7 @@ class PreviewPage(ctk.CTkFrame):
             f"{seb_sum:.2f}"  if seb_sum else "",
             f"{kp:.2f}"       if kp      else "",
             f"{kp_sum:.2f}"   if kp_sum  else "",
-            bm.get("kaznisa_code") or "",
+            bm.get("kaznisa_code") or item.get("kaznisa_code_raw", "") or "",
             item.get("comment", "") or "",
             item.get("delivery", "") or "",
             t("status_exact"),

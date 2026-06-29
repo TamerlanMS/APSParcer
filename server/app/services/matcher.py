@@ -356,11 +356,15 @@ async def match_items(
 
     results = []
 
+    # Поиск по коду КазНИИСА актуален только для силовых систем (sil).
+    # В других сегментах (ss, os) коды КазНИИСА не используются — отключаем.
+    _use_kaznisa_code = "sil" in search_all
+
     for item in pdf_items:
         all_candidates = find_candidates(
             item.get("article_raw", "") or "",
             index,
-            kaznisa_code_raw=item.get("kaznisa_code_raw", "") or "",
+            kaznisa_code_raw=(item.get("kaznisa_code_raw", "") or "") if _use_kaznisa_code else "",
             name_raw=item.get("name_raw", "") or "",
         )
 
