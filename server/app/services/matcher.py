@@ -238,11 +238,13 @@ def find_candidates(
             candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "exact"})
         return candidates[:1]
 
-    # ---- 1c. Exact KazNIISA code match (O(1)) -- only when article missing -
-    # Only used as a fallback; code matching is less reliable than article matching.
+    # ---- 1c. Exact KazNIISA code match (O(1)) -----------------------------------
+    # Tried even when article is present: vendor article codes often differ between
+    # the spec and the DB (e.g. WV 0001.X os-segment uses numeric GQ article IDs),
+    # so a KazNIISA code match is authoritative and should not be skipped.
     # Guard: the code must contain EXACTLY 10 digits (standard format XXX-XXX-XXXX).
     # Codes with fewer/more digits are arbitrary placeholders -- skip them entirely.
-    if not norm_q and kaznisa_code_raw:
+    if kaznisa_code_raw:
         norm_code_q  = normalize(kaznisa_code_raw)
         _digits_only = re.sub(r'\D', '', norm_code_q)
         if len(_digits_only) == _KAZNISA_DIGITS_REQUIRED and norm_code_q in index.code_exact:
@@ -423,20 +425,20 @@ async def match_items(
 
     results = []
 
-    # Поиск по коду КазНИИСА актуален только для силовых систем (sil).
-    # В других сегментах (ss, os) коды КазНИИСА не используются — отключаем.
-    _use_kaznisa_code = "sil" in search_all
+    # КазНИИСА код используется для всех сегментов: и sil (силовые), и os (освещение,
+    # напр. WV 0001.X), и ss (слаботочные). Ранее ограничение только на sil приводило
+    # к тому, что позиции с кодом КазНИИСА в os-базе не находились.
+    # Фильтрация нестандартных кодов происходит внутри find_candidates (10-значная проверка).
 
     # Для сегмента освещения (os) кириллицу в артикулах не учитываем:
-    # базы освещения (напр. WV 0001.X "Световые технологии") используют числовые/латинские
-    # артикулы, а PDF-спецификации могут добавлять кириллические префиксы/суффиксы.
+    # базы освещения (напр. WV 0001.X) используют числовые/латинские артикулы.
     _strip_cyrillic = "os" in search_all
 
     for item in pdf_items:
         all_candidates = find_candidates(
             item.get("article_raw", "") or "",
             index,
-            kaznisa_code_raw=(item.get("kaznisa_code_raw", "") or "") if _use_kaznisa_code else "",
+            kaznisa_code_raw=item.get("kaznisa_code_raw", "") or "",
             name_raw=item.get("name_raw", "") or "",
             strip_cyrillic=_strip_cyrillic,
         )
