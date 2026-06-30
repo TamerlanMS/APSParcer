@@ -426,23 +426,34 @@ class ApiService:
             return []
 
     def search_products_by_article(self, article: str = "", name: str = "") -> list:
-        """
-        Поиск товаров в БД по артикулу и/или названию.
-        - article → ищет только в поле article (когда заполнено поле «Артикул»)
-        - name    → ищет только в поле name    (когда заполнено поле «Название»)
-        - оба     → AND-условие
+        """Legacy: поиск по отдельным полям. Используй search_products() для нового диалога."""
+        return self.search_products(q=article or name, segment="")
 
-        Backward-compat: также отправляет q= для старого сервера без отдельных params.
-        На обновлённом сервере article=/name= имеют приоритет над q=.
+    def search_products(
+        self,
+        q: str = "",
+        segment: str = "",
+        kaznisa_code: str = "",
+        limit: int = 30,
+    ) -> list:
         """
-        if not article and not name:
+        Единый поиск товаров — ищет по артикулу, наименованию и коду КазНИИСА одновременно.
+
+        Args:
+            q:            поисковая строка (ищется во всех полях)
+            segment:      "ss" / "os" / "sil" или "" (все сегменты)
+            kaznisa_code: дополнительный фильтр по коду КазНИИСА
+            limit:        максимум результатов
+        """
+        if not q and not kaznisa_code:
             return []
-        params = {"limit": 20}
-        if article:
-            params["article"] = article
-        if name:
-            params["name"] = name
-        params["q"] = article or name
+        params: dict = {"limit": limit}
+        if q:
+            params["q"] = q
+        if segment:
+            params["segment"] = segment
+        if kaznisa_code:
+            params["kaznisa_code"] = kaznisa_code
         try:
             r = requests.get(
                 f"{self._base}/api/v1/database/products/search",

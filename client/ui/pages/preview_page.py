@@ -318,90 +318,142 @@ class SaveKPDialog(ctk.CTkToplevel):
 
 class ArticleSearchDialog(ctk.CTkToplevel):
     """
-    Диалог поиска товара в базе данных по артикулу или названию.
-    Используется для красных (not_found) строк — менеджер вводит артикул/название
-    и выбирает подходящий товар из предложенных результатов.
-    После выбора товар записывается в историю исправлений (обучение модели).
+    Диалог поиска товара в базе данных.
+    Показывает данные из PDF (артикул, наименование, код КазНИИСА), позволяет
+    выбрать сегмент базы и выполнить единый поиск по всем полям сразу.
     """
 
-    def __init__(self, parent, api: ApiService, item: dict):
+    _SEG_LABELS = ["Слаботочные", "Освещение", "Силовые"]
+    _SEG_CODES  = ["ss", "os", "sil"]
+
+    def __init__(self, parent, api: ApiService, item: dict, default_segment: str = "ss"):
         super().__init__(parent)
         self.api      = api
         self.item     = item
-        self.selected = None   # выбранный продукт (dict) или None
+        self.selected = None
 
         self.title(t("search_dialog_title"))
-        self.geometry("820x540")
+        self.geometry("900x620")
         self.grab_set()
         self.resizable(True, True)
-        self.minsize(600, 400)
+        self.minsize(680, 460)
 
-        # Предзаполняем поля из текущей строки
-        self._default_art  = (item.get("article_raw") or "").strip()
-        self._default_name = (item.get("name_raw") or "").strip()
+        # Данные из PDF
+        self._pdf_art   = (item.get("article_raw")      or "").strip()
+        self._pdf_name  = (item.get("name_raw")          or "").strip()
+        self._pdf_code  = (item.get("kaznisa_code_raw")  or "").strip()
+
+        # Начальный сегмент
+        self._default_seg = default_segment if default_segment in self._SEG_CODES else "ss"
 
         self._build()
-        # Авто-поиск если есть предзаполненные данные
-        if self._default_art or self._default_name:
+        # Авто-поиск: берём лучший из имеющихся запросов
+        if self._pdf_art or self._pdf_name or self._pdf_code:
             self.after(150, self._do_search)
 
     def _build(self):
         pad = 16
 
-        # Заголовок
+        # ── Заголовок ─────────────────────────────────────────────────────────
         ctk.CTkLabel(self, text=t("search_dialog_title"),
                      font=FONT_HEADING, text_color=NAVY).pack(pady=(pad, 2), padx=pad, anchor="w")
-        ctk.CTkLabel(self, text=t("search_dialog_subtitle"),
-                     font=FONT_SMALL, text_color=TEXT_SECONDARY).pack(padx=pad, anchor="w", pady=(0, 8))
 
-        # Поля поиска
-        fields_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
-                                     border_width=1, border_color="#E0E0E0")
-        fields_frame.pack(fill="x", padx=pad, pady=(0, 8))
-        fields_frame.grid_columnconfigure(1, weight=1)
-        fields_frame.grid_columnconfigure(3, weight=2)
+        # ── Блок «Полученные данные из PDF» ───────────────────────────────────
+        pdf_frame = ctk.CTkFrame(self, fg_color="#EBF5FB", corner_radius=RADIUS_MD,
+                                  border_width=1, border_color="#AED6F1")
+        pdf_frame.pack(fill="x", padx=pad, pady=(4, 8))
+        pdf_frame.grid_columnconfigure((1, 3, 5), weight=1)
 
-        ctk.CTkLabel(fields_frame, text=t("search_article_label"),
-                     font=FONT_NORMAL, anchor="e").grid(row=0, column=0, padx=(12, 6), pady=10, sticky="e")
-        self._art_var = tk.StringVar(value=self._default_art)
-        art_entry = ctk.CTkEntry(fields_frame, textvariable=self._art_var,
-                                  placeholder_text=t("search_placeholder_art"),
-                                  height=32, font=FONT_NORMAL)
-        art_entry.grid(row=0, column=1, padx=(0, 12), pady=10, sticky="ew")
-        art_entry.bind("<Return>", lambda e: self._do_search())
+        ctk.CTkLabel(pdf_frame, text="Данные из PDF:",
+                     font=(*FONT_SMALL[:2], "bold"), text_color=NAVY).grid(
+            row=0, column=0, padx=(12, 6), pady=8, sticky="w")
 
-        ctk.CTkLabel(fields_frame, text=t("search_name_label"),
-                     font=FONT_NORMAL, anchor="e").grid(row=0, column=2, padx=(0, 6), pady=10, sticky="e")
-        self._name_var = tk.StringVar(value=self._default_name[:80])
-        name_entry = ctk.CTkEntry(fields_frame, textvariable=self._name_var,
-                                   placeholder_text=t("search_placeholder_name"),
-                                   height=32, font=FONT_NORMAL)
-        name_entry.grid(row=0, column=3, padx=(0, 4), pady=10, sticky="ew")
-        name_entry.bind("<Return>", lambda e: self._do_search())
+        for col_idx, (label, value) in enumerate([
+            ("Артикул",    self._pdf_art  or "—"),
+            ("Наименование", self._pdf_name[:70] + ("…" if len(self._pdf_name) > 70 else "") if self._pdf_name else "—"),
+            ("Код КазНИИСА", self._pdf_code or "—"),
+        ]):
+            lbl_col = col_idx * 2 + 1
+            val_col = col_idx * 2 + 2
+            ctk.CTkLabel(pdf_frame, text=f"{label}:", font=FONT_SMALL,
+                         text_color=TEXT_SECONDARY).grid(
+                row=0, column=lbl_col, padx=(4, 2), pady=8, sticky="e")
+            ctk.CTkLabel(pdf_frame, text=value, font=FONT_SMALL,
+                         text_color=NAVY, anchor="w").grid(
+                row=0, column=val_col, padx=(0, 12), pady=8, sticky="w")
 
-        search_btn = ctk.CTkButton(
-            fields_frame, text=t("search_btn"), font=FONT_NORMAL,
-            fg_color=NAVY_LIGHT, hover_color=NAVY,
-            height=32, width=120, corner_radius=RADIUS_SM,
-            command=self._do_search,
+        # ── Выбор сегмента ────────────────────────────────────────────────────
+        seg_frame = ctk.CTkFrame(self, fg_color="transparent")
+        seg_frame.pack(fill="x", padx=pad, pady=(0, 6))
+        seg_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(seg_frame, text="База данных:", font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 10), sticky="w")
+
+        try:
+            default_idx = self._SEG_CODES.index(self._default_seg)
+        except ValueError:
+            default_idx = 0
+        self._seg_var = tk.StringVar(value=self._SEG_LABELS[default_idx])
+        self._seg_btn = ctk.CTkSegmentedButton(
+            seg_frame,
+            values=self._SEG_LABELS,
+            variable=self._seg_var,
+            font=FONT_NORMAL,
+            selected_color=NAVY,
+            selected_hover_color=NAVY_DARK,
+            unselected_color="#5D6D7E",
+            unselected_hover_color="#4A5568",
+            text_color="white",
+            dynamic_resizing=True,
+            height=34,
+            command=lambda _: self._do_search(),
         )
-        search_btn.grid(row=0, column=4, padx=(4, 12), pady=10)
+        self._seg_btn.grid(row=0, column=1, sticky="ew")
 
-        # Статус / подсказка
+        # ── Единое поле поиска ────────────────────────────────────────────────
+        search_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
+                                     border_width=1, border_color="#E0E0E0")
+        search_frame.pack(fill="x", padx=pad, pady=(0, 6))
+        search_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(search_frame, text="🔍  Поиск:",
+                     font=FONT_NORMAL, text_color=TEXT_SECONDARY).grid(
+            row=0, column=0, padx=(12, 6), pady=10, sticky="e")
+
+        # Предзаполняем: приоритет — артикул, потом код КазНИИСА, потом имя
+        default_q = self._pdf_art or self._pdf_code or self._pdf_name[:60]
+        self._q_var = tk.StringVar(value=default_q)
+        q_entry = ctk.CTkEntry(search_frame, textvariable=self._q_var,
+                                placeholder_text="Артикул, наименование или код КазНИИСА…",
+                                height=34, font=FONT_NORMAL)
+        q_entry.grid(row=0, column=1, padx=(0, 8), pady=10, sticky="ew")
+        q_entry.bind("<Return>", lambda e: self._do_search())
+
+        ctk.CTkButton(
+            search_frame, text="🔍  Найти", font=FONT_NORMAL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=34, width=130, corner_radius=RADIUS_SM,
+            command=self._do_search,
+        ).grid(row=0, column=2, padx=(0, 12), pady=10)
+
+        # ── Статус ────────────────────────────────────────────────────────────
         self._status_lbl = ctk.CTkLabel(self, text="", font=FONT_SMALL,
                                          text_color=TEXT_SECONDARY)
         self._status_lbl.pack(padx=pad, anchor="w", pady=(0, 4))
 
-        # Таблица результатов
+        # ── Таблица результатов ───────────────────────────────────────────────
         tree_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
                                    border_width=1, border_color="#E0E0E0")
         tree_frame.pack(fill="both", expand=True, padx=pad, pady=(0, 8))
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
-        cols = ["article", "name", "brand", "unit", "rrts", "mrc"]
+        cols = ["article", "name", "brand", "unit", "kaznisa_code", "rrts", "mrc"]
         hdrs = [t("search_col_article"), t("search_col_name"),
-                t("search_col_brand"), "Ед.", "РРЦ", "МРЦ"]
+                t("search_col_brand"), "Ед.", "Код КазНИИСА", "РРЦ", "МРЦ"]
+        widths = [150, 280, 90, 40, 120, 80, 80]
+
         style = ttk.Style()
         style.configure("Search.Treeview", rowheight=26, font=("Calibri", 12))
         style.configure("Search.Treeview.Heading", font=("Calibri", 12, "bold"),
@@ -410,9 +462,10 @@ class ArticleSearchDialog(ctk.CTkToplevel):
 
         self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                    style="Search.Treeview", selectmode="browse")
-        for col, hdr, w in zip(cols, hdrs, [170, 300, 100, 50, 90, 90]):
+        for col, hdr, w in zip(cols, hdrs, widths):
             self._tree.heading(col, text=hdr)
-            self._tree.column(col, width=w, minwidth=40, stretch=(col == "name"), anchor="w")
+            self._tree.column(col, width=w, minwidth=30,
+                              stretch=(col == "name"), anchor="w")
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=vsb.set)
@@ -420,10 +473,9 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         vsb.grid(row=0, column=1, sticky="ns")
         self._tree.bind("<Double-1>", lambda e: self._ok())
 
-        # Хранилище результатов
         self._results: list = []
 
-        # Кнопки
+        # ── Кнопки ────────────────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(pady=(0, pad), padx=pad, fill="x")
 
@@ -435,28 +487,34 @@ class ArticleSearchDialog(ctk.CTkToplevel):
                                       width=150, command=self._ok, state="disabled")
         self._ok_btn.pack(side="right")
 
-        # Авто-выделение первой строки при нажатии Enter
         self.bind("<Return>", lambda e: self._ok() if self._results else None)
 
+    def _current_segment(self) -> str:
+        label = self._seg_var.get()
+        try:
+            return self._SEG_CODES[self._SEG_LABELS.index(label)]
+        except (ValueError, IndexError):
+            return "ss"
+
     def _do_search(self, _=None):
-        art  = self._art_var.get().strip()
-        name = self._name_var.get().strip()
-        if not art and not name:
+        q = self._q_var.get().strip()
+        if not q:
             return
 
-        self._status_lbl.configure(text=t("search_searching"))
+        self._status_lbl.configure(text=t("search_searching"), text_color=TEXT_SECONDARY)
         self._tree.delete(*self._tree.get_children())
         self._results = []
         self._ok_btn.configure(state="disabled")
 
+        seg = self._current_segment()
+
         def _worker():
             try:
-                # 1. Поиск в БД: article= и name= — раздельные поля (не смешиваем)
-                db_results = self.api.search_products_by_article(article=art, name=name)
-                # 2. Семантический поиск из истории (только если мало прямых результатов)
+                db_results  = self.api.search_products(q=q, segment=seg)
                 sem_results = []
-                if name and len(db_results) < 5:
-                    sem_results = self.api.search_products_by_text(name, art, top_k=5)
+                if len(db_results) < 5 and self._pdf_name:
+                    sem_results = self.api.search_products_by_text(
+                        self._pdf_name, self._pdf_art, top_k=5)
                 self.after(0, lambda: self._show_results(db_results, sem_results))
             except Exception as exc:
                 self.after(0, lambda: self._status_lbl.configure(
@@ -467,10 +525,15 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _show_results(self, db_results: list, sem_results: list):
-        """Отображает результаты поиска в таблице."""
         self._tree.delete(*self._tree.get_children())
         self._results = []
-        seen_ids = set()
+        seen_ids: set = set()
+
+        def _fmt(v):
+            try:
+                return f"{float(v):,.0f}" if v else "—"
+            except Exception:
+                return "—"
 
         def _add(p, tag=""):
             pid = p.get("id") or p.get("product_id")
@@ -478,29 +541,25 @@ class ArticleSearchDialog(ctk.CTkToplevel):
                 return
             seen_ids.add(pid)
             self._results.append(p)
-            def _fmt(v):
-                return f"{float(v):,.0f}" if v else "—"
             self._tree.insert("", "end", tags=(tag,) if tag else (), values=(
                 p.get("article", ""),
                 (p.get("name") or "")[:120],
                 p.get("brand", ""),
                 p.get("unit", "шт."),
+                p.get("kaznisa_code", "") or "—",
                 _fmt(p.get("rrts")),
                 _fmt(p.get("mrc")),
             ))
 
-        # Сначала прямые совпадения из БД
         for p in db_results:
             _add(p, "db")
 
-        # Затем семантические — с пометкой
         if sem_results:
             for s in sem_results:
-                # sem_results возвращают только {product_id, article, name, similarity}
-                # Если нет полных данных — пропускаем
                 if s.get("product_id") and s.get("article"):
                     _add({"id": s["product_id"], "article": s["article"],
-                           "name": s.get("name", ""), "brand": "", "unit": "шт."}, "sem")
+                          "name": s.get("name", ""), "brand": "",
+                          "unit": "шт.", "kaznisa_code": ""}, "sem")
 
         self._tree.tag_configure("db",  background=C_EXACT)
         self._tree.tag_configure("sem", background=C_MANAGER)
@@ -511,9 +570,9 @@ class ArticleSearchDialog(ctk.CTkToplevel):
                 self._tree.selection_set(children[0])
                 self._tree.focus(children[0])
             self._ok_btn.configure(state="normal")
-            hint = t("search_history_hint") if sem_results else ""
+            hint = "  (+ семантические)" if sem_results else ""
             self._status_lbl.configure(
-                text=f"Найдено: {len(self._results)} позиций.  {hint}",
+                text=f"Найдено: {len(self._results)} позиций{hint}",
                 text_color=TEXT_SECONDARY,
             )
         else:
@@ -1443,7 +1502,8 @@ class PreviewPage(ctk.CTkFrame):
 
     def _open_article_search(self, item: dict, iid: str):
         """Открывает ArticleSearchDialog для поиска замены товара."""
-        dlg = ArticleSearchDialog(self, self.api, item)
+        segment = getattr(self.app.config, "user_segment", "ss") or "ss"
+        dlg = ArticleSearchDialog(self, self.api, item, default_segment=segment)
         self.wait_window(dlg)
         if dlg.selected:
             self._apply_correction(item, iid, dlg.selected, confirm_only=False)
@@ -1737,13 +1797,6 @@ class PreviewPage(ctk.CTkFrame):
                 return
         # ─────────────────────────────────────────────────────────────────────
 
-        managers = self.managers or []
-        dlg = SaveKPDialog(self, managers)
-        self.wait_window(dlg)
-        if not dlg.result:
-            return
-        meta = dlg.result
-
         path = filedialog.asksaveasfilename(
             title=t("preview_save"),
             defaultextension=".xlsm",
@@ -1784,18 +1837,16 @@ class PreviewPage(ctk.CTkFrame):
                     constants=self.constants,
                     products=products,
                     brand_consts=self.brand_consts,
-                    project_name=meta.get("project", ""),
-                    client_name=meta.get("client", ""),
-                    manager_name=meta.get("manager", ""),
+                    project_name="",
+                    client_name="",
+                    manager_name="",
                     base_template_path=base_tpl,
                 )
             finally:
-                # Удаляем временный файл шаблона в любом случае
                 if base_tpl and os.path.exists(base_tpl):
                     try: os.unlink(base_tpl)
                     except Exception: pass
 
-            # Предлагаем открыть файл
             if messagebox.askyesno(
                 t("preview_save"),
                 t("preview_saved", path=out, count=len(self.items))
@@ -1809,7 +1860,7 @@ class PreviewPage(ctk.CTkFrame):
 
     @staticmethod
     def _open_file(path: str):
-        """ÐÑÐºÑÑÐ²Ð°ÐµÑ ÑÐ°Ð¹Ð» ÑÑÐ°Ð½Ð´Ð°ÑÑÐ½ÑÐ¼ Ð¿ÑÐ¸Ð»Ð¾Ð¶ÐµÐ½Ð¸ÐµÐ¼ ÐÐ¡."""
+        """Открывает файл стандартным приложением ОС."""
         try:
             if sys.platform.startswith("win"):
                 os.startfile(path)

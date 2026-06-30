@@ -34,8 +34,8 @@ class UploadPage(ctk.CTkFrame):
         self.app   = app
         self._path    = None
         self._ai_mode = ctk.BooleanVar(value=True)
-        # Segment toggles — default: user's own segment enabled
-        self._seg_ss  = ctk.BooleanVar(value=True)
+        # Segment toggles — default: all OFF (пользователь выбирает сам)
+        self._seg_ss  = ctk.BooleanVar(value=False)
         self._seg_os  = ctk.BooleanVar(value=False)
         self._seg_sil = ctk.BooleanVar(value=False)
         self._processing = False
@@ -340,19 +340,30 @@ class UploadPage(ctk.CTkFrame):
     def _set_file(self, path: str):
         self._path = path
         name = os.path.basename(path)
-        self.file_lbl.configure(text=f"📄  {name}", text_color=NAVY)
-        self.drop_zone.configure(border_color=NAVY_LIGHT, fg_color=BLUE_PALE)
+
+        # Визуально подтверждаем выбор файла — зелёная зона с чекмарком
+        self.drop_zone.configure(border_color="#27AE60", fg_color="#EAFAF1",
+                                  border_width=2)
+        self.drop_icon.configure(text="✅", font=("Segoe UI Emoji", 52))
+        self.drop_title.configure(text="Файл выбран", text_color="#27AE60",
+                                   font=(*FONT_HEADING[:2], "bold"))
+        self.drop_sub.configure(
+            text=f"📄  {name}",
+            text_color=NAVY,
+            font=(*FONT_NORMAL[:2], "bold"),
+        )
+        self.file_lbl.configure(text="", text_color=TEXT_SECONDARY)
         self.send_btn.configure(state="normal")
 
     # ── Send ─────────────────────────────────────────────────────────────────
 
     def _get_selected_segments(self) -> list:
-        """Возвращает список выбранных сегментов; если ничего — берём сегмент пользователя."""
+        """Возвращает список выбранных сегментов (пустой если ни один не включён)."""
         segs = []
         if self._seg_ss.get():  segs.append("ss")
         if self._seg_os.get():  segs.append("os")
         if self._seg_sil.get(): segs.append("sil")
-        return segs if segs else [getattr(self.app.cfg, "user_segment", "ss")]
+        return segs
 
     def on_login(self):
         """Вызывается после логина — устанавливаем переключатель сегмента пользователя."""
@@ -364,12 +375,21 @@ class UploadPage(ctk.CTkFrame):
     def _send(self):
         if not self._path or self._processing:
             return
+        # Проверяем, что выбран хотя бы один сегмент
+        segments = self._get_selected_segments()
+        if not segments:
+            messagebox.showwarning(
+                "Сегмент не выбран",
+                "Пожалуйста, выберите хотя бы один сегмент базы\n"
+                "(Слаботочные / Освещение / Силовые)\n"
+                "перед отправкой на обработку."
+            )
+            return
         self._processing = True
         self.send_btn.configure(state="disabled")
         self.browse_btn.configure(state="disabled")
         self._start_progress()
         ai = self._ai_mode.get()
-        segments = self._get_selected_segments()
 
         def _worker():
             try:
@@ -437,7 +457,13 @@ class UploadPage(ctk.CTkFrame):
         self._processing = False
         self.send_btn.configure(state="disabled")
         self.file_lbl.configure(text=t("upload_no_file"), text_color=TEXT_SECONDARY)
-        self.drop_zone.configure(border_color="#AEB6BF", fg_color=BG_CARD)
+        # Возвращаем drop-зону в исходное состояние
+        self.drop_zone.configure(border_color="#AEB6BF", fg_color=BG_CARD, border_width=2)
+        self.drop_icon.configure(text="📄", font=("Segoe UI Emoji", 52))
+        self.drop_title.configure(text=t("upload_drop_title"), text_color=NAVY,
+                                   font=FONT_HEADING)
+        self.drop_sub.configure(text=t("upload_drop_sub"), text_color=TEXT_SECONDARY,
+                                 font=FONT_NORMAL)
         self.progress.set(0)
         self._prog_frame.grid_remove()
 

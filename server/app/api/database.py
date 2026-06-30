@@ -327,61 +327,75 @@ async def get_base_template(
 
 @router.get("/products/search")
 async def search_products(
-    q:       str = Query(default="", description="Поиск по артикулу ИЛИ названию (оба поля)"),
-    article: str = Query(default="", description="Поиск только по артикулу"),
-    name:    str = Query(default="", description="Поиск только по названию"),
-    limit:   int = Query(default=20, ge=1, le=100),
-    db:      AsyncSession = Depends(get_db),
-    _auth:   str = Depends(verify_any_auth),
+    q:            str = Query(default="", description="Единый поиск: артикул / наименование / код КазНИИСА"),
+    article:      str = Query(default="", description="Поиск только по артикулу (legacy)"),
+    name:         str = Query(default="", description="Поиск только по названию (legacy)"),
+    kaznisa_code: str = Query(default="", description="Поиск по коду КазНИИСА"),
+    segment:      str = Query(default="", description="Фильтр по сегменту: ss / os / sil"),
+    limit:        int = Query(default=30, ge=1, le=100),
+    db:           AsyncSession = Depends(get_db),
+    _auth:        str = Depends(verify_any_auth),
 ):
     """
-    Поиск товаров по артикулу и/или названию.
-    - article= → поиск только по артикулу (когда заполнено поле «Артикул»)
-    - name=    → поиск только по названию  (когда заполнено поле «Название»)
-    - q=       → поиск по обоим полям (fallback для старых клиентов)
-    Используется в ArticleSearchDialog (Phase 2.6).
+    Единый поиск товаров — ищет одновременно по артикулу, наименованию и коду КазНИИСА.
+    - q=           → ищет во всех трёх полях (OR)
+    - kaznisa_code → дополнительный фильтр по коду
+    - segment=     → фильтр по сегменту (ss / os / sil); пусто = все сегменты
+    Используется в ArticleSearchDialog.
     """
     from sqlalchemy import or_, and_
 
-    art = (article or "").strip()
-    nm  = (name    or "").strip()
-    qry = (q       or "").strip()
+    qry  = (q            or "").strip()
+    art  = (article      or "").strip()
+    nm   = (name         or "").strip()
+    code = (kaznisa_code or "").strip()
+    seg  = (segment      or "").strip().lower()
 
-    if not art and not nm and not qry:
+    if not qry and not art and not nm and not code:
         return {"products": [], "total": 0}
 
     conditions = []
     order_extra = []
 
-    if art:
-        # Точный поиск только по полю article (ilike = case-insensitive LIKE)
+    # Основной поиск: q ищет во всех трёх полях одновременно (OR)
+    if qry:
+        conditions.append(or_(
+            Product.article.ilike(f"%{qry}%"),
+            Product.name.ilike(f"%{qry}%"),
+            Product.kaznisa_code.ilike(f"%{qry}%"),
+        ))
+        order_extra += [
+            (func.lower(Product.article) == qry.lower()).desc(),
+            Product.article.ilike(f"{qry}%").desc(),
+            (func.lower(Product.kaznisa_code) == qry.lower()).desc(),
+        ]
+
+    # Legacy: отдельные поля article= и name=
+    if not qry and art:
         conditions.append(Product.article.ilike(f"%{art}%"))
         order_extra += [
             (func.lower(Product.article) == art.lower()).desc(),
             Product.article.ilike(f"{art}%").desc(),
         ]
-
-    if nm:
+    if not qry and nm:
         conditions.append(Product.name.ilike(f"%{nm}%"))
 
-    if not conditions and qry:
-        # Fallback: ищем по обоим полям одновременно
-        conditions.append(or_(
-            Product.article.ilike(f"%{qry}%"),
-            Product.name.ilike(f"%{qry}%"),
-        ))
-        order_extra += [
-            (func.lower(Product.article) == qry.lower()).desc(),
-            Product.article.ilike(f"{qry}%").desc(),
-        ]
+    # Дополнительный фильтр по коду КазНИИСА
+    if code:
+        conditions.append(Product.kaznisa_code.ilike(f"%{code}%"))
 
-    # article AND name → AND-условие (сужаем выборку)
-    where_clause = (
-        and_(*conditions) if len(conditions) > 1
-        else conditions[0]
-    )
+    if not conditions:
+        return {"products": [], "total": 0}
+
+    # AND между условиями (сужаем)
+    where_clause = and_(*conditions) if len(conditions) > 1 else conditions[0]
 
     stmt = select(Product).where(Product.is_active == True, where_clause)
+
+    # Фильтр по сегменту
+    if seg and seg in ("ss", "os", "sil"):
+        stmt = stmt.where(Product.segment == seg)
+
     if order_extra:
         stmt = stmt.order_by(*order_extra)
     stmt = stmt.limit(limit)
