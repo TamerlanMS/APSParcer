@@ -358,11 +358,17 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
-    def start_vectorization(self) -> dict:
-        """Запускает ручную векторизацию товаров в Pinecone (только admin)."""
+    def start_vectorization(self, segment: str = "all") -> dict:
+        """Запускает ручную векторизацию товаров в Pinecone (только admin).
+
+        Args:
+            segment: "ss", "os", "sil" или "all" (по умолчанию — все сегменты).
+        """
+        params = {} if segment == "all" else {"segment": segment}
         r = requests.post(
             f"{self._base}/api/v1/database/vectorize",
             headers=self._h,
+            params=params,
             timeout=15,
         )
         r.raise_for_status()

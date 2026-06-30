@@ -336,7 +336,7 @@ class DatabasePage(ctk.CTkFrame):
             messagebox.showinfo("OK", msg)
 
     def _start_vectorization(self):
-        """Запускает переиндексацию Pinecone для сегмента (только для администраторов)."""
+        """Запускает переиндексацию Pinecone для выбранного сегмента (только для администраторов)."""
         if self._is_admin():
             label = self._import_seg_var.get()
             try:
@@ -346,10 +346,12 @@ class DatabasePage(ctk.CTkFrame):
         else:
             seg = getattr(self.app.config, "user_segment", "ss")
 
+        seg_display = label if self._is_admin() else seg
+
         def _worker():
             try:
-                result = self.api.start_vectorization()
-                msg = result.get("message", "Векторизация запущена")
+                result = self.api.start_vectorization(segment=seg)
+                msg = result.get("message", f"Векторизация сегмента «{seg_display}» запущена")
                 self.after(0, lambda: messagebox.showinfo("Векторизация", msg))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Ошибка векторизации", str(e)))

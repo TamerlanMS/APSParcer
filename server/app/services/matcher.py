@@ -60,6 +60,11 @@ _BRAND_SUFFIX_RE = re.compile(
 # Sub-item numbering prefix: "1 / ", "2/ " etc. (assembly щит rows).
 _SUBITEM_PREFIX_RE = re.compile(r"^\d+\s*/\s*", re.UNICODE)
 
+# Cyrillic character range for optional stripping in sil-segment matching.
+_CYRILLIC_RE = re.compile(r"[А-ЯЁа-яё]")
+# Minimum length of a Cyrillic-stripped article to attempt matching (avoid garbage like "-").
+_NOCYR_MIN_LEN = 3
+
 
 def normalize(text: str) -> str:
     if not text:
@@ -152,7 +157,8 @@ class _ProductIndex:
     """Built once per match_items call; holds pre-normalised product strings."""
 
     __slots__ = ("products", "norm_art", "norm_name", "norm_code",
-                 "art_exact", "code_exact", "name_exact")
+                 "norm_art_nocyr",
+                 "art_exact", "art_nocyr_exact", "code_exact", "name_exact")
 
     def __init__(self, products: List[Product]):
         self.products  = products
@@ -160,10 +166,19 @@ class _ProductIndex:
         self.norm_name = [normalize(p.name         or '') for p in products]
         self.norm_code = [normalize(p.kaznisa_code or '') for p in products]
 
+        # Cyrillic-stripped variants of articles (used for sil-segment matching).
+        self.norm_art_nocyr = [_CYRILLIC_RE.sub('', na).strip() for na in self.norm_art]
+
         self.art_exact: Dict[str, List[int]] = {}
         for i, na in enumerate(self.norm_art):
             if na:
                 self.art_exact.setdefault(na, []).append(i)
+
+        # O(1) lookup for Cyrillic-stripped article exact matches.
+        self.art_nocyr_exact: Dict[str, List[int]] = {}
+        for i, na in enumerate(self.norm_art_nocyr):
+            if na and len(na) >= _NOCYR_MIN_LEN:
+                self.art_nocyr_exact.setdefault(na, []).append(i)
 
         self.code_exact: Dict[str, List[int]] = {}
         for i, nc in enumerate(self.norm_code):
@@ -181,6 +196,7 @@ def find_candidates(
     index: _ProductIndex,
     kaznisa_code_raw: str = '',
     name_raw: str = '',
+    strip_cyrillic: bool = False,
 ) -> List[Dict]:
     """Return ranked candidates.
 
@@ -189,6 +205,7 @@ def find_candidates(
       1b. Exact article after brand-suffix strip  ('ВА47-29 IEK' -> 'ВА47-29')
       1c. Exact KazNIISA code match   (O(1) -- only 10-digit codes, only when article missing)
       2.  Substring / fuzzy article   (O(n) -- model numbers, tries stripped variant too)
+      2d. Cyrillic-stripped article match (only when strip_cyrillic=True, e.g. os segment)
       3.  Name-based fallback         (O(n) -- only when article gives nothing)
     """
     norm_q = normalize(article_raw)
@@ -197,6 +214,9 @@ def find_candidates(
 
     if not norm_q and not norm_name_q:
         return []
+
+    # Cyrillic-stripped query variant (used only when strip_cyrillic=True).
+    norm_q_nocyr = _CYRILLIC_RE.sub('', norm_q).strip() if strip_cyrillic else ""
 
     products  = index.products
     norm_art  = index.norm_art
@@ -274,6 +294,53 @@ def find_candidates(
 
         if candidates:
             return candidates[:5]
+
+    # ---- 2d. Cyrillic-stripped article match (os segment only) -----------------
+    # For lighting databases (e.g. WV 0001.X) where articles are numeric/Latin but
+    # PDF specs may include Cyrillic prefixes. Strip Cyrillic from both query and
+    # DB articles, then repeat exact + fuzzy search.
+    if strip_cyrillic and norm_q_nocyr and len(norm_q_nocyr) >= _NOCYR_MIN_LEN:
+        norm_art_nocyr = index.norm_art_nocyr
+        seen_nocyr: set = set()
+        nocyr_cands: List[Dict] = []
+
+        # 2d-i. Exact lookup in Cyrillic-stripped article index (O(1))
+        if norm_q_nocyr in index.art_nocyr_exact:
+            for i in index.art_nocyr_exact[norm_q_nocyr]:
+                nocyr_cands.append({"product": products[i], "score": EXACT_SCORE, "method": "exact_nocyr"})
+                seen_nocyr.add(i)
+            return nocyr_cands[:1]
+
+        # Also try brand-stripped variant of nocyr query
+        norm_q_nocyr_stripped = _strip_brand_suffix(norm_q_nocyr)
+        if norm_q_nocyr_stripped and norm_q_nocyr_stripped in index.art_nocyr_exact:
+            for i in index.art_nocyr_exact[norm_q_nocyr_stripped]:
+                nocyr_cands.append({"product": products[i], "score": EXACT_SCORE, "method": "exact_nocyr"})
+                seen_nocyr.add(i)
+            return nocyr_cands[:1]
+
+        # 2d-ii. Substring / fuzzy against Cyrillic-stripped DB articles
+        nq = norm_q_nocyr
+        for i, na in enumerate(norm_art_nocyr):
+            if not na or len(na) < _NOCYR_MIN_LEN:
+                continue
+            if nq in na or na in nq:
+                _len_ratio = min(len(nq), len(na)) / max(len(nq), len(na), 1)
+                if _len_ratio >= _CONTAINS_LEN_RATIO:
+                    nocyr_cands.append({"product": products[i], "score": CONTAINS_SCORE, "method": "contains_nocyr"})
+                    seen_nocyr.add(i)
+
+        for _, score, idx in _rfp.extract(
+            nq, norm_art_nocyr, scorer=fuzz.token_sort_ratio,
+            limit=10, score_cutoff=FUZZY_THRESHOLD,
+        ):
+            if idx not in seen_nocyr and len(norm_art_nocyr[idx]) >= _NOCYR_MIN_LEN:
+                nocyr_cands.append({"product": products[idx], "score": score, "method": "fuzzy_nocyr"})
+                seen_nocyr.add(idx)
+
+        if nocyr_cands:
+            nocyr_cands.sort(key=lambda x: x['score'], reverse=True)
+            return nocyr_cands[:5]
 
     # ---- 3. Name-based fallback (batch) ----------------------------------------
     # Very strict: only engage when the name is specific enough (>= _NAME_MIN_LEN chars)
@@ -360,12 +427,18 @@ async def match_items(
     # В других сегментах (ss, os) коды КазНИИСА не используются — отключаем.
     _use_kaznisa_code = "sil" in search_all
 
+    # Для сегмента освещения (os) кириллицу в артикулах не учитываем:
+    # базы освещения (напр. WV 0001.X "Световые технологии") используют числовые/латинские
+    # артикулы, а PDF-спецификации могут добавлять кириллические префиксы/суффиксы.
+    _strip_cyrillic = "os" in search_all
+
     for item in pdf_items:
         all_candidates = find_candidates(
             item.get("article_raw", "") or "",
             index,
             kaznisa_code_raw=(item.get("kaznisa_code_raw", "") or "") if _use_kaznisa_code else "",
             name_raw=item.get("name_raw", "") or "",
+            strip_cyrillic=_strip_cyrillic,
         )
 
         # Фильтруем кандидатов по выбранным сегментам

@@ -8,7 +8,7 @@ Vectorization guard conditions (both must be true, unless force=True):
 
 Pinecone namespace mapping:
   ss  → "products_ss"   (Слаботочные системы)  — vectorizes on Monday (0)
-  os  → "products_os"   (Осветительные системы) — vectorizes on Wednesday (2)
+  os  → "products_os"   (Осветительные системы) — vectorizes on Tuesday (1)
   sil → "products_sil"  (Силовые системы)        — vectorizes on Friday (4)
 """
 from __future__ import annotations
@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 # ── Segment → Pinecone namespace + vectorization weekday ─────────────────────
 SEGMENT_NAMESPACE = {
     "ss":  "products_ss",   # Monday
-    "os":  "products_os",   # Wednesday
+    "os":  "products_os",   # Tuesday
     "sil": "products_sil",  # Friday
 }
 SEGMENT_WEEKDAY = {
     "ss":  0,   # Monday
-    "os":  2,   # Wednesday
+    "os":  1,   # Tuesday
     "sil": 4,   # Friday
 }
 
