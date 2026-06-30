@@ -22,6 +22,7 @@ C_SELECT   = "#C8DFFF"
 C_AI       = "#B0BEC5"   # серебристый — ИИ-совпадение (высокая уверенность)
 C_AI_LOW   = "#F5F5F5"   # почти белый — ИИ-совпадение (низкая уверенность, требует проверки)
 C_MANAGER  = "#EDE7F6"   # сиреневый — подобрано из истории выборов менеджеров
+C_HEADING  = "#D6EAF8"   # голубой — строка-заголовок раздела (is_heading=True)
 
 
 # Колонки строго в порядке WV 4.0 + два служебных
@@ -747,6 +748,8 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("ai",       background=C_AI)
         self.tree.tag_configure("ai_low",   background=C_AI_LOW)
         self.tree.tag_configure("manager",  background=C_MANAGER)
+        self.tree.tag_configure("heading",  background=C_HEADING,
+                                font=("Calibri", 12, "bold"))
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
@@ -1143,6 +1146,14 @@ class PreviewPage(ctk.CTkFrame):
         status       = item.get("status", "not_found")
         match_method = item.get("match_method")
 
+        if status == "heading":
+            # Section-header row — render as a bold blue separator spanning the name column
+            heading_name = item.get("name_raw", "").replace("\n", " ").strip()
+            vals = ("", "", "", heading_name, "", "", "", "", "", "", "", "", "", "", "", "", "")
+            iid = self.tree.insert("", position, values=vals, tags=("heading",))
+            item["_iid"] = iid
+            return iid
+
         if status == "exact":
             tag, stxt = "exact",    t("status_exact")
         elif status == "multiple":
@@ -1224,7 +1235,8 @@ class PreviewPage(ctk.CTkFrame):
         return iid
 
     def _update_stats(self):
-        total    = len(self.items)
+        # Exclude section-header rows from all counters
+        total    = sum(1 for i in self.items if i.get("status") != "heading")
         exact    = sum(1 for i in self.items if i.get("status") == "exact")
         warn     = sum(1 for i in self.items if i.get("status") in ("multiple", "fuzzy"))
         ai_match = sum(1 for i in self.items if i.get("status") == "ai_match")
@@ -1309,6 +1321,10 @@ class PreviewPage(ctk.CTkFrame):
         result = []
         for item in self.items:
             status = item.get("status", "not_found")
+            # Section-header rows always pass through filters (they provide context)
+            if status == "heading":
+                result.append(item)
+                continue
             if self._filter_mode == "warn" and status not in ("multiple", "fuzzy"):
                 continue
             if self._filter_mode == "nf" and status != "not_found":

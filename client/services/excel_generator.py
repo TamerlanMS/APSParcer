@@ -936,9 +936,13 @@ def generate_excel(
         print("[Excel] Using server-side base template — skipping БД/Const fill")
 
     # 3. Заполняем лист WV 4.0 (только вводные колонки)
-    _clear_input_rows(ws, start_row=2, end_row=max(465, 2 + len(items)))
+    # Filter out section-header rows before writing to Excel — they have no
+    # article/price data and would corrupt row numbering and formula ranges.
+    excel_items = [it for it in items if it.get("status") != "heading"]
 
-    for i, item in enumerate(items):
+    _clear_input_rows(ws, start_row=2, end_row=max(465, 2 + len(excel_items)))
+
+    for i, item in enumerate(excel_items):
         row = 2 + i
         bm      = item.get("best_match") or {}
         brand   = bm.get("brand") or ""
@@ -1009,8 +1013,8 @@ def generate_excel(
             ws.cell(row=row, column=WV_DELIVERY, value=delivery)
 
     # Расширяем формулы WV для строк за пределами шаблона (цены, кратность)
-    if len(items) > 0:
-        _extend_wv_formulas(ws, 2 + len(items) - 1)
+    if len(excel_items) > 0:
+        _extend_wv_formulas(ws, 2 + len(excel_items) - 1)
 
     # 4. Заполняем шапку и данные листа КП
     try:

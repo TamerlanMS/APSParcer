@@ -439,6 +439,10 @@ async def match_items_ai(
         label = (item.get("name_raw") or item.get("article_raw") or "?")[:50]
         classic_status = classic.get("status")
 
+        # Section-header row — pass through without any AI processing.
+        if classic_status == "heading":
+            return {**classic, "ai_used": False}
+
         # Exact/multiple/fuzzy — классический матчер уже нашёл кандидата(ов).
         # Пропускаем ИИ: жёлтые (multiple/fuzzy) должны оставаться на проверке менеджера.
         if classic_status in ("exact", "multiple", "fuzzy"):

@@ -128,9 +128,11 @@ async def _process_batch(batch: List[Dict], offset: int) -> None:
         logger.error("tech_params: OpenAI client error: %s", exc)
         return
 
-    # Compose item lines
+    # Compose item lines (skip section-header rows)
     lines: List[str] = []
     for i, item in enumerate(batch):
+        if item.get("is_heading"):
+            continue
         name = (item.get("name_raw") or "").strip()[:250]
         art  = (item.get("article_raw") or "").strip()[:60]
         if art:

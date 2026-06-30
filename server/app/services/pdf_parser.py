@@ -638,9 +638,15 @@ def _is_pos_value(cell) -> Optional[str]:
     s = str(cell).strip().rstrip(".")
     if not s:
         return None
+    if s == "-":
+        return None
     if s.isdigit():
         return s
     if re.match(r"^\d+\.\d+$", s):
+        return s
+    # Named position identifiers: ВРУ-1, ШАВР-1, ЩС-ТХ1.2, ИБП, ШУЗ, etc.
+    # Must start with Cyrillic/Latin uppercase and be short (no whitespace).
+    if len(s) <= 25 and re.match(r"^[А-ЯЁA-Z]", s) and not re.search(r"\s", s):
         return s
     return None
 
@@ -787,6 +793,7 @@ def extract_specification_from_page(
     for row in table[data_start:]:
         if not isinstance(row, (list, tuple)):
             continue
+        _is_heading_row = False   # reset each iteration; set True for section headers
         if "pos" in cols:
             pos_raw = _cell(row, cols["pos"])
             pos_val = _is_pos_value(pos_raw)
@@ -816,28 +823,33 @@ def extract_specification_from_page(
                     re.match(r"^\d+\s*[/\)]\s", _row_name)
                 ) if _row_name else False
 
-                # Section header rows like "1. Пожарная сигнализация" or
-                # "2. Оповещение о пожаре" have no article and no code.
+                # Section header rows like "1. Пожарная сигнализация",
+                # "2. Оповещение о пожаре", or "1.Щитовое оборудование"
+                # have no article and no code.  The space after the dot is
+                # optional — some CAD templates omit it.
                 # They must be kept as standalone items, not silently dropped.
                 _is_section_header = bool(
-                    re.match(r"^\d+\.\s+\S", _row_name)
+                    re.match(r"^\d+\.\s*\S", _row_name)
                 ) if (_row_name and not _row_art_norm and not _row_code) else False
 
                 if _is_dash or _is_numbered_subitem or _is_section_header:
-                    # Explicit dash rows and numbered kit sub-items → standalone item
+                    # Explicit dash rows, numbered kit sub-items, and section
+                    # headers → standalone item
                     auto_num += 1
                     pos = f"-{auto_num}"
+                    _is_heading_row = _is_section_header   # propagate to item creation
                     # fall through to normal item processing
                 elif _has_content:
-                    # Row has name + real article but no position number and is NOT
-                    # a numbered sub-item.  Usually treat as a description-continuation
-                    # row that carries the article/unit/qty of the parent item.
-                    # EXCEPTION: if the previous item is already fully populated
-                    # (has its own code) AND the current row brings its own code,
-                    # then this is a separate item that lost its position number —
-                    # create it as an auto-numbered standalone item instead.
+                    # Row has name + real article/code but no position number.
+                    # Three cases:
+                    #   A) Previous item complete (has code) + this row has code →
+                    #      standalone item (the row that lost its position number).
+                    #   B) Previous item exists but lacks code/article →
+                    #      continuation: propagate fields into previous item.
+                    #   C) No previous items (start of continuation page) →
+                    #      create standalone rather than silently dropping.
                     if items and items[-1]["kaznisa_code_raw"] and _row_code:
-                        # Previous item already complete; treat as new standalone item
+                        # (A) Previous item already complete; treat as new standalone
                         auto_num += 1
                         pos = f"-{auto_num}"
                         # fall through to normal item processing below
@@ -859,7 +871,10 @@ def extract_specification_from_page(
                             prev["kaznisa_code_raw"] = cont_code
                         continue
                     else:
-                        continue
+                        # (C) Continuation page — no prior items; emit as standalone
+                        auto_num += 1
+                        pos = f"-{auto_num}"
+                        # fall through to normal item processing below
                 else:
                     # Continuation row with no article: merge qty/unit/code only
                     _row_name_raw = _cell(row, cols.get("name"))
@@ -908,7 +923,9 @@ def extract_specification_from_page(
             continue
 
         full_text = (name + " " + article).lower()
-        if any(kw in full_text for kw in SKIP_KEYWORDS) and not code:
+        # Heading rows are never filtered by SKIP_KEYWORDS — they intentionally
+        # contain words like "оборудование", "кабели", "кабеленесущие", etc.
+        if not _is_heading_row and any(kw in full_text for kw in SKIP_KEYWORDS) and not code:
             continue
         # If the article is a ГОСТ/СТ РК reference — clear it, keep the row
         article = _strip_standard_article(article)
@@ -922,14 +939,17 @@ def extract_specification_from_page(
             if _sec:
                 name = (_sec + " " + name).strip()
 
-        items.append({
+        _item: Dict = {
             "pos":              pos,
             "name_raw":         name,
             "article_raw":      normalize_article(article),
             "kaznisa_code_raw": code,
-            "unit":             unit or "шт.",
-            "qty":              qty,
-        })
+            "unit":             "" if _is_heading_row else (unit or "шт."),
+            "qty":              0  if _is_heading_row else qty,
+        }
+        if _is_heading_row:
+            _item["is_heading"] = True
+        items.append(_item)
 
     # Quality gate: if we relied on continuation_cols and the extracted data
     # looks like garbage (huge quantities, no useful names/articles),
@@ -1502,12 +1522,18 @@ def parse_pdf_specification(
 
     # Renumber sequentially + normalise qty to float
     # (Vision OCR path returns qty as a raw string like "0,29" or "3500")
-    for idx, item in enumerate(all_items, start=1):
-        item["pos"] = str(idx)
+    # Use a separate counter so heading rows do not consume position numbers
+    # (headings skip renumbering, so items get 1, 2, 3... without gaps).
+    _real_pos = 0
+    for item in all_items:
+        if item.get("is_heading"):
+            continue
+        _real_pos += 1
+        item["pos"] = str(_real_pos)
         raw_qty = item.get("qty", 1)
         if not isinstance(raw_qty, (int, float)):
             item["qty"] = extract_qty(raw_qty)
-        # Normalise unit_raw → unit (Vision uses unit_raw, pdfplumber uses unit)
+        # Normalise unit_raw -> unit (Vision uses unit_raw, pdfplumber uses unit)
         if "unit_raw" in item and "unit" not in item:
             item["unit"] = item.pop("unit_raw")
 

@@ -430,11 +430,29 @@ async def match_items(
     # к тому, что позиции с кодом КазНИИСА в os-базе не находились.
     # Фильтрация нестандартных кодов происходит внутри find_candidates (10-значная проверка).
 
-    # Для сегмента освещения (os) кириллицу в артикулах не учитываем:
-    # базы освещения (напр. WV 0001.X) используют числовые/латинские артикулы.
-    _strip_cyrillic = "os" in search_all
+    # strip_cyrillic отключён: базы освещения теперь содержат кириллические
+    # артикулы и должны находиться через стандартный путь (шаги 1-3).
+    # Шаг 2d (strip_cyrillic) в find_candidates не используется.
+    _strip_cyrillic = False
 
     for item in pdf_items:
+        # Section-header rows must pass through without matching
+        if item.get("is_heading"):
+            results.append({
+                "pos":              item.get("pos"),
+                "name_raw":         item.get("name_raw", ""),
+                "article_raw":      "",
+                "kaznisa_code_raw": "",
+                "qty":              0,
+                "unit":             "",
+                "status":           "heading",
+                "match_method":     None,
+                "best_match":       None,
+                "candidates":       [],
+                "is_heading":       True,
+            })
+            continue
+
         all_candidates = find_candidates(
             item.get("article_raw", "") or "",
             index,
