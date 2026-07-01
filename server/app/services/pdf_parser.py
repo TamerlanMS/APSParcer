@@ -794,6 +794,7 @@ def extract_specification_from_page(
         if not isinstance(row, (list, tuple)):
             continue
         _is_heading_row = False   # reset each iteration; set True for section headers
+        _panel_code_for_sub = ""  # щиток own code to re-emit as standalone after heading
         if "pos" in cols:
             pos_raw = _cell(row, cols["pos"])
             pos_val = _is_pos_value(pos_raw)
@@ -858,18 +859,40 @@ def extract_specification_from_page(
                         cont_qty  = _cell(row, cols.get("qty"))
                         cont_unit = _cell(row, cols.get("unit"))
                         cont_code = _get_code(row, cols.get("code"))
-                        # Propagate article if previous item has none
-                        if _row_art_norm and not prev["article_raw"]:
-                            prev["article_raw"] = _row_art_norm
-                        # Propagate unit/qty (last row wins — it usually has the
-                        # correct unit like "ком-т" vs the default "шт.")
-                        if cont_qty:
-                            prev["qty"] = extract_qty(cont_qty)
-                        if cont_unit:
-                            prev["unit"] = cont_unit
-                        if cont_code and not prev["kaznisa_code_raw"]:
-                            prev["kaznisa_code_raw"] = cont_code
-                        continue
+                        # Named panel items (pos="ВРУ-1", "ШАВР-1" …) are group
+                        # headers whose sub-components carry their own codes.
+                        # Detect: pos doesn't start with a digit and isn't an
+                        # auto-number ("-N") — i.e. it's an alphanumeric identifier.
+                        _prev_pos = prev.get("pos", "")
+                        _prev_is_panel = (
+                            bool(_prev_pos)
+                            and not _prev_pos[0].isdigit()
+                            and not _prev_pos.startswith("-")
+                            and not prev.get("is_heading")
+                        )
+                        _prev_code = prev.get("kaznisa_code_raw", "") or ""
+                        _codes_differ = (
+                            cont_code and _prev_code
+                            and cont_code.strip() != _prev_code.strip()
+                        )
+                        if (_prev_is_panel or prev.get("is_heading") or _codes_differ) and cont_code:
+                            # (B2) Sub-component of named panel / heading,
+                            # OR previous item already has a DIFFERENT code
+                            # (щит sub-items each with their own codes).
+                            auto_num += 1
+                            pos = f"-{auto_num}"
+                            # fall through to normal item processing below
+                        else:
+                            # (B1) True continuation: fill in missing fields of prev
+                            if _row_art_norm and not prev["article_raw"]:
+                                prev["article_raw"] = _row_art_norm
+                            if cont_qty:
+                                prev["qty"] = extract_qty(cont_qty)
+                            if cont_unit:
+                                prev["unit"] = cont_unit
+                            if cont_code and not prev["kaznisa_code_raw"]:
+                                prev["kaznisa_code_raw"] = cont_code
+                            continue
                     else:
                         # (C) Continuation page — no prior items; emit as standalone
                         auto_num += 1
@@ -922,6 +945,15 @@ def extract_specification_from_page(
         if not name and not article and not code:
             continue
 
+        # Named equipment-panel / щиток IDs (ВРУ-1, ШАВР-1, ЩC-ТХ1.2.19…)
+        # are ALWAYS group headings, even when the щиток row has its own
+        # KazNIISA code (that code is preserved as a standalone sub-item below).
+        if not _is_heading_row:
+            _pcheck = pos
+            if _pcheck and not _pcheck[0].isdigit() and not _pcheck.startswith("-"):
+                _is_heading_row = True
+                _panel_code_for_sub = code or ""
+
         full_text = (name + " " + article).lower()
         # Heading rows are never filtered by SKIP_KEYWORDS — they intentionally
         # contain words like "оборудование", "кабели", "кабеленесущие", etc.
@@ -939,9 +971,15 @@ def extract_specification_from_page(
             if _sec:
                 name = (_sec + " " + name).strip()
 
+        # For panel-group headings (pos="ВРУ-1" etc.) prepend the ID to the
+        # name so preview shows "ВРУ-1  Вводно-распределительное устройство..."
+        _heading_name = name
+        if _is_heading_row and pos and not pos.startswith("-"):
+            _heading_name = f"{pos}  {name}".strip()
+
         _item: Dict = {
             "pos":              pos,
-            "name_raw":         name,
+            "name_raw":         _heading_name if _is_heading_row else name,
             "article_raw":      normalize_article(article),
             "kaznisa_code_raw": code,
             "unit":             "" if _is_heading_row else (unit or "шт."),
@@ -950,6 +988,22 @@ def extract_specification_from_page(
         if _is_heading_row:
             _item["is_heading"] = True
         items.append(_item)
+
+        # When the щиток heading row carried its own KazNIISA code (e.g.
+        # ЩC-ТХ1.2.19 → 247-201-0108 "Щит распределительный навесной"),
+        # also emit that корпус as a regular standalone position so it
+        # appears in the spec and goes to Excel.
+        if _is_heading_row and _panel_code_for_sub:
+            auto_num += 1
+            _panel_sub: Dict = {
+                "pos":              f"-{auto_num}",
+                "name_raw":         name,
+                "article_raw":      normalize_article(article),
+                "kaznisa_code_raw": _panel_code_for_sub,
+                "unit":             unit or "шт.",
+                "qty":              qty,
+            }
+            items.append(_panel_sub)
 
     # Quality gate: if we relied on continuation_cols and the extracted data
     # looks like garbage (huge quantities, no useful names/articles),

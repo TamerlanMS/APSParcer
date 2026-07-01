@@ -4,6 +4,8 @@ matcher_ai.py — Phase 2 AI-powered hybrid matcher.
 Matching pipeline per item:
   1. Classic matcher (rapidfuzz) — fast, free, handles exact/fuzzy articles
   2. Exact article match → returned as-is (authoritative)
+  2.5. Direct DB SQL lookup by KazNIISA code (10 digits) — bypasses stale
+       in-memory index; always returns exact match before AI is tried.
   3. Everything else (fuzzy, multiple, not_found) → AI verification:
        a. Vector search (Pinecone cosine similarity) — semantic
        b. If top vector score < AI_CONFIDENCE_THRESHOLD → not_found
@@ -20,7 +22,9 @@ import json
 import logging
 from typing import List, Dict, Optional
 
-from sqlalchemy import text
+import re
+
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -200,6 +204,46 @@ async def _match_one_ai(
     # "- на вводе выключатель нагрузки ..." -> "выключатель нагрузки ..."
     # "- на линий автоматический выключатель ..." -> "автоматический выключатель ..."
     # "Щит модульный навесной 24 модулей, IP54, в том числе:" -> strip trailing part
+    # ── Шаг 0.5: прямой SQL по коду КазНИИСА ДО embedding/AI ─────────────────
+    # in-memory индекс может пропустить товар (устаревший кэш или другой формат
+    # кода) — делаем прямой запрос к БД: "сначала база, потом ИИ".
+    _kaz_raw    = item.get("kaznisa_code_raw", "") or ""
+    _kaz_digits = re.sub(r"\D", "", _kaz_raw)
+    if len(_kaz_digits) == 10:
+        try:
+            _kaz_stmt = select(Product).where(
+                func.regexp_replace(Product.kaznisa_code, r"\D", "", "g") == _kaz_digits
+            )
+            if segments:
+                _kaz_stmt = _kaz_stmt.where(Product.segment.in_(segments))
+            _kaz_db = (await db.execute(_kaz_stmt.limit(1))).scalar_one_or_none()
+            if _kaz_db:
+                _kaz_pdict = product_to_dict(_kaz_db)
+                logger.info(
+                    "_match_one_ai: Шаг 0.5 — код %s → %s (DB прямой, до AI)",
+                    _kaz_raw, _kaz_db.article,
+                )
+                return {
+                    **classic_result,
+                    "name_db":      _kaz_pdict.get("name", ""),
+                    "article":      _kaz_pdict.get("article", ""),
+                    "kaznisa_code": (_kaz_db.kaznisa_code or "").strip(),
+                    "unit_db":      _kaz_pdict.get("unit", ""),
+                    "kaznisa":      _kaz_pdict.get("kaznisa"),
+                    "rrts":         _kaz_pdict.get("rrts"),
+                    "mrc":          _kaz_pdict.get("mrc"),
+                    "opt":          _kaz_pdict.get("opt"),
+                    "partner":      _kaz_pdict.get("partner"),
+                    "status":       "exact",
+                    "match_method": "code_exact_preai",
+                    "ai_used":      False,
+                    "ai_reason":    "найден в БД по коду КазНИИСА (до AI)",
+                    "best_match":   _kaz_pdict,
+                    "candidates":   [{**_kaz_pdict, "score": 100, "method": "code_exact_preai"}],
+                }
+        except Exception as _kaz_exc:
+            logger.debug("_match_one_ai: Шаг 0.5 SQL-поиск упал: %s", _kaz_exc)
+
     import re as _re
     name_clean = name_raw
     name_clean = _re.sub(
