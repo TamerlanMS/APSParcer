@@ -1429,6 +1429,47 @@ def parse_pdf_specification(
     last_spec_cols: Optional[Dict] = None
     best_proj_name: str = ""
 
+    # ── CID-font early check (AutoCAD / CAD PDFs) ────────────────────────────
+    # AutoCAD embeds Cyrillic via custom CID fonts — pdfplumber extracts garbage
+    # text "(cid:NNN)" or Latin-Extended-B surrogates. The PDF looks "text-based"
+    # so the normal OCR fallback (guarded by `not all_items`) never fires.
+    # Detect CID encoding BEFORE running pdfplumber and go straight to OCR.
+    if (_TESSERACT_AVAILABLE or _OPENAI_API_KEY) and _FITZ_AVAILABLE:
+        try:
+            import concurrent.futures as _cf_cid
+            _cid_ex = _cf_cid.ThreadPoolExecutor(max_workers=1)
+            try:
+                _cid_fut = _cid_ex.submit(_is_scanned_pdf, pdf_bytes)
+                _is_cid = _cid_fut.result(timeout=15)
+            except Exception:
+                _is_cid = False
+            finally:
+                _cid_ex.shutdown(wait=False)
+
+            if _is_cid:
+                logger.info("parse_pdf: CID-encoded / scanned PDF detected — "
+                            "skipping pdfplumber, routing to OCR")
+                if progress_cb:
+                    progress_cb(15, "ocr", "AutoCAD-шрифт: запуск OCR...")
+                all_items, best_proj_name = _parse_pdf_with_ocr(
+                    pdf_bytes, progress_cb=progress_cb
+                )
+                # Renumber + normalise (same logic as the bottom of this function)
+                _real_pos = 0
+                for _it in all_items:
+                    if _it.get("is_heading"):
+                        continue
+                    _real_pos += 1
+                    _it["pos"] = str(_real_pos)
+                    _raw_qty = _it.get("qty", 1)
+                    if not isinstance(_raw_qty, (int, float)):
+                        _it["qty"] = extract_qty(_raw_qty)
+                    if "unit_raw" in _it and "unit" not in _it:
+                        _it["unit"] = _it.pop("unit_raw")
+                return all_items, best_proj_name
+        except Exception as _cid_exc:
+            logger.warning("CID early check failed: %s — continuing with pdfplumber", _cid_exc)
+
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         total_pages = len(pdf.pages)
 
