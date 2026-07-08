@@ -66,8 +66,28 @@ def _get_ocr_lang() -> str:
     return lang_str
 
 
+def _is_cid_encoded(text: str) -> bool:
+    """Return True when extracted text is AutoCAD-style CID-font garbage.
+
+    AutoCAD and similar CAD tools embed fonts with custom encodings.
+    pdfplumber renders them as literal "(cid:NNN)" tokens; PyMuPDF decodes
+    them to characters in the Latin Extended-B/C range (U+0180-U+024F).
+    Either pattern means the text is unreadable and we need OCR.
+    """
+    if not text or len(text) < 30:
+        return False
+    # pdfplumber CID tokens
+    if "(cid:" in text:
+        return True
+    # PyMuPDF decodes AutoCAD CID glyphs into U+01C0-U+0280 (Latin Extended-B/C)
+    # which never appear in normal Russian/Kazakh engineering docs.
+    unusual = sum(1 for c in text if 0x0180 <= ord(c) <= 0x02AF)
+    return unusual / max(len(text), 1) > 0.25
+
+
 def _is_scanned_pdf(pdf_bytes: bytes) -> bool:
-    """Return True when the first 5 pages have no extractable text."""
+    """Return True when the first 5 pages have no extractable text,
+    OR when the text is CID-encoded (AutoCAD custom font — unreadable garbage)."""
     try:
         if _FITZ_AVAILABLE and _fitz is not None:
             doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -78,8 +98,12 @@ def _is_scanned_pdf(pdf_bytes: bytes) -> bool:
                 except Exception:
                     txt = ""
                 if len(txt.strip()) > 30:
+                    # Has text — but is it CID-encoded garbage?
+                    if _is_cid_encoded(txt):
+                        doc.close()
+                        return True   # treat as scanned → use OCR
                     doc.close()
-                    return False
+                    return False      # real readable text
             doc.close()
             return True
         # Fallback: pdfplumber
@@ -87,6 +111,8 @@ def _is_scanned_pdf(pdf_bytes: bytes) -> bool:
             for page in pdf.pages[:5]:
                 txt = page.extract_text() or ""
                 if len(txt.strip()) > 30:
+                    if _is_cid_encoded(txt):
+                        return True
                     return False
         return True
     except Exception:
