@@ -438,11 +438,13 @@ async def match_items(
     for item in pdf_items:
         # Section-header rows must pass through without matching
         if item.get("is_heading"):
+            # Pass article_raw / kaznisa_code_raw through — heading щитки
+            # carry their own article and code from the PDF spec.
             results.append({
                 "pos":              item.get("pos"),
                 "name_raw":         item.get("name_raw", ""),
-                "article_raw":      "",
-                "kaznisa_code_raw": "",
+                "article_raw":      item.get("article_raw", "") or "",
+                "kaznisa_code_raw": item.get("kaznisa_code_raw", "") or "",
                 "qty":              0,
                 "unit":             "",
                 "status":           "heading",

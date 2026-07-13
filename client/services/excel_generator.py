@@ -33,6 +33,7 @@ import shutil
 import openpyxl
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, PatternFill, Alignment
 from typing import List, Dict, Optional
 
 
@@ -216,6 +217,20 @@ def _inject_x14_dv(xlsm_path: str) -> None:
     except Exception as exc:
         print(f"[x14_dv] failed {xlsm_path}: {exc}")
 
+
+
+_HEADING_FILL = PatternFill("solid", fgColor="D9E1F2")  # light blue-gray
+_HEADING_FONT = Font(bold=True)
+
+def _apply_heading_style(ws, row: int, max_col: int = 14) -> None:
+    """Apply bold + fill to all cells in a heading row."""
+    for col in range(1, max_col + 1):
+        cell = ws.cell(row=row, column=col)
+        try:
+            cell.font = _HEADING_FONT
+            cell.fill = _HEADING_FILL
+        except (TypeError, AttributeError):
+            pass
 
 def _fill_bd_sheet(wb: openpyxl.Workbook, products: List[Dict]):
     """Заполняет лист БД актуальными данными из сервера."""
@@ -438,6 +453,15 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
     last_data_row = KP_DATA_START - 1
     for i, item in enumerate(items):
         row  = KP_DATA_START + i
+        if item.get("is_heading"):
+            # Heading row: write name to C column only + bold styling
+            h_name    = item.get("name_raw", "")
+            h_article = item.get("article_raw", "") or ""
+            kp.cell(row=row, column=KP_NAME,    value=h_name    or None)
+            kp.cell(row=row, column=KP_ARTICLE, value=h_article or None)
+            _apply_heading_style(kp, row, max_col=14)
+            last_data_row = row
+            continue
         bm   = item.get("best_match") or {}
 
         article  = bm.get("article", "") or item.get("article_raw", "")
@@ -938,12 +962,22 @@ def generate_excel(
     # 3. Заполняем лист WV 4.0 (только вводные колонки)
     # Filter out section-header rows before writing to Excel — they have no
     # article/price data and would corrupt row numbering and formula ranges.
-    excel_items = [it for it in items if it.get("status") != "heading"]
+    excel_items = items  # headings included — written as section dividers
 
     _clear_input_rows(ws, start_row=2, end_row=max(465, 2 + len(excel_items)))
 
     for i, item in enumerate(excel_items):
         row = 2 + i
+        if item.get("is_heading"):
+            # Write heading name to C, article to B, kaznisa to L
+            h_name    = item.get("name_raw", "")
+            h_article = item.get("article_raw", "") or ""
+            h_kaz     = item.get("kaznisa_code_raw", "") or ""
+            ws.cell(row=row, column=WV_NAME,     value=h_name    or None)
+            ws.cell(row=row, column=WV_ARTICLE,  value=h_article or None)
+            ws.cell(row=row, column=WV_KAZNIISA, value=h_kaz     or None)
+            _apply_heading_style(ws, row)
+            continue
         bm      = item.get("best_match") or {}
         brand   = bm.get("brand") or ""
         article = bm.get("article") or item.get("article_raw") or ""

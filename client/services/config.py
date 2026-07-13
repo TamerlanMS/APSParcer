@@ -11,6 +11,7 @@ class AppConfig:
         self.api_key       = ""
         self.language      = "ru"
         self.last_username = ""   # last successfully logged-in username
+        self.window_geometry: str = ""  # "WxH+X+Y" or "zoomed"
 
         # Session-only (JWT) — never written to disk
         self.jwt_token:      str = ""
@@ -29,7 +30,8 @@ class AppConfig:
                 self.server_url    = d.get("server_url",    self.server_url)
                 self.api_key       = d.get("api_key",       self.api_key)
                 self.language      = d.get("language",      self.language)
-                self.last_username = d.get("last_username", self.last_username)
+                self.last_username    = d.get("last_username",    self.last_username)
+                self.window_geometry  = d.get("window_geometry",  self.window_geometry)
             except Exception:
                 pass
 
@@ -39,7 +41,8 @@ class AppConfig:
             "server_url":    self.server_url,
             "api_key":       self.api_key,
             "language":      self.language,
-            "last_username": self.last_username,
+            "last_username":    self.last_username,
+            "window_geometry":  self.window_geometry,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def set_user(self, data: dict):

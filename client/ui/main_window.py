@@ -50,6 +50,7 @@ class MainApp(ctk.CTk):
         self.minsize(1100, 700)
         self.configure(fg_color=BG_MAIN)
         self.withdraw()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         try:
             self.iconbitmap("assets/icon.ico")
@@ -108,9 +109,28 @@ class MainApp(ctk.CTk):
     def _on_auth_cancel(self):
         sys.exit(0)
 
+    def _on_close(self):
+        """Сохраняем позицию/размер окна перед выходом."""
+        try:
+            state = self.state()
+            if state == "zoomed":
+                self.config.window_geometry = "zoomed"
+            else:
+                self.config.window_geometry = self.wm_geometry()
+            self.config.save()
+        except Exception:
+            pass
+        self.destroy()
+
     def _open_main(self):
         self._update_statusbar()
         self.deiconify()
+        # Восстановить сохранённую позицию/размер
+        geo = self.config.window_geometry
+        if geo == "zoomed":
+            self.after(50, lambda: self.state("zoomed"))
+        elif geo:
+            self.after(50, lambda: self.geometry(geo))
         self.lift()
         self.focus_force()
 

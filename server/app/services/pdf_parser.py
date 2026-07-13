@@ -43,7 +43,7 @@ _OCR_PAGE_TIMEOUT = 45
 _OCR_LANG_CACHE: Optional[str] = None
 
 # GPT-4o-mini Vision OCR — preferred over Tesseract when API key is set
-_VISION_DPI = 100   # 100 DPI = 827x1169px on A4 — detail=high → 4-6 tiles ≈ 1000 tokens/page
+_VISION_DPI = 100   # 100 DPI — A2/A4 pages scale to ~2048px at detail=high; actual ~37K tokens/page
 _OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 
 
@@ -268,9 +268,9 @@ def _build_table_from_tsv(data: dict) -> List[List[str]]:
 _RL_LOCK: threading.Lock = threading.Lock()
 _RL_WINDOW: collections.deque = collections.deque()   # (monotonic_ts, tokens)
 _RL_TPM_LIMIT: int = 180_000          # 10 % margin below the 200 K hard limit
-# detail=high, 100 DPI A4-landscape (1169x827px) → ~6 tiles × 170 + 85 = 1105 vision tokens
-# + max 4096 output → ~5200 actual per page; 7000 gives ~25 pages/min headroom
-_RL_EST_PER_PAGE: int = 7_000
+# detail=high: actual observed usage ~37 500 tokens/page (A2 engineering sheets).
+# 40 000 estimate limits concurrent burst to floor(180K/40K)=4 pages before throttling.
+_RL_EST_PER_PAGE: int = 40_000
 
 
 def _rate_wait(tokens: int = _RL_EST_PER_PAGE) -> None:
@@ -312,27 +312,38 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dic
     _rate_wait()   # block until token budget allows this request
     b64 = base64.b64encode(jpeg_bytes).decode()
     prompt = (
-        "Page {page}/{total} of a Russian/Kazakh construction/IT equipment specification (scanned PDF).\n"
-        "Your task: extract EVERY specification line item from ALL tables on this page. "
-        "Do NOT stop early — capture every numbered row until the last one visible.\n\n"
+        "Page {page}/{total} of a Russian/Kazakh engineering project PDF.\n"
+        "Your task: extract rows ONLY from an EQUIPMENT / MATERIALS SPECIFICATION table "
+        "(Спецификация оборудования и материалов / Ведомость материалов).\n"
+        "Such tables have columns like: Поз. (position number), Наименование (item name), "
+        "Тип/Марка (article/model), Ед.изм. (unit), Кол. (quantity).\n"
+        "Do NOT stop early — capture every numbered equipment row until the last one visible.\n\n"
+        "SKIP THIS PAGE AND RETURN {{\"items\": []}} if the page is:\n"
+        "- A project composition table (Состав проекта, Содержание, список томов)\n"
+        "- A drawing / document index (Ведомость чертежей, перечень листов)\n"
+        "- A floor plan, wiring schema, or diagram\n"
+        "- Any table listing document names/titles instead of physical equipment\n\n"
         "Return ONLY a JSON object: {{\"items\": [...]}}\n"
         "Each item has these fields:\n"
-        "  pos        — position number string (e.g. \"1\", \"2\", \"1.3\"), empty string if absent\n"
-        "  name_raw   — complete item name/description in Cyrillic/Latin, exactly as written "
-        "(include model, brand, technical specs if printed in the same cell)\n"
-        "  article_raw— article / model code / part number if visible in a separate column, else empty string\n"
-        "  unit_raw   — unit of measure (шт, м, кг, компл, м², л, пара, etc.), default \"шт\"\n"
-        "  qty        — quantity as a plain number string, default \"1\"\n\n"
+        "  pos             — position number string (e.g. \"1\", \"2\", \"1.3\"), empty string if absent\n"
+        "  name_raw        — complete equipment/material name in Cyrillic/Latin, exactly as written "
+        "(include model, brand, technical specs if in the same cell)\n"
+        "  article_raw     — article / model / type from a dedicated column (Тип, марка, etc.), else empty string\n"
+        "  kaznisa_code_raw— KazNIISA / product code (Код продукции / Код КазНИИСА), digits+hyphens like 247-201-0206, else empty string\n"
+        "  unit_raw        — unit of measure (шт, м, кг, компл, м², л, пара, etc.), default \"шт\"\n"
+        "  qty             — quantity as a plain number string, default \"1\"\n\n"
         "Rules:\n"
-        "- Include ALL numbered rows — IT equipment, cables, sensors, cameras, switches, etc.\n"
-        "- Skip only: section headers (bold title rows with no qty), page totals, blank rows.\n"
-        "- If a name spans two lines in the PDF, join them with a space.\n"
-        "- If the article/model code appears inside the name cell (not a separate column), copy it to article_raw AND keep it in name_raw.\n"
-        "- If no items found on this page return {{\"items\": []}}.\n\n"
-        "Example output:\n"
+        "- Include ALL numbered equipment rows: devices, panels, cables, sensors, fittings, etc.\n"
+        "- Skip: bold section-header rows with no qty, subtotals, blank rows.\n"
+        "- Sub-items (dashes — before name) are valid items — include them.\n"
+        "- If a name spans two lines, join with a space.\n"
+        "- If article/model code is inside the name cell, copy to article_raw AND keep in name_raw.\n"
+        "- For Код продукции / Код КазНИИСА column: put value in kaznisa_code_raw.\n"
+        "- If this page has NO equipment spec items, return {{\"items\": []}}.\n\n"
+        "Example output (equipment spec page):\n"
         "{{\"items\": [\n"
-        "  {{\"pos\":\"1\",\"name_raw\":\"Камера IP купольная уличная 4Мп\",\"article_raw\":\"DS-2CD2143G2-I\",\"unit_raw\":\"шт\",\"qty\":\"8\"}},\n"
-        "  {{\"pos\":\"2\",\"name_raw\":\"Коммутатор управляемый PoE 24 порта\",\"article_raw\":\"SG-2424P\",\"unit_raw\":\"шт\",\"qty\":\"2\"}}\n"
+        "  {{\"pos\":\"2ЩС1\",\"name_raw\":\"Щит бесперебойного питания, 125А, степень защиты IP31\",\"article_raw\":\"ЦРН-48s-О 36 кВЗ IP31\",\"kaznisa_code_raw\":\"247-201-0206\",\"unit_raw\":\"шт\",\"qty\":\"1\"}},\n"
+        "  {{\"pos\":\"\",\"name_raw\":\"— Выключатель нагрузки на Вводе ВН32 3Р 32А-1шт\",\"article_raw\":\"247-204-2524\",\"kaznisa_code_raw\":\"247-204-2524\",\"unit_raw\":\"шт\",\"qty\":\"1\"}}\n"
         "]}}"
     ).format(page=page_num, total=total)
 
@@ -381,13 +392,17 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dic
             name = str(it.get("name_raw") or "").strip()
             if not name:
                 continue
-            items.append({
-                "pos":          str(it.get("pos") or "").strip(),
-                "name_raw":     name,
-                "article_raw":  str(it.get("article_raw") or "").strip(),
-                "unit_raw":     str(it.get("unit_raw") or "шт").strip() or "шт",
-                "qty":          str(it.get("qty") or "1").strip() or "1",
-            })
+            _kaz_v = str(it.get("kaznisa_code_raw") or "").strip()
+            _item_v: Dict = {
+                "pos":              str(it.get("pos") or "").strip(),
+                "name_raw":         name,
+                "article_raw":      str(it.get("article_raw") or "").strip(),
+                "unit_raw":         str(it.get("unit_raw") or "шт").strip() or "шт",
+                "qty":              str(it.get("qty") or "1").strip() or "1",
+            }
+            if _kaz_v:
+                _item_v["kaznisa_code_raw"] = _kaz_v
+            items.append(_item_v)
         logger.info("Vision page %d/%d: extracted %d items", page_num, total, len(items))
         return items
     except Exception as exc:
@@ -400,9 +415,140 @@ def _ocr_page_with_vision(pix, page_num: int, total: int) -> List[Dict]:
     return _vision_call_bytes(pix.tobytes("jpeg"), page_num, total)
 
 
+def _has_vector_only_pages(pdf_bytes: bytes) -> bool:
+    """Return True if the PDF has pages where text was converted to vector outlines.
+
+    AutoCAD pdfplot can render all text as filled paths (no text layer at all).
+    Such pages have large content streams but zero or one BT (Begin Text)
+    operator.  Heuristic: at least 3 pages with content > 50 KB and BT count <= 1.
+    """
+    if not _FITZ_AVAILABLE or _fitz is None:
+        return False
+    try:
+        doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
+        vector_count = 0
+        checked = 0
+        for pg in doc:
+            raw = pg.read_contents()
+            if len(raw) < 50_000:
+                continue
+            checked += 1
+            if raw.count(b"BT") <= 1:
+                vector_count += 1
+            if checked >= 20:
+                break
+        doc.close()
+        return vector_count >= 3
+    except Exception:
+        return False
+
+
+def _parse_cid_pdf_via_pdfplumber(pdf_bytes: bytes) -> List[Dict]:
+    """Extract pos/code/qty from CID-encoded spec PDFs via pdfplumber.
+
+    CID-font PDFs (AutoCAD Cyrillic) have unreadable names/articles but
+    numeric fields (position number, KazNIISA code, quantity) are plain
+    ASCII and fully readable by pdfplumber.  This avoids slow/expensive
+    Vision OCR for PDFs where codes live in a dedicated column.
+
+    Expected table layout (18 cols, standard KZ spec sheet):
+      col 2 = pos, col 3 = name (CID), col 4 = article (CID),
+      col 5 = KazNIISA code, col 13 = unit, col 14 = qty.
+    """
+    import io as _io_cid
+
+    def _is_cid_val(s: str) -> bool:
+        return "(cid:" in s
+
+    items: List[Dict] = []
+    try:
+        with pdfplumber.open(_io_cid.BytesIO(pdf_bytes)) as _pdf:
+            for _page in _pdf.pages:
+                for _tbl in (_page.extract_tables() or []):
+                    if not _tbl or len(_tbl[0]) < 15:
+                        continue
+                    ncols = len(_tbl[0])
+                    for _row in _tbl:
+                        if not _row or len(_row) < 15:
+                            continue
+                        pos_v  = str(_row[2]  or "").strip()
+                        name_v = str(_row[3]  or "").strip()
+                        art_v  = str(_row[4]  or "").strip()
+                        code_v = str(_row[5]  or "").strip() if ncols > 5  else ""
+                        unit_v = str(_row[13] or "").strip() if ncols > 13 else ""
+                        qty_v  = str(_row[14] or "").strip() if ncols > 14 else ""
+
+                        # skip column-number header row ("1","2","3"...)
+                        if pos_v == "1" and name_v == "2":
+                            continue
+
+                        # section heading: no pos (or CID pos), name present
+                        if not pos_v or _is_cid_val(pos_v):
+                            if name_v:
+                                if not _is_cid_val(name_v):
+                                    items.append({
+                                        "is_heading": True,
+                                        "name_raw": name_v[:120],
+                                        "pos": "", "article_raw": "",
+                                        "kaznisa_code_raw": "", "unit_raw": "шт", "qty": "1",
+                                    })
+                                else:
+                                    # CID heading — extract leading section number "N. "
+                                    _sm = re.match(r"^(\d+)\.\s*\(cid:", name_v)
+                                    if _sm:
+                                        items.append({
+                                            "is_heading": True,
+                                            "name_raw": f"\u0420\u0430\u0437\u0434\u0435\u043b {_sm.group(1)}",
+                                            "pos": "", "article_raw": "",
+                                            "kaznisa_code_raw": "", "unit_raw": "шт", "qty": "1",
+                                        })
+                            continue
+
+                        # item row: pos must look like a position number
+                        if not re.match(r"^\d[\d\.\-]*$", pos_v):
+                            continue
+
+                        # find KazNIISA code: col 5 first, then scan whole row
+                        kaz = ""
+                        if code_v and not _is_cid_val(code_v) and _KAZNISA_RE.match(code_v):
+                            kaz = code_v
+                        if not kaz:
+                            for _cell in _row:
+                                _cv = str(_cell or "").strip()
+                                if _cv and not _is_cid_val(_cv) and _KAZNISA_RE.match(_cv):
+                                    kaz = _cv
+                                    break
+
+                        art_clean = art_v if (art_v and not _is_cid_val(art_v)) else ""
+                        if not kaz and not art_clean:
+                            continue  # nothing useful to match on
+
+                        qty_str  = qty_v.replace(",", ".") if (qty_v and not _is_cid_val(qty_v)) else "1"
+                        unit_str = unit_v if (unit_v and not _is_cid_val(unit_v)) else "шт"
+                        name_out = art_clean or (f"[{kaz}]" if kaz else pos_v)
+
+                        items.append({
+                            "is_heading":      False,
+                            "pos":             pos_v,
+                            "name_raw":        name_out,
+                            "article_raw":     art_clean,
+                            "kaznisa_code_raw": kaz,
+                            "unit_raw":        unit_str,
+                            "qty":             qty_str,
+                        })
+    except Exception as _exc:
+        logger.warning("_parse_cid_pdf_via_pdfplumber: %s", _exc)
+
+    real_cnt = sum(1 for i in items if not i.get("is_heading"))
+    logger.info("CID pdfplumber scan: %d items, %d headings", real_cnt, len(items) - real_cnt)
+    return items
+
+
+
 def _parse_pdf_with_ocr(
     pdf_bytes: bytes,
     progress_cb=None,
+    skip_readable_nonspec: bool = False,
 ) -> Tuple[List[Dict], str]:
     """Full OCR path for scanned PDFs.
 
@@ -413,7 +559,7 @@ def _parse_pdf_with_ocr(
       Phase A — render all pages to JPEG bytes with PyMuPDF (fast, sequential,
                  avoids PyMuPDF thread-safety issues).
       Phase B — extract tables:
-                 Vision: ThreadPoolExecutor(max_workers=8) — all 40 pages in ~5-10 s.
+                 Vision: ThreadPoolExecutor(max_workers=2) + rate-limiter; ~4 pages/min at 200K TPM limit.
                  Tesseract: sequential with per-page timeout.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -432,16 +578,33 @@ def _parse_pdf_with_ocr(
     doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = len(doc)
 
-    method = "Vision/GPT-4o-mini (x8 parallel)" if use_vision else "Tesseract"
+    method = "Vision/GPT-4o-mini (x2 parallel)" if use_vision else "Tesseract"
     logger.info("OCR: using %s for %d pages", method, total_pages)
     if progress_cb:
         progress_cb(20, "ocr_start",
                     f"Рендеринг {total_pages} стр. для OCR ({method})...")
 
     # ── Phase A: render all pages to JPEG bytes (fast, sequential) ────────────
+    # When skip_readable_nonspec=True (vector-only PDFs), pages that have
+    # readable text but are NOT spec pages are skipped (project index etc.).
+    _readable_nonspec: set = set()
+    if skip_readable_nonspec and _fitz is not None:
+        _fz_skip = _fitz.open(stream=pdf_bytes, filetype="pdf")
+        for _si in range(len(_fz_skip)):
+            _st = (_fz_skip[_si].get_text() or "").strip()
+            if len(_st) > 50 and not _is_spec_page_text(_st):
+                _readable_nonspec.add(_si)
+        _fz_skip.close()
+        if _readable_nonspec:
+            logger.info("OCR: skip_readable_nonspec — skipping %d non-spec pages: %s",
+                        len(_readable_nonspec), sorted(_readable_nonspec))
+
     page_jpegs: List[Optional[bytes]] = []
     for i in range(total_pages):
         try:
+            if i in _readable_nonspec:
+                page_jpegs.append(None)  # skip — readable non-spec
+                continue
             pix = doc[i].get_pixmap(matrix=mat, alpha=False)
             if i == 0:
                 logger.info(
@@ -658,11 +821,57 @@ def _detect_columns(row: List) -> Optional[Dict[str, int]]:
     return None
 
 
+
+def _is_doubled_text(text: str) -> bool:
+    """Return True if text is a Ghostscript doubled-character artefact.
+
+    Ghostscript sometimes renders each glyph twice, producing strings like
+    "ППоозз" instead of "Поз." — a well-known Ghostscript PDF artefact.
+    Detected by checking if >55 % of consecutive character pairs are identical.
+    """
+    t = (text or "").strip()
+    if len(t) < 6:
+        return False
+    pairs = sum(1 for i in range(0, len(t) - 1, 2) if t[i] == t[i + 1])
+    return pairs / max(len(t) // 2, 1) > 0.55
+
+
+
+def _is_section_header_text(text: str) -> bool:
+    """Distinguish a standalone section header from a description/continuation row.
+
+    True section headers  → "Светотехническое оборудование", "Заземление и молниезащита"
+    Continuation rows     → "На вводе: NXB-63 3Р, 16А - 1 шт.", "- Контактор NCH8-20/40"
+
+    Returns False (not a header) if:
+      - starts with a dash/bullet (continuation list item)
+      - contains a colon (description label like "На вводе:")
+      - contains a digit followed by a unit word (quantity mention)
+      - longer than 80 chars (usually a full description, not a heading)
+      - starts with lowercase (fragment sentence)
+    """
+    t = (text or "").strip()
+    if len(t) < 5:
+        return False
+    if t[0] in ("-", "\u2013", "\u2014", "\u2022", "\u00b7"):   # dash / bullet
+        return False
+    if ":" in t:           # "На вводе:", "в том числе:"
+        return False
+    if re.search(r"\d+\s*(шт|кг|\bм\b|мм|км|л\b)", t, re.IGNORECASE):
+        return False        # quantity inside text → component description
+    if len(t) > 80:
+        return False
+    if t[0].islower():     # starts with lowercase — continuation fragment
+        return False
+    return True
+
 def _is_pos_value(cell) -> Optional[str]:
     if cell is None:
         return None
     s = str(cell).strip().rstrip(".")
     if not s:
+        return None
+    if _is_doubled_text(s):
         return None
     if s == "-":
         return None
@@ -901,10 +1110,20 @@ def extract_specification_from_page(
                             cont_code and _prev_code
                             and cont_code.strip() != _prev_code.strip()
                         )
-                        if (_prev_is_panel or prev.get("is_heading") or _codes_differ) and cont_code:
-                            # (B2) Sub-component of named panel / heading,
-                            # OR previous item already has a DIFFERENT code
-                            # (щит sub-items each with their own codes).
+                        # B2c: previous item already has an article and the
+                        # current row has its own qty → this is a new standalone
+                        # item (not a continuation that fills missing fields).
+                        # Common in specs where every row is independent but has
+                        # no pos number (e.g. 369-2-1-.pdf switch/lamp lists).
+                        _prev_art_b = prev.get("article_raw", "") or ""
+                        _is_new_standalone = (
+                            prev.get("is_heading")
+                            or (_prev_art_b and cont_qty and extract_qty(cont_qty) > 0)
+                        )
+                        if ((_prev_is_panel or prev.get("is_heading") or _codes_differ) and cont_code) or _is_new_standalone:
+                            # (B2/B2c) Sub-component of named panel / heading,
+                            # OR previous item already has a DIFFERENT code,
+                            # OR previous is complete and current has its own qty.
                             auto_num += 1
                             pos = f"-{auto_num}"
                             # fall through to normal item processing below
@@ -941,6 +1160,19 @@ def extract_specification_from_page(
                     ):
                         # Looks like a section/category header — save for context
                         last_section = _row_name_raw.strip()
+                        # Only emit as a heading row if it really looks like a
+                        # section title, NOT a continuation/description row
+                        # (e.g. "На вводе: NXB-63 1Р, 10А - 12 шт." must be skipped)
+                        if _is_section_header_text(last_section):
+                            items.append({
+                                "pos":              pos_raw.strip() or "",
+                                "name_raw":         last_section,
+                                "article_raw":      _cont_art_raw or "",
+                                "kaznisa_code_raw": _cont_code_raw or "",
+                                "unit":             "",
+                                "qty":              0,
+                                "is_heading":       True,
+                            })
                     if items:
                         prev = items[-1]
                         cont_qty  = _cont_qty_raw
@@ -967,6 +1199,27 @@ def extract_specification_from_page(
         code    = _get_code(row, cols.get("code"))
         unit    = _cell(row, cols.get("unit"))
         qty     = extract_qty(_cell(row, cols.get("qty")))
+
+        # Fallback: scan entire row for a KAZNIISA-format code (247-XXX-XXXX)
+        # when the designated code column is empty.  Some PDFs store codes in a
+        # "Примечания" (notes) column that doesn't match HEADER_PATTERNS["code"].
+        if not code and isinstance(row, (list, tuple)):
+            for _fc in row:
+                _fv = str(_fc or "").strip()
+                if _KAZNISA_RE.match(_fv):
+                    code = _fv
+                    break
+
+        # Skip rows where name or pos look like Ghostscript doubled-char artefacts
+        # ("ННааиимм" instead of "Наим.", "ППоозз" instead of "Поз." etc.)
+        if _is_doubled_text(name) or _is_doubled_text(pos or ""):
+            continue
+
+        # Skip column-numbering header rows that Ghostscript PDFs sometimes
+        # render as data rows (e.g. name="2", article="3", kaz="4", qty=7).
+        # A real item name is never a short bare integer.
+        if name and name.strip().isdigit() and len(name.strip()) <= 3:
+            continue
 
         if not name and not article and not code:
             continue
@@ -1146,9 +1399,15 @@ def _extract_tables_fast(page) -> list:
     Text-based strategies are intentionally excluded: they produce hundreds of
     pseudo-rows from non-table text and confuse column detection.
     """
+    # text_settings with small x_tolerance force spaces between words whose
+    # glyph bounding boxes are only slightly apart (fixes "слипается текст").
+    _text_settings = {"x_tolerance": 1.5, "y_tolerance": 3}
+
     # Strategy 1: pdfplumber defaults
     try:
-        default_tables = page.extract_tables() or []
+        default_tables = page.extract_tables(
+            table_settings={"text_settings": _text_settings}
+        ) or []
     except Exception:
         default_tables = []
 
@@ -1160,6 +1419,7 @@ def _extract_tables_fast(page) -> list:
             "snap_tolerance":         10,
             "join_tolerance":         5,
             "intersection_tolerance": 5,
+            "text_settings":          _text_settings,
         }) or []
     except Exception:
         permissive_tables = []
@@ -1447,13 +1707,23 @@ def parse_pdf_specification(
                 _cid_ex.shutdown(wait=False)
 
             if _is_cid:
-                logger.info("parse_pdf: CID-encoded / scanned PDF detected — "
-                            "skipping pdfplumber, routing to OCR")
+                logger.info("parse_pdf: CID-encoded / scanned PDF detected")
+                # Try fast pdfplumber extraction first (pos, KazNIISA code, qty
+                # are plain ASCII even in CID PDFs — no Vision tokens needed).
                 if progress_cb:
-                    progress_cb(15, "ocr", "AutoCAD-шрифт: запуск OCR...")
-                all_items, best_proj_name = _parse_pdf_with_ocr(
-                    pdf_bytes, progress_cb=progress_cb
-                )
+                    progress_cb(10, "cid_scan", "CID-шрифт: извлечение кодов...")
+                _cid_items = _parse_cid_pdf_via_pdfplumber(pdf_bytes)
+                _cid_real  = [_i for _i in _cid_items if not _i.get("is_heading")]
+                if len(_cid_real) >= 3:
+                    logger.info("CID pdfplumber: %d items — skipping Vision OCR", len(_cid_real))
+                    all_items = _cid_items
+                else:
+                    logger.info("CID pdfplumber: %d items — falling back to Vision OCR", len(_cid_real))
+                    if progress_cb:
+                        progress_cb(15, "ocr", "AutoCAD-шрифт: запуск OCR...")
+                    all_items, best_proj_name = _parse_pdf_with_ocr(
+                        pdf_bytes, progress_cb=progress_cb
+                    )
                 # Renumber + normalise (same logic as the bottom of this function)
                 _real_pos = 0
                 for _it in all_items:
@@ -1639,6 +1909,24 @@ def parse_pdf_specification(
         if _is_scanned:
             all_items, best_proj_name = _parse_pdf_with_ocr(
                 pdf_bytes, progress_cb=progress_cb
+            )
+
+    # ── Phase 3b: vector-only OCR fallback ──────────────────────────────────
+    # AutoCAD pdfplot sometimes converts ALL text to vector outlines.
+    # Such PDFs have readable first pages (title block) but vector-only
+    # spec pages deeper in the file.  _is_scanned_pdf() returns False because
+    # early pages have text — detect via BT-operator count instead.
+    if not all_items and (_TESSERACT_AVAILABLE or _OPENAI_API_KEY) and _FITZ_AVAILABLE:
+        if _has_vector_only_pages(pdf_bytes):
+            logger.info(
+                "parse_pdf: vector-only PDF (AutoCAD text-to-outlines) — routing to OCR"
+            )
+            if progress_cb:
+                progress_cb(20, "ocr", "Векторный PDF AutoCAD: запуск OCR...")
+            all_items, best_proj_name = _parse_pdf_with_ocr(
+                pdf_bytes,
+                progress_cb=progress_cb,
+                skip_readable_nonspec=True,
             )
 
     # Renumber sequentially + normalise qty to float

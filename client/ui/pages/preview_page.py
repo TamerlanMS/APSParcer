@@ -205,7 +205,7 @@ class CandidateDialog(ctk.CTkToplevel):
         hdrs = ["%", "Артикул", "Наименование", "Бренд", "РРЦ", "МРЦ"]
         style = ttk.Style()
         style.configure("Cand.Treeview", rowheight=28, font=("Calibri", 12))
-        style.configure("Cand.Treeview.Heading", font=("Calibri", 12, "bold"),
+        style.configure("Cand.Treeview.Heading", font=("Calibri", 14, "bold"),
                         background=NAVY, foreground="white")
         style.map("Cand.Treeview", background=[("selected", C_SELECT)])
         self.tree = ttk.Treeview(frame, columns=cols, show="headings",
@@ -456,7 +456,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         widths = [150, 280, 90, 40, 120, 80, 80]
 
         style = ttk.Style()
-        style.configure("Search.Treeview", rowheight=26, font=("Calibri", 12))
+        style.configure("Search.Treeview", rowheight=23, font=("Calibri", 10))
         style.configure("Search.Treeview.Heading", font=("Calibri", 12, "bold"),
                         background=NAVY, foreground="white")
         style.map("Search.Treeview", background=[("selected", C_SELECT)])
@@ -705,7 +705,7 @@ class PreviewPage(ctk.CTkFrame):
         style.theme_use("clam")
         style.configure("APS.Treeview",
                         background=BG_CARD, fieldbackground=BG_CARD,
-                        rowheight=28, font=("Calibri", 12))
+                        rowheight=23, font=("Calibri", 10))
         style.configure("APS.Treeview.Heading",
                         background=NAVY, foreground="white",
                         font=("Calibri", 12, "bold"), relief="flat")
@@ -749,7 +749,7 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("ai_low",   background=C_AI_LOW)
         self.tree.tag_configure("manager",  background=C_MANAGER)
         self.tree.tag_configure("heading",  background=C_HEADING,
-                                font=("Calibri", 12, "bold"))
+                                font=("Calibri", 10, "bold"))
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
@@ -1097,9 +1097,9 @@ class PreviewPage(ctk.CTkFrame):
                 lines = str(val).count("\n") + 1
                 if lines > max_lines:
                     max_lines = lines
-        line_px  = 18   # pixels per text line at Calibri 12
-        padding  = 8    # top+bottom cell padding
-        new_h    = max(28, max_lines * line_px + padding)
+        line_px  = 15   # pixels per text line at Calibri 10
+        padding  = 6    # top+bottom cell padding
+        new_h    = max(23, max_lines * line_px + padding)
         ttk.Style().configure("APS.Treeview", rowheight=new_h)
 
     @staticmethod
@@ -1566,7 +1566,7 @@ class PreviewPage(ctk.CTkFrame):
         self._edit_col  = col_idx
         self._edit_item = item
 
-        entry = tk.Entry(self.tree, font=("Calibri", 12), relief="solid", bd=1)
+        entry = tk.Entry(self.tree, font=("Calibri", 10), relief="solid", bd=1)
         entry.insert(0, cur_val)
         entry.select_range(0, "end")
         entry.place(x=x, y=y, width=w, height=h)
