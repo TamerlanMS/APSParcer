@@ -164,6 +164,7 @@ STRINGS = {
         "col_status": "Статус",
         "col_method":         "Метод",
         "ctx_reset_item":    "🗑 Сбросить к исходным данным",
+        "ctx_delete_item":   "❌ Удалить позицию",
         "col_comment": "Комментарий",
 
         # Status labels
@@ -508,6 +509,7 @@ STRINGS = {
         "col_status": "Мәртебе",
         "col_method":         "Әдіс",
         "ctx_reset_item":    "🗑 Бастапқы деректерге қайтару",
+        "ctx_delete_item":   "❌ Позицияны жою",
         "col_comment": "Пікір",
 
         # Status labels

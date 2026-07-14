@@ -182,6 +182,89 @@ class ApiService:
                         )
         raise RuntimeError("Сервер закрыл соединение без результата")
 
+    def parse_pdf_multi_stream(
+        self,
+        pdf_paths: list,
+        progress_cb=None,   # (file_idx, filename, pct, stage, msg)
+        file_done_cb=None,  # (file_idx, filename, result)
+        ai_mode: bool = False,
+        segments=None,
+    ) -> list:
+        """POST multiple PDF files to /pdf/parse-multi-stream, return list of results.
+
+        progress_cb(file_idx, filename, pct, stage, msg) — called per-file SSE progress event.
+        file_done_cb(file_idx, filename, result)         — called when each file finishes.
+        Returns list of result dicts (one per file that succeeded).
+        """
+        seg_str = ",".join(segments) if segments else "ss"
+        open_files = []
+        try:
+            multi_files = []
+            for path in pdf_paths:
+                fname = os.path.basename(path)
+                fobj = open(path, "rb")
+                open_files.append(fobj)
+                multi_files.append(("files", (fname, fobj, "application/pdf")))
+
+            with requests.post(
+                f"{self._base}/api/v1/pdf/parse-multi-stream",
+                files=multi_files,
+                headers=self._h,
+                params={"ai_mode": "true" if ai_mode else "false", "segments": seg_str},
+                stream=True,
+                timeout=7200,
+            ) as r:
+                r.raise_for_status()
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode("utf-8", errors="replace")
+                    if not raw_line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(raw_line[6:])
+                    except json.JSONDecodeError:
+                        continue
+
+                    if "all_done" in event:
+                        return event.get("results", [])
+
+                    if "file_error" in event:
+                        if progress_cb:
+                            progress_cb(
+                                event.get("file_idx", 0),
+                                event.get("filename", ""),
+                                100, "error", event["file_error"],
+                            )
+                        continue
+
+                    if "file_done" in event:
+                        if file_done_cb:
+                            file_done_cb(
+                                event.get("file_idx", 0),
+                                event.get("filename", ""),
+                                event.get("result", {}),
+                            )
+                        continue
+
+                    if progress_cb and "pct" in event:
+                        progress_cb(
+                            event.get("file_idx", 0),
+                            event.get("filename", ""),
+                            int(event["pct"]),
+                            event.get("stage", ""),
+                            event.get("msg", ""),
+                        )
+        finally:
+            for fobj in open_files:
+                try:
+                    fobj.close()
+                except Exception:
+                    pass
+        raise RuntimeError("Сервер закрыл соединение без результата")
+
+
     def parse_pdf(self, pdf_path: str,
                   progress_cb: Optional[Callable] = None,
                   ai_mode: bool = False) -> dict:

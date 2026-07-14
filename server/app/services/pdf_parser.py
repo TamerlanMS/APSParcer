@@ -273,9 +273,16 @@ _RL_TPM_LIMIT: int = 180_000          # 10 % margin below the 200 K hard limit
 _RL_EST_PER_PAGE: int = 40_000
 
 
-def _rate_wait(tokens: int = _RL_EST_PER_PAGE) -> None:
-    """Block until the rolling-60 s token window has room for `tokens` more."""
+def _rate_wait(tokens: int = _RL_EST_PER_PAGE, abort_flag=None) -> bool:
+    """Block until the rolling-60 s token window has room for `tokens` more.
+
+    If abort_flag (a one-element list) becomes True during the wait,
+    returns True immediately without registering tokens.
+    Returns False on normal acquisition.
+    """
     while True:
+        if abort_flag is not None and abort_flag[0]:
+            return True   # aborted before we even tried
         now = time.monotonic()
         with _RL_LOCK:
             # Drop entries older than 60 s
@@ -284,17 +291,23 @@ def _rate_wait(tokens: int = _RL_EST_PER_PAGE) -> None:
             used = sum(n for _, n in _RL_WINDOW)
             if used + tokens <= _RL_TPM_LIMIT:
                 _RL_WINDOW.append((now, tokens))
-                return
+                return False   # acquired OK
             # Must wait until oldest entry expires
-            sleep_for = 61.0 - (now - _RL_WINDOW[0][0])
+            sleep_for = max(1.0, 61.0 - (now - _RL_WINDOW[0][0]))
         logger.info(
             "Vision rate-limiter: used=%d/%d — sleeping %.0f s",
-            used, _RL_TPM_LIMIT, max(1.0, sleep_for),
+            used, _RL_TPM_LIMIT, sleep_for,
         )
-        time.sleep(max(1.0, sleep_for))
+        # Sleep in small chunks so abort_flag can interrupt the wait
+        deadline = time.monotonic() + sleep_for
+        while time.monotonic() < deadline:
+            if abort_flag is not None and abort_flag[0]:
+                logger.info("Vision rate-limiter: прерван досрочным завершением OCR")
+                return True   # aborted during sleep
+            time.sleep(0.5)
 
 
-def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dict]:
+def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int, abort_flag=None) -> List[Dict]:
     """Send a pre-rendered JPEG page to GPT-4o-mini Vision.
 
     Returns spec items as List[Dict] with keys:
@@ -309,13 +322,14 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dic
     except ImportError:
         return []
 
-    _rate_wait()   # block until token budget allows this request
+    if _rate_wait(abort_flag=abort_flag):   # block until token budget allows; True = aborted
+        return []
     b64 = base64.b64encode(jpeg_bytes).decode()
     prompt = (
         "Page {page}/{total} of a Russian/Kazakh engineering project PDF.\n"
         "Your task: extract rows ONLY from an EQUIPMENT / MATERIALS SPECIFICATION table "
         "(Спецификация оборудования и материалов / Ведомость материалов).\n"
-        "Such tables have columns like: Поз. (position number), Наименование (item name), "
+        "Such tables have columns like: Поз. (position number OR designation code like ВШ/РШ1/1ШС1), Наименование (item name), "
         "Тип/Марка (article/model), Ед.изм. (unit), Кол. (quantity).\n"
         "Do NOT stop early — capture every numbered equipment row until the last one visible.\n\n"
         "SKIP THIS PAGE AND RETURN {{\"items\": []}} if the page is:\n"
@@ -325,7 +339,7 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dic
         "- Any table listing document names/titles instead of physical equipment\n\n"
         "Return ONLY a JSON object: {{\"items\": [...]}}\n"
         "Each item has these fields:\n"
-        "  pos             — position number string (e.g. \"1\", \"2\", \"1.3\"), empty string if absent\n"
+        "  pos             — position number OR equipment designation string (e.g. \"1\", \"2\", \"1.3\", \"ВШ\", \"1ШС1\", \"АВР\", \"РШ1\"), empty string if absent\n"
         "  name_raw        — complete equipment/material name in Cyrillic/Latin, exactly as written "
         "(include model, brand, technical specs if in the same cell)\n"
         "  article_raw     — article / model / type from a dedicated column (Тип, марка, etc.), else empty string\n"
@@ -334,6 +348,7 @@ def _vision_call_bytes(jpeg_bytes: bytes, page_num: int, total: int) -> List[Dic
         "  qty             — quantity as a plain number string, default \"1\"\n\n"
         "Rules:\n"
         "- Include ALL numbered equipment rows: devices, panels, cables, sensors, fittings, etc.\n"
+        "- pos field: can be a number (\"1\", \"2\", \"1.3\") OR a Cyrillic/Latin designation (\"ВШ\", \"РШ1\", \"1ШС1\", \"АВР\", \"ОШС1\"); treat both as valid positions.\n"
         "- Skip: bold section-header rows with no qty, subtotals, blank rows.\n"
         "- Sub-items (dashes — before name) are valid items — include them.\n"
         "- If a name spans two lines, join with a space.\n"
@@ -549,6 +564,7 @@ def _parse_pdf_with_ocr(
     pdf_bytes: bytes,
     progress_cb=None,
     skip_readable_nonspec: bool = False,
+    tail_first: bool = False,
 ) -> Tuple[List[Dict], str]:
     """Full OCR path for scanned PDFs.
 
@@ -625,35 +641,99 @@ def _parse_pdf_with_ocr(
     tables_by_idx: dict = {}
 
     if use_vision:
-        # Parallel Vision calls: submit all pages at once, collect as done
+        # Shared abort-flag and counters (mutable lists so closures can mutate).
+        _ocr_abort    = [False]   # [bool]
+        _ocr_found    = [0]       # [int]  total items found across all pages
+        _ocr_api_done = [0]       # [int]  actual Vision API calls (skips excluded)
+        # Abort after this many REAL API calls with 0 items found.
+        _ABORT_API = max(5, min(12, total_pages // 6))
+
         def _submit(args):
             idx, jpeg = args
-            if jpeg is None:
+            if jpeg is None or _ocr_abort[0]:
                 return idx, []
-            return idx, _vision_call_bytes(jpeg, idx + 1, total_pages)
+            result = _vision_call_bytes(jpeg, idx + 1, total_pages, abort_flag=_ocr_abort)
+            _ocr_found[0]    += len(result)
+            _ocr_api_done[0] += 1
+            return idx, result
 
-        completed = 0
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="vision") as ex:
-            futures = {
-                ex.submit(_submit, (i, jpg)): i
-                for i, jpg in enumerate(page_jpegs)
-            }
-            for fut in as_completed(futures):
-                completed += 1
-                pct = 24 + int(48 * completed / max(total_pages, 1))
-                try:
-                    idx, table = fut.result()
-                    tables_by_idx[idx] = table
-                    logger.info("Vision OCR: page %d/%d done", idx + 1, total_pages)
-                except Exception as exc:
-                    orig_idx = futures[fut]
-                    logger.warning("Vision OCR: page %d error: %s", orig_idx + 1, exc)
-                    tables_by_idx[orig_idx] = []
-                if progress_cb:
-                    progress_cb(
-                        pct, "ocr_page",
-                        f"Vision OCR: {completed}/{total_pages} стр. готово...",
+        # Tail-first strategy: engineering spec tables often appear AFTER all
+        # drawings (last 15-20 pages of large PDFs).  When tail_first=True we
+        # submit the tail batch first; if it contains spec items we skip the
+        # head pages entirely, saving many API calls.  If the tail is empty we
+        # fall through to the head batch with the normal early-abort logic.
+        _TAIL_SIZE = (
+            min(20, max(1, total_pages // 4))
+            if tail_first and total_pages > 20 else 0
+        )
+        _tail_idxs = list(range(total_pages - _TAIL_SIZE, total_pages)) if _TAIL_SIZE else []
+        _head_idxs = (
+            list(range(0, total_pages - _TAIL_SIZE)) if _TAIL_SIZE
+            else list(range(total_pages))
+        )
+
+        completed = [0]
+
+        def _run_batch(idx_list):
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="vision") as ex:
+                futures = {ex.submit(_submit, (i, page_jpegs[i])): i for i in idx_list}
+                for fut in as_completed(futures):
+                    completed[0] += 1
+                    pct = 24 + int(48 * completed[0] / max(total_pages, 1))
+                    try:
+                        idx, table = fut.result()
+                        tables_by_idx[idx] = table
+                        logger.info("Vision OCR: page %d/%d done", idx + 1, total_pages)
+                    except Exception as exc:
+                        orig_idx = futures[fut]
+                        logger.warning("Vision OCR: page %d error: %s", orig_idx + 1, exc)
+                        tables_by_idx[orig_idx] = []
+                    if progress_cb:
+                        progress_cb(
+                            pct, "ocr_page",
+                            f"Vision OCR: {completed[0]}/{total_pages} стр. готово...",
+                        )
+                    if (
+                        not _ocr_abort[0]
+                        and _ocr_api_done[0] >= _ABORT_API
+                        and _ocr_found[0] == 0
+                    ):
+                        _ocr_abort[0] = True
+                        logger.warning(
+                            "Vision OCR: %d реальных API-страниц обработано, "
+                            "0 позиций найдено — прерываем OCR досрочно "
+                            "(оставшиеся %d стр. пропущены)",
+                            _ocr_api_done[0], total_pages - completed[0],
+                        )
+
+        if _tail_idxs:
+            logger.info(
+                "Vision OCR: tail-first — хвост стр. %d–%d (%d шт.) в первую очередь",
+                _tail_idxs[0] + 1, _tail_idxs[-1] + 1, len(_tail_idxs),
+            )
+            _run_batch(_tail_idxs)
+            if _ocr_found[0] > 0:
+                logger.info(
+                    "Vision OCR: %d позиций найдено в хвосте (стр. %d–%d) —"
+                    " пропускаем %d стр. начала документа",
+                    _ocr_found[0], _tail_idxs[0] + 1, _tail_idxs[-1] + 1, len(_head_idxs),
+                )
+                for i in _head_idxs:
+                    tables_by_idx[i] = []
+            else:
+                # Tail empty (spec not found there) — try head with abort logic.
+                # If abort already fired during tail, head pages are skipped too.
+                if _ocr_abort[0]:
+                    logger.info(
+                        "Vision OCR: хвост пуст, досрочное завершение активно —"
+                        " пропускаем %d стр. начала", len(_head_idxs),
                     )
+                    for i in _head_idxs:
+                        tables_by_idx[i] = []
+                else:
+                    _run_batch(_head_idxs)
+        else:
+            _run_batch(_head_idxs)
     else:
         # Sequential Tesseract with per-page timeout
         for i, jpeg in enumerate(page_jpegs):
@@ -877,11 +957,15 @@ def _is_pos_value(cell) -> Optional[str]:
         return None
     if s.isdigit():
         return s
-    if re.match(r"^\d+\.\d+$", s):
+    if re.match(r"^\d+(?:\.\d+)+$", s):   # 1.1 / 1.1.1 / 1.1.11 etc.
         return s
     # Named position identifiers: ВРУ-1, ШАВР-1, ЩС-ТХ1.2, ИБП, ШУЗ, etc.
     # Must start with Cyrillic/Latin uppercase and be short (no whitespace).
     if len(s) <= 25 and re.match(r"^[А-ЯЁA-Z]", s) and not re.search(r"\s", s):
+        return s
+    # Digit-prefix designations: 1ШС1, 2ШС2, 3ЩС1, 1ШСВ1 etc.
+    # (digit(s) immediately followed by Cyrillic/Latin letter, no whitespace)
+    if len(s) <= 25 and re.match(r"^\d+[А-ЯЁA-Za-z]", s) and not re.search(r"\s", s):
         return s
     return None
 
@@ -1199,6 +1283,22 @@ def extract_specification_from_page(
         code    = _get_code(row, cols.get("code"))
         unit    = _cell(row, cols.get("unit"))
         qty     = extract_qty(_cell(row, cols.get("qty")))
+        # For щит sub-items qty is often embedded in the name: "— 3шт,"
+        # Try to extract it when the dedicated qty column is empty.
+        if qty <= 1:
+            _qm = re.search(
+                r'[\u2014\-]\s*(\d+(?:[.,]\d+)?)\s*(шт|компл|м\b)',
+                name, re.IGNORECASE
+            )
+            if _qm:
+                try:
+                    _qty_from_name = float(_qm.group(1).replace(",", "."))
+                    if _qty_from_name > 1 or qty == 0:
+                        qty = _qty_from_name
+                    if not unit:
+                        unit = _qm.group(2).lower().rstrip(".")
+                except ValueError:
+                    pass
 
         # Fallback: scan entire row for a KAZNIISA-format code (247-XXX-XXXX)
         # when the designated code column is empty.  Some PDFs store codes in a
@@ -1232,6 +1332,19 @@ def extract_specification_from_page(
             if _pcheck and not _pcheck[0].isdigit() and not _pcheck.startswith("-"):
                 _is_heading_row = True
                 _panel_code_for_sub = code or ""
+
+        # Numeric-position section headings (e.g. "1 Щитовое оборудование",
+        # "1.1 ЩВРдепо", "1.5 ЩС-СС") have no article/code. Detect them so
+        # they bypass SKIP_KEYWORDS and appear as heading rows in the preview.
+        if not _is_heading_row and pos and pos[0].isdigit() and not article and not code:
+            _ut_low     = (unit or "").lower().rstrip(".")
+            _raw_qty_col = _cell(row, cols.get("qty"))   # "" when column is empty
+            if _ut_low in ("компл", "комплект"):
+                # щит assembly heading — unit=компл. is distinctive
+                _is_heading_row = True
+            elif not _raw_qty_col and _is_section_header_text(name):
+                # Section label: no qty in column AND name looks like a title
+                _is_heading_row = True
 
         full_text = (name + " " + article).lower()
         # Heading rows are never filtered by SKIP_KEYWORDS — they intentionally
@@ -1623,13 +1736,19 @@ def _is_spec_page_text(page_text: str) -> bool:
                or "кол." in tl or "коли-" in tl or "кол-" in tl)
 
     # Signal 1 — explicit spec section header present on this page.
-    # Guard: any "Ведомость …" page (Ведомость основного комплекта,
-    # Ведомость рабочих чертежей, etc.) lists the spec as ONE data row but
-    # is NOT the spec itself.  Such pages have "ведомость" in their text AND
-    # lack the position column header that every actual spec sheet carries.
+    # Guard: various document-index page types list "Спецификация оборудования"
+    # as a single text entry but are NOT the actual spec sheet themselves:
+    #   • Ведомость … pages list the spec as one data row
+    #   • Содержание / table-of-contents pages enumerate all project sheets
+    #   • Состав проекта pages list all document types
+    # All of these lack the actual spec-table column headers (поз., etc.).
     if "спецификация оборудования" in tl:
-        is_vedomost = "ведомость" in tl
-        if is_vedomost and not has_poz:
+        is_doc_index = (
+            ("ведомость" in tl and not has_poz)          # drawing/doc index
+            or ("содержание" in tl and not has_poz)      # table of contents
+            or ("состав" in tl and "проект" in tl and not has_poz)  # project composition
+        )
+        if is_doc_index:
             return False   # document-index page, not the actual spec
         return True
 
@@ -1927,6 +2046,7 @@ def parse_pdf_specification(
                 pdf_bytes,
                 progress_cb=progress_cb,
                 skip_readable_nonspec=True,
+                tail_first=True,
             )
 
     # Renumber sequentially + normalise qty to float

@@ -710,32 +710,43 @@ def _extend_wv_formulas(ws, last_data_row: int) -> None:
 
 
 
+def _safe_sheet_name(name: str, idx: int, existing: list) -> str:
+    """Return a valid Excel sheet name (max 31 chars, no special chars, unique)."""
+    import re as _re2
+    safe = _re2.sub(r'[\\/?*\[\]:]', '', str(name))[:31] or f"Sheet{idx+1}"
+    if safe not in existing:
+        return safe
+    base = safe[:28]
+    n = 2
+    while f"{base}_{n}" in existing:
+        n += 1
+    return f"{base}_{n}"
+
+
 def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
     """
     Restores worksheet relationship files that openpyxl silently drops on save.
 
-    Known openpyxl issues:
-      - sheet3.xml.rels (WV 4.0): loses drawing, ctrlProp x2, printerSettings refs
-      - sheet4.xml.rels (КП):     loses drawing2 (wrong file linked), ctrlProp,
-                                   printerSettings, slicer refs
-      - xl/drawings/drawing2.xml: dropped from ZIP entirely
+    Handles any number of project sheets by matching rels by sheet NAME
+    (not file number), so КП rels are always applied to the correct sheet
+    even when extra WV sheets shift the sheet numbering.
 
-    Without ctrlProp links the "Вкл поиск" / "Выкл поиск" form-control buttons
-    on WV 4.0 lose their macro binding and stop working.
+    Also:
+      - Copies extra files from template (drawings, slicers, printerSettings…)
+      - Strips dangling externalLinks and vbaProject.bin references
     """
     import zipfile, io as _io, re as _re
 
+    # ── helpers ──────────────────────────────────────────────────────────────
     def _abs_target(target: str) -> str:
         if target.startswith("../"):
             return "/xl/" + target[3:]
         return target
 
     def _target_file(target: str) -> str:
-        """Return filename part: /xl/drawings/drawing2.xml -> drawing2.xml"""
         return target.rstrip("/").split("/")[-1]
 
     def _parse_rels(xml: str) -> list:
-        """Return list of (rel_type, rid, abs_target) from a rels XML string."""
         out = []
         for m in _re.finditer(r'<Relationship\b[^>]*/>', xml):
             tag  = m.group()
@@ -747,32 +758,21 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
         return out
 
     def _rel_target(abs_t: str) -> str:
-        """Convert /xl/path back to ../path for use in .rels files."""
         if abs_t.startswith("/xl/"):
             return "../" + abs_t[4:]
         return abs_t
 
     def _merge_rels(saved_xml: str, tpl_rels: list) -> str:
-        """
-        Merge template rels into saved_xml:
-          - Skip vmlDrawing (already present as anysvml).
-          - For drawing-type rels: fix the target if a drawing rel already exists;
-            otherwise add a new entry.  Only drawing rels are replaced — printerSettings,
-            table, slicer, ctrlProp etc. are never touched by the drawing fix.
-          - All new entries use relative paths (../…) and safe non-conflicting rIds.
-        """
-        # Build set of target filenames already present
+        """Merge template rels into saved_xml, avoiding duplicates."""
         existing_targets = set(
             _target_file(tg)
             for tg in _re.findall(r'Target="([^"]+)"', saved_xml)
         )
-        # Track existing rIds to avoid duplicates when inserting
         existing_rids = set(_re.findall(r'Id="(rId\d+)"', saved_xml))
         max_rid = max(
             (int(r[3:]) for r in existing_rids if r[3:].isdigit()),
             default=0,
         )
-
         def _next_rid():
             nonlocal max_rid
             max_rid += 1
@@ -780,32 +780,25 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
 
         inserts = []
         for (rel_type, rid, abs_target) in tpl_rels:
-            fname  = _target_file(abs_target)
-            rel_t  = _rel_target(abs_target)   # relative path for rels files
-
+            fname = _target_file(abs_target)
+            rel_t = _rel_target(abs_target)
             if "vmlDrawing" in rel_type:
-                continue  # already handled by anysvml
-
+                continue
             if fname not in existing_targets:
-                # For drawing-type rels: try replacing an EXISTING drawing entry
-                # (e.g. drawing1.xml saved where drawing2.xml is expected).
-                # Only match relationships whose Type ends with "/drawing" — never
-                # touch printerSettings, table, slicer, ctrlProp, etc.
                 if rel_type.endswith("/drawing"):
                     def _fix_drawing(m, correct_rel=rel_t):
-                        tag = m.group()
+                        tag    = m.group()
                         type_m = _re.search(r'Type="([^"]+)"', tag)
                         if not type_m:
                             return tag
                         if not type_m.group(1).endswith("/drawing"):
-                            return tag   # skip vmlDrawing and all other types
+                            return tag
                         return _re.sub(r'Target="[^"]+"', f'Target="{correct_rel}"', tag)
                     new_xml = _re.sub(r'<Relationship\b[^>]*/>', _fix_drawing, saved_xml)
                     if new_xml != saved_xml:
                         saved_xml = new_xml
                         existing_targets.add(fname)
                         continue
-                # Add as a fresh entry with a safe (non-conflicting) rId
                 use_rid = rid if rid not in existing_rids else _next_rid()
                 inserts.append(
                     f'<Relationship Id="{use_rid}" Type="{rel_type}" Target="{rel_t}"/>',
@@ -818,17 +811,92 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
                                           "".join(inserts) + "</Relationships>")
         return saved_xml
 
+    def _ws_name_to_file(zip_obj):
+        """Returns {sheet_name: 'xl/worksheets/sheetN.xml'} by parsing workbook.xml."""
+        try:
+            wb_x   = zip_obj.read("xl/workbook.xml").decode("utf-8", errors="replace")
+            rels_x = zip_obj.read("xl/_rels/workbook.xml.rels").decode("utf-8", errors="replace")
+            name_rid = {}
+            for m in _re.finditer(r'<sheet\b([^>]*)/?>', wb_x):
+                nm = _re.search(r'\bname="([^"]*)"', m.group(1))
+                ri = _re.search(r'r:id="([^"]*)"', m.group(1))
+                if nm and ri:
+                    name_rid[nm.group(1)] = ri.group(1)
+            rid_file = {}
+            for m in _re.finditer(r'<Relationship\b[^>]*/>', rels_x):
+                t   = m.group()
+                id_ = _re.search(r'\bId="([^"]+)"', t)
+                tp_ = _re.search(r'\bType="([^"]+)"', t)
+                tg_ = _re.search(r'\bTarget="([^"]+)"', t)
+                if id_ and tp_ and tg_ and "worksheet" in tp_.group(1):
+                    tgt = tg_.group(1)
+                    if not tgt.startswith("xl/"):
+                        tgt = "xl/worksheets/" + tgt.split("/")[-1]
+                    rid_file[id_.group(1)] = tgt
+            return {n: rid_file[r] for n, r in name_rid.items() if r in rid_file}
+        except Exception:
+            return {}
+
+    # ── Collect template data ─────────────────────────────────────────────────
     try:
         with zipfile.ZipFile(tpl_path, "r") as ztpl:
-            tpl_files  = set(ztpl.namelist())
-            tpl_s3r    = ztpl.read("xl/worksheets/_rels/sheet3.xml.rels").decode("utf-8", errors="replace")
-            tpl_s4r    = ztpl.read("xl/worksheets/_rels/sheet4.xml.rels").decode("utf-8", errors="replace")
-            tpl_d2     = ztpl.read("xl/drawings/drawing2.xml")            if "xl/drawings/drawing2.xml"            in tpl_files else None
-            tpl_d2rels = ztpl.read("xl/drawings/_rels/drawing2.xml.rels") if "xl/drawings/_rels/drawing2.xml.rels" in tpl_files else None
+            tpl_files = set(ztpl.namelist())
 
-        tpl_s3_rels = _parse_rels(tpl_s3r)
-        tpl_s4_rels = _parse_rels(tpl_s4r)
+            # Sheet rels by filename
+            tpl_sheet_rels: dict = {}
+            for fn in tpl_files:
+                if fn.startswith("xl/worksheets/_rels/") and fn.endswith(".rels"):
+                    tpl_sheet_rels[fn] = _parse_rels(
+                        ztpl.read(fn).decode("utf-8", errors="replace")
+                    )
 
+            # Sheet name → rels mapping
+            tpl_name_to_file = _ws_name_to_file(ztpl)
+            tpl_name_to_rels: dict = {}
+            for sname, sfile in tpl_name_to_file.items():
+                rels_fn = sfile.replace("xl/worksheets/", "xl/worksheets/_rels/") + ".rels"
+                if rels_fn in tpl_sheet_rels:
+                    tpl_name_to_rels[sname] = tpl_sheet_rels[rels_fn]
+
+            # Extra binary/xml files to copy from template
+            _is_xlsx = out_path.lower().endswith(".xlsx")
+            _extra_prefixes = (
+                "xl/drawings/", "xl/media/", "xl/printerSettings/", "xl/tables/",
+            ) if _is_xlsx else (
+                "xl/drawings/", "xl/slicers/", "xl/slicerCaches/",
+                "xl/media/", "xl/printerSettings/", "xl/tables/",
+            )
+            tpl_extras: dict = {}
+            for fn in tpl_files:
+                if any(fn.startswith(p) for p in _extra_prefixes):
+                    tpl_extras[fn] = ztpl.read(fn)
+
+        # Build out_rels_merge_map: output rels filename → template rels
+        # Match by sheet NAME so renumbering (sheet2→sheet3 etc.) is handled.
+        with zipfile.ZipFile(out_path, "r") as _ztmp:
+            out_name_to_file = _ws_name_to_file(_ztmp)
+
+        out_rels_merge_map: dict = {}
+        for sname, sfile in out_name_to_file.items():
+            if sname not in tpl_name_to_rels:
+                continue
+            out_rels_fn = sfile.replace("xl/worksheets/", "xl/worksheets/_rels/") + ".rels"
+            out_rels_merge_map[out_rels_fn] = tpl_name_to_rels[sname]
+
+        # Handle renamed "WV 4.0" sheet: generate_excel_multi renames it to
+        # the project name, so name-matching above misses it.
+        # Apply "WV 4.0" template rels to the first non-КП output sheet.
+        _WV_TPL_NAME = "WV 4.0"
+        if _WV_TPL_NAME in tpl_name_to_rels and _WV_TPL_NAME not in out_name_to_file:
+            for _sname, _sfile in out_name_to_file.items():
+                if _sname == "КП":
+                    continue
+                _out_rels_fn = _sfile.replace("xl/worksheets/", "xl/worksheets/_rels/") + ".rels"
+                if _out_rels_fn not in out_rels_merge_map:
+                    out_rels_merge_map[_out_rels_fn] = tpl_name_to_rels[_WV_TPL_NAME]
+                break
+
+        # ── Rewrite ZIP ───────────────────────────────────────────────────────
         with open(out_path, "rb") as fh:
             raw = fh.read()
 
@@ -837,59 +905,171 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
 
         with zipfile.ZipFile(in_buf, "r") as zin:
             existing_saved = set(zin.namelist())
-            _d2_added  = tpl_d2     and "xl/drawings/drawing2.xml"            not in existing_saved
-            _d2r_added = tpl_d2rels and "xl/drawings/_rels/drawing2.xml.rels" not in existing_saved
-            ct_xml_orig = ""   # will hold [Content_Types].xml text
+            ct_xml_orig = ""
 
             with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
                     data = zin.read(item.filename)
 
-                    if item.filename == "xl/worksheets/_rels/sheet3.xml.rels":
-                        xml  = data.decode("utf-8", errors="replace")
-                        xml  = _merge_rels(xml, tpl_s3_rels)
+                    # Drop external link files
+                    if item.filename.startswith("xl/externalLinks/"):
+                        continue
+
+                    # Force-replace drawing XML with template version:
+                    # openpyxl strips slicer controls from drawings and
+                    # uses absolute Target paths in drawing rels.
+                    # Also force-replace table XML (template has correct
+                    # structure; we will strip calculatedColumnFormulas below).
+                    _FORCE_FROM_TPL = (
+                        item.filename.startswith("xl/drawings/") or
+                        item.filename.startswith("xl/tables/")
+                    )
+                    if _FORCE_FROM_TPL and item.filename in tpl_extras:
+                        data = tpl_extras[item.filename]
+                        # Strip calculatedColumnFormula from table files
+                        if item.filename.startswith("xl/tables/"):
+                            tbl_xml = data.decode("utf-8", errors="replace")
+                            tbl_xml = _re.sub(
+                                r'<calculatedColumnFormula[^<]*</calculatedColumnFormula>',
+                                "", tbl_xml,
+                            )
+                            data = tbl_xml.encode("utf-8")
+
+
+                    if item.filename in out_rels_merge_map:
+                        xml = data.decode("utf-8", errors="replace")
+                        _tpl_rels = out_rels_merge_map[item.filename]
+                        if _is_xlsx:
+                            _tpl_rels = [(rt, rid, at) for rt, rid, at in _tpl_rels
+                                         if "slicer" not in rt.lower()]
+                        xml  = _merge_rels(xml, _tpl_rels)
                         data = xml.encode("utf-8")
 
-                    elif item.filename == "xl/worksheets/_rels/sheet4.xml.rels":
-                        xml  = data.decode("utf-8", errors="replace")
-                        xml  = _merge_rels(xml, tpl_s4_rels)
+                    elif item.filename == "xl/workbook.xml":
+                        xml = data.decode("utf-8", errors="replace")
+                        # Strip external references section
+                        xml = _re.sub(
+                            r'<externalReferences\b[^>]*>.*?</externalReferences>',
+                            "", xml, flags=_re.DOTALL,
+                        )
+                        # Strip definedNames that reference broken/external data:
+                        # #REF!, [N]ExternalBook, #N/A, #NAME? values
+                        def _strip_bad_dn(m):
+                            val = m.group(1)
+                            if (
+                                "#REF!" in val or "#N/A" in val or
+                                "#NAME?" in val or
+                                _re.search(r"\[\d+\]", val)  # [1]ExternalBook
+                            ):
+                                return ""
+                            return m.group(0)
+                        xml = _re.sub(
+                            r'<definedName\b[^>]*>([^<]*)</definedName>',
+                            _strip_bad_dn, xml,
+                        )
+                        data = xml.encode("utf-8")
+
+                    elif item.filename == "xl/_rels/workbook.xml.rels":
+                        xml = data.decode("utf-8", errors="replace")
+                        # Strip dangling externalLinks
+                        xml = _re.sub(
+                            r'<Relationship\b[^>]*externalLink[^>]*/>',
+                            "", xml,
+                        )
+                        # Strip dangling vbaProject.bin ref added by openpyxl keep_vba=True
+                        xml = _re.sub(
+                            r'<Relationship\b[^>]*vbaProject[^>]*/>',
+                            "", xml,
+                        )
                         data = xml.encode("utf-8")
 
                     elif item.filename == "[Content_Types].xml":
                         ct_xml_orig = data.decode("utf-8", errors="replace")
-                        # Will be (re-)written after we know which parts were added
-                        continue
+                        continue  # re-written at end
 
                     zout.writestr(item, data)
 
-                # Re-add drawing2.xml if it was dropped from the ZIP
-                if _d2_added:
-                    zout.writestr("xl/drawings/drawing2.xml", tpl_d2)
-                    print("[ws_rels] restored drawing2.xml from template")
-                if _d2r_added:
-                    zout.writestr("xl/drawings/_rels/drawing2.xml.rels", tpl_d2rels)
-                    print("[ws_rels] restored drawing2.xml.rels from template")
+                # Write template extra files that are missing from output
+                for fn, fdata in tpl_extras.items():
+                    if fn not in existing_saved:
+                        if _is_xlsx and any(
+                            k in fn for k in ("slicer", "Slicer")
+                        ):
+                            continue
+                        zout.writestr(fn, fdata)
+                        print(f"[ws_rels] restored {fn} from template")
 
-                # Patch [Content_Types].xml: register drawing2.xml if newly added
+                # Create missing sheet rels files (keyed by OUTPUT filename)
+                for out_rels_fn, tpl_rels in out_rels_merge_map.items():
+                    if out_rels_fn not in existing_saved:
+                        needed = [
+                            (rt, rid, at) for (rt, rid, at) in tpl_rels
+                            if "vmlDrawing" not in rt
+                            and (not _is_xlsx or "slicer" not in rt.lower())
+                        ]
+                        if needed:
+                            inserts = [
+                                f'<Relationship Id="{rid}" Type="{rt}" Target="{_rel_target(at)}"/>'
+                                for (rt, rid, at) in needed
+                            ]
+                            xml = (
+                                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                                + "".join(inserts) + "</Relationships>"
+                            )
+                            zout.writestr(out_rels_fn, xml.encode("utf-8"))
+                            print(f"[ws_rels] created missing {out_rels_fn}")
+
+                # Re-write [Content_Types].xml: strip externalLink overrides,
+                # register any newly added template extras
                 ct_xml = ct_xml_orig
-                if _d2_added and "/xl/drawings/drawing2.xml" not in ct_xml:
-                    ct_xml = ct_xml.replace(
-                        "</Types>",
-                        '<Override PartName="/xl/drawings/drawing2.xml"'
-                        ' ContentType="application/vnd.openxmlformats-officedocument'
-                        '.drawing+xml"/></Types>',
-                    )
-                    print("[ws_rels] added drawing2.xml to [Content_Types].xml")
+                ct_xml = _re.sub(
+                    r'<Override[^>]*externalLink[^>]*/>', "", ct_xml
+                )
+                for fn, fdata in tpl_extras.items():
+                    if fn not in existing_saved:
+                        if _is_xlsx and any(k in fn for k in ("slicer", "Slicer")):
+                            continue
+                        part = "/" + fn
+                        if part not in ct_xml:
+                            ext = fn.rsplit(".", 1)[-1].lower()
+                            ct_map = {
+                                "xml":  "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+                                "bin":  "application/vnd.ms-office.activeX+xml",
+                                "rels": "application/vnd.openxmlformats-package.relationships+xml",
+                                "png":  "image/png",
+                                "jpeg": "image/jpeg",
+                                "jpg":  "image/jpeg",
+                                "emf":  "image/x-emf",
+                            }
+                            # Use specific content types for known subdirs
+                            if "drawings" in fn:
+                                ct = "application/vnd.openxmlformats-officedocument.drawing+xml"
+                            elif "slicers" in fn:
+                                ct = "application/vnd.ms-excel.slicer+xml"
+                            elif "slicerCaches" in fn:
+                                ct = "application/vnd.ms-excel.slicerCache+xml"
+                            elif "printerSettings" in fn:
+                                ct = "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"
+                            else:
+                                ct = ct_map.get(ext, "application/octet-stream")
+                            if not fn.endswith(".rels"):
+                                ct_xml = ct_xml.replace(
+                                    "</Types>",
+                                    f'<Override PartName="{part}" ContentType="{ct}"/></Types>',
+                                )
+                                print(f"[ws_rels] registered {part} in [Content_Types].xml")
                 zout.writestr("[Content_Types].xml", ct_xml.encode("utf-8"))
 
         with open(out_path, "wb") as fh:
             fh.write(out_buf.getvalue())
 
-        print(f"[ws_rels] restored missing worksheet relationships in {out_path}")
+        print(f"[ws_rels] done: {out_path}")
 
     except Exception as exc:
+        import traceback
         print(f"[ws_rels] failed: {exc}")
-
+        traceback.print_exc()
 
 def generate_excel(
     items: List[Dict],
@@ -1069,3 +1249,240 @@ def generate_excel(
     _inject_x14_dv(out_path)   # восстанавливаем x14:DV в WV 4.0
     _restore_missing_rels(tpl, out_path)  # восстанавливаем ctrlProp/drawing rels
     return out_path
+
+def generate_excel_multi(
+    projects: list,
+    output_path: str,
+    constants: Optional[Dict] = None,
+    products: Optional[List[Dict]] = None,
+    base_template_path: str = "",
+) -> str:
+    """
+    Build an .xlsm starting from an exact template copy:
+      - Template KP sheet preserved exactly (logo, letterhead rows 1-12)
+      - Per-project WV sheets: project 1 reuses template WV 4.0 (renamed),
+        projects 2+ get new sheets with matching column structure
+      - KP TABLE formulas cleared; static data written from row 13
+      - _restore_missing_rels restores logo/slicers/drawing dropped by openpyxl
+    """
+    import shutil as _shutil
+    from openpyxl.styles import Border, Side
+
+    out_path = output_path
+    if out_path.lower().endswith(".xlsx"):
+        out_path = out_path[:-5] + ".xlsm"
+    elif not out_path.lower().endswith(".xlsm"):
+        out_path = os.path.splitext(out_path)[0] + ".xlsm"
+
+    tpl = _template_path()
+
+    _shutil.copyfile(tpl, out_path)
+    wb = openpyxl.load_workbook(out_path, keep_vba=True, data_only=False)
+    if hasattr(wb, "_external_links"):
+        wb._external_links = []
+
+    wv_tpl_name = "WV 4.0" if "WV 4.0" in wb.sheetnames else wb.sheetnames[0]
+    wv_first = wb[wv_tpl_name]
+
+    wv_col_widths: dict = {}
+    for _cl, _cd in wv_first.column_dimensions.items():
+        if _cd.width:
+            wv_col_widths[_cl] = _cd.width
+    wv_hdr_height = wv_first.row_dimensions[1].height or 22
+
+    if projects:
+        pname0 = projects[0].get("name", "Project_1")
+        sname0 = _safe_sheet_name(
+            pname0, 0,
+            [s for s in wb.sheetnames if s not in ("КП", wv_tpl_name)],
+        )
+        wv_first.title = sname0
+
+    if wv_first.max_row and wv_first.max_row > 1:
+        wv_first.delete_rows(2, wv_first.max_row - 1)
+
+    THIN     = Side(border_style="thin")
+    DATA_BDR = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    NUM_FMT  = "#,##0.00"
+    CTR_ALN  = Alignment(horizontal="center",  vertical="center")
+    WRAP_ALN = Alignment(horizontal="left",    vertical="center", wrap_text=True)
+    LEFT_ALN = Alignment(horizontal="left",    vertical="center")
+    HDR_FILL = PatternFill("solid", fgColor="1F3864")
+    HDR_FONT = Font(bold=True, color="FFFFFF", name="Calibri", size=9)
+    HDR_ALN  = Alignment(horizontal="center",  vertical="center", wrap_text=True)
+    SEC_FILL = PatternFill("solid", fgColor="17375E")
+    SEC_FONT = Font(bold=True, color="FFFFFF", name="Calibri", size=9)
+
+    WV_N       = 14
+    WV_HEADERS = [
+        "Бренд", "Артикул", "Наименование",
+        "Ед. изм.", "Кол-во",
+        "Кратность", "Константа цена",
+        "Цена себес", "Сумма себес",
+        "Цена КП", "Сумма КП",
+        "Код КазНИИСА",
+        "Комментарии", "Срок поставки",
+    ]
+    WV_ALNS   = [
+        LEFT_ALN, LEFT_ALN, WRAP_ALN, CTR_ALN, CTR_ALN,
+        CTR_ALN,  CTR_ALN,  CTR_ALN,  CTR_ALN, CTR_ALN,
+        CTR_ALN,  LEFT_ALN, WRAP_ALN, LEFT_ALN,
+    ]
+    WV_PRICE_COLS = {7, 8, 9, 10, 11}
+
+    def _write_wv_data(ws, items_list):
+        data_row = 2
+        for item in items_list:
+            is_hdg = (item.get("status") == "heading") or item.get("is_heading")
+            if is_hdg:
+                ws.cell(row=data_row, column=1, value=item.get("name_raw", ""))
+                try:
+                    ws.merge_cells(start_row=data_row, start_column=1,
+                                   end_row=data_row, end_column=WV_N)
+                except Exception:
+                    pass
+                for ci2 in range(1, WV_N + 1):
+                    try:
+                        c           = ws.cell(row=data_row, column=ci2)
+                        c.fill      = SEC_FILL
+                        c.font      = SEC_FONT
+                        c.alignment = LEFT_ALN
+                    except Exception:
+                        pass
+                ws.row_dimensions[data_row].height = 20
+                data_row += 1
+                continue
+
+            bm  = item.get("best_match") or {}
+            qty = float(item.get("qty", 1) or 1)
+            kp_price = float(item.get("_computed_kp_price") or 0) or None
+            kp_sum   = float(item.get("_computed_kp_sum")   or 0) or None
+            seb_price = (
+                float(item.get("_user_seb_price")    or 0)
+                or float(item.get("_computed_seb_price") or 0)
+                or None
+            )
+            seb_sum = (
+                float(item.get("_computed_seb_sum") or 0)
+                or ((seb_price * qty) if seb_price else None)
+            )
+            row_vals = [
+                bm.get("brand")   or "",
+                bm.get("article") or item.get("article_raw") or "",
+                bm.get("name")    or item.get("name_raw")    or "",
+                bm.get("unit")    or item.get("unit")        or "",
+                qty,
+                bm.get("multiplicity") or None,
+                item.get("_user_const_price") or None,
+                seb_price, seb_sum,
+                kp_price,  kp_sum,
+                bm.get("kaznisa_code") or item.get("kaznisa_code_raw") or "",
+                item.get("comment")  or "",
+                item.get("delivery") or "",
+            ]
+            for ci2, (val, aln) in enumerate(zip(row_vals, WV_ALNS), 1):
+                c           = ws.cell(row=data_row, column=ci2, value=val)
+                c.alignment = aln
+                c.border    = DATA_BDR
+                if ci2 in WV_PRICE_COLS:
+                    c.number_format = NUM_FMT
+            data_row += 1
+        ws.auto_filter.ref = f"A1:{get_column_letter(WV_N)}1"
+
+    if projects:
+        _write_wv_data(wv_first, projects[0].get("items", []))
+
+    for proj_idx, proj in enumerate(projects[1:], 1):
+        pname = proj.get("name", f"Project_{proj_idx + 1}")
+        existing_wv = [s for s in wb.sheetnames if s != "КП"]
+        sname = _safe_sheet_name(pname, proj_idx, existing_wv)
+        kp_idx = (wb.sheetnames.index("КП")
+                  if "КП" in wb.sheetnames else len(wb.sheetnames))
+        ws = wb.create_sheet(title=sname, index=kp_idx)
+        for col_letter, w in wv_col_widths.items():
+            ws.column_dimensions[col_letter].width = w
+        for ci, (hdr, aln) in enumerate(zip(WV_HEADERS, WV_ALNS), 1):
+            cell = ws.cell(row=1, column=ci, value=hdr)
+            cell.fill      = HDR_FILL
+            cell.font      = HDR_FONT
+            cell.alignment = HDR_ALN
+        ws.row_dimensions[1].height = wv_hdr_height
+        ws.freeze_panes = "A2"
+        _write_wv_data(ws, proj.get("items", []))
+
+    kp_ws = wb["КП"]
+    # Clear old template formulas from the data range before writing.
+    # Rows 13-500 in the template contain IFERROR('WV 4.0'!...) formulas
+    # that remain in cells we don't overwrite and cause stale references.
+    for _r in range(13, 501):
+        for _c in range(1, 15):
+            kp_ws.cell(row=_r, column=_c).value = None
+    for tbl in kp_ws.tables.values():
+        for col in tbl.tableColumns:
+            try:
+                col.calculatedColumnFormula = None
+            except Exception:
+                pass
+
+    KP_DATA_START = 13
+    KP_N          = 14
+    KP_PRICE_COL  = {6, 7, 10, 11, 13, 14}
+    KP_ALNS = [
+        LEFT_ALN, LEFT_ALN, WRAP_ALN, CTR_ALN, CTR_ALN,
+        CTR_ALN,  CTR_ALN,  WRAP_ALN, LEFT_ALN,
+        CTR_ALN,  CTR_ALN,  LEFT_ALN, CTR_ALN,  CTR_ALN,
+    ]
+
+    kp_row = KP_DATA_START
+    for proj in projects:
+        # Write project header WITHOUT merging — merged cells inside a
+        # table range (A12:N500) cause Excel to discard the entire table.
+        kp_ws.cell(row=kp_row, column=1, value=proj.get("name", ""))
+        for ci2 in range(1, KP_N + 1):
+            try:
+                c           = kp_ws.cell(row=kp_row, column=ci2)
+                c.fill      = SEC_FILL
+                c.font      = SEC_FONT
+                c.alignment = LEFT_ALN
+            except Exception:
+                pass
+        kp_ws.row_dimensions[kp_row].height = 20
+        kp_row += 1
+
+        for item in proj.get("items", []):
+            if item.get("status") == "heading" or item.get("is_heading"):
+                continue
+            bm        = item.get("best_match") or {}
+            qty       = float(item.get("qty", 1) or 1)
+            kp_price  = float(item.get("_computed_kp_price") or 0) or None
+            kp_sum    = float(item.get("_computed_kp_sum")   or 0) or None
+            kaz_price = float(bm.get("kaznisa") or 0) or None
+            kaz_sum   = (kaz_price * qty) if kaz_price else None
+            rrts_p    = float(bm.get("rrts")    or 0) or None
+            rrts_s    = (rrts_p * qty)    if rrts_p    else None
+            kp_vals = [
+                bm.get("brand")   or "",
+                bm.get("article") or item.get("article_raw") or "",
+                bm.get("name")    or item.get("name_raw")    or "",
+                bm.get("unit")    or item.get("unit")        or "",
+                qty,
+                kp_price, kp_sum,
+                item.get("comment")  or "",
+                item.get("delivery") or "",
+                kaz_price, kaz_sum,
+                bm.get("kaznisa_code") or item.get("kaznisa_code_raw") or "",
+                rrts_p, rrts_s,
+            ]
+            for ci2, (val, aln) in enumerate(zip(kp_vals, KP_ALNS), 1):
+                c           = kp_ws.cell(row=kp_row, column=ci2, value=val)
+                c.alignment = aln
+                c.border    = DATA_BDR
+                if ci2 in KP_PRICE_COL:
+                    c.number_format = NUM_FMT
+            kp_row += 1
+
+    wb.save(out_path)
+    _restore_missing_rels(tpl, out_path)
+    print(f"[MultiExcel] {len(projects)} project(s) saved to {out_path}")
+    return out_path
+

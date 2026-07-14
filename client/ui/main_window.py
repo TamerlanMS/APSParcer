@@ -241,6 +241,33 @@ class MainApp(ctk.CTk):
             if idx == 2:
                 self._db_nav_btn = btn  # ссылка для скрытия у директора
 
+        # ── Project tabs panel (shown when multi-PDF files are loaded) ─────────
+        self._tab_panel = ctk.CTkFrame(nav, fg_color=NAVY_DARK, corner_radius=0)
+        # Not packed here — shown dynamically via show_project_tabs()
+
+        self._tab_inner = ctk.CTkScrollableFrame(
+            self._tab_panel,
+            fg_color="transparent", corner_radius=0,
+            height=110,
+            scrollbar_button_color=BLUE_MID,
+            scrollbar_button_hover_color=NAVY_DARK,
+        )
+        self._tab_inner.pack(fill="x", padx=0, pady=(2, 0))
+
+        self._save_all_btn = ctk.CTkButton(
+            self._tab_panel,
+            text="💾 Сохранить Excel всех",
+            font=FONT_SMALL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY_DARK,
+            text_color="white",
+            height=32, corner_radius=0,
+            command=lambda: self.preview_page.save_all_excel(),
+        )
+        self._save_all_btn.pack(fill="x", padx=4, pady=(2, 6))
+
+        self._project_tab_btns: list = []
+        self._tabs_visible: bool = False
+
         # ── Spacer ─────────────────────────────────────────────────────────────
         spacer = ctk.CTkFrame(nav, fg_color="transparent", corner_radius=0)
         spacer.pack(fill="both", expand=True)
@@ -327,6 +354,8 @@ class MainApp(ctk.CTk):
             # Hide text-heavy widgets
             self._logo_frame.pack_forget()
             self.lang_btn.pack_forget()
+            if hasattr(self, "_tab_panel") and self._tabs_visible:
+                self._tab_panel.pack_forget()
             self._user_card.pack_forget()
             self.logout_btn.pack_forget()
             self.change_key_btn.pack_forget()
@@ -349,6 +378,13 @@ class MainApp(ctk.CTk):
 
             # Restore logo (pack before toggle button is tricky — repack all)
             self._logo_frame.pack(fill="x", after=self._toggle_btn)
+            # Restore project tabs panel if it was visible
+            if hasattr(self, "_tab_panel") and self._tabs_visible:
+                preview_btn = next((b for b, k, i in self.nav_btns if i == 1), None)
+                if preview_btn:
+                    self._tab_panel.pack(fill="x", after=preview_btn)
+                else:
+                    self._tab_panel.pack(fill="x")
             self.lang_btn.pack(anchor="e", padx=16, pady=(10, 6))
             self._user_card.pack(fill="x", padx=10, pady=(4, 4))
             self.logout_btn.pack(fill="x", padx=14, pady=(4, 2))
@@ -443,7 +479,81 @@ class MainApp(ctk.CTk):
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
+    def show_project_tabs(self, names: list):
+        """Populate and show the scrollable project-tab panel in the nav."""
+        for btn in self._project_tab_btns:
+            try:
+                btn.destroy()
+            except Exception:
+                pass
+        self._project_tab_btns.clear()
+
+        for idx, name in enumerate(names):
+            label = name if len(name) <= 22 else name[:20] + "\u2026"
+            btn = ctk.CTkButton(
+                self._tab_inner,
+                text=f"\U0001f4c4 {label}",
+                font=FONT_SMALL, anchor="w",
+                fg_color=BLUE_MID if idx == 0 else "transparent",
+                hover_color=BLUE_MID,
+                text_color="white",
+                height=28, corner_radius=RADIUS_SM,
+                command=lambda i=idx: self._on_project_tab_click(i),
+            )
+            btn.pack(fill="x", padx=4, pady=2)
+            self._project_tab_btns.append(btn)
+
+        # Insert panel after the 'Preview' nav button
+        preview_btn = next((b for b, k, i in self.nav_btns if i == 1), None)
+        if preview_btn:
+            self._tab_panel.pack(fill="x", after=preview_btn)
+        else:
+            self._tab_panel.pack(fill="x")
+        self._tabs_visible = True
+
+    def hide_project_tabs(self):
+        """Hide and clear the project-tab panel."""
+        self._tab_panel.pack_forget()
+        for btn in self._project_tab_btns:
+            try:
+                btn.destroy()
+            except Exception:
+                pass
+        self._project_tab_btns.clear()
+        self._tabs_visible = False
+
+    def _on_project_tab_click(self, idx: int):
+        """Handle a project-tab button click in the nav."""
+        self._switch_project_tab_style(idx)
+        self.preview_page.switch_project(idx)
+        self._switch_tab(1)
+
+    def _switch_project_tab_style(self, idx: int):
+        """Highlight the active project tab and dim the others."""
+        for i, btn in enumerate(self._project_tab_btns):
+            try:
+                btn.configure(fg_color=BLUE_MID if i == idx else "transparent")
+            except Exception:
+                pass
+
+    def on_multi_result_ready(self, results: list):
+        """Called by UploadPage when multiple PDF files finish processing."""
+        self.preview_page.load_multi_data(results)
+        self._switch_tab(1)
+        total     = sum(r.get("total", 0) for r in results if r)
+        exact     = sum(r.get("stats", {}).get("exact",    0) for r in results if r)
+        warn      = sum(r.get("stats", {}).get("multiple", 0)
+                       + r.get("stats", {}).get("fuzzy",   0) for r in results if r)
+        nf        = sum(r.get("stats", {}).get("not_found",0) for r in results if r)
+        from locales.strings import t
+        self.statusbar.configure(
+            text=f"  {t('preview_stat', total=total, exact=exact, warn=warn, nf=nf)}"
+        )
+
+
     def on_result_ready(self, result: dict):
+        if hasattr(self, "_tabs_visible") and self._tabs_visible:
+            self.hide_project_tabs()
         self.preview_page.load_data(result)
         self._switch_tab(1)
         stats = result.get("stats", {})

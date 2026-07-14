@@ -46,7 +46,7 @@ def _parse_segments(raw: Optional[str]) -> List[str]:
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _build_result(filename, project_name, ai_mode_used, results):
-    total     = len(results)
+    total     = sum(1 for r in results if r.get("status") != "heading")
     exact     = sum(1 for r in results if r["status"] == "exact")
     multiple  = sum(1 for r in results if r["status"] == "multiple")
     fuzzy     = sum(1 for r in results if r["status"] == "fuzzy")
@@ -226,6 +226,163 @@ async def parse_pdf_stream(
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
+
+
+# ── Multi-file SSE streaming parse endpoint ───────────────────────────────────
+
+@router.post("/parse-multi-stream")
+async def parse_pdf_multi_stream(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    ai_mode: bool = Query(False, description="Use AI semantic matching"),
+    segments: Optional[str] = Query(
+        default="ss",
+        description="Segments: ss, os, sil, ss,os, all",
+    ),
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Parse multiple PDFs in parallel, stream all progress via SSE.
+
+    Progress events: {"file_idx": i, "filename": "...", "pct": N, "stage": "...", "msg": "..."}
+    File done:       {"file_idx": i, "filename": "...", "file_done": True, "result": {...}}
+    File error:      {"file_idx": i, "filename": "...", "file_error": "..."}
+    All done:        {"all_done": True, "results": [...]}
+    """
+    if not files:
+        raise HTTPException(400, "No files provided")
+
+    ip = request.client.host if request.client else None
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    use_ai = ai_mode and bool(settings.OPENAI_API_KEY)
+    seg_list = _parse_segments(segments)
+
+    # Read all files into memory before streaming starts
+    file_data: List[tuple] = []
+    for i, uf in enumerate(files):
+        if not uf.filename.lower().endswith(".pdf"):
+            raise HTTPException(400, f"File {uf.filename} must be PDF")
+        content = await uf.read()
+        if len(content) > MAX_PDF_SIZE:
+            raise HTTPException(413, f"File {uf.filename} too large (max 200 MB)")
+        file_data.append((i, uf.filename, content))
+
+    n_files = len(file_data)
+    results_store: dict = {}
+
+    async def _process_one(idx: int, fname: str, content: bytes) -> None:
+        import os as _os
+
+        def _push(payload: str) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+        def _progress(pct: int, stage: str, msg: str) -> None:
+            _push(json.dumps(
+                {"file_idx": idx, "filename": fname, "pct": pct, "stage": stage, "msg": msg},
+                ensure_ascii=False,
+            ))
+
+        try:
+            _progress(5, "upload", f"Обработка {fname}...")
+            logger.info("Multi-PDF parse START [%d/%d]: %s (%d bytes)",
+                        idx + 1, n_files, fname, len(content))
+
+            pdf_items, project_name = await loop.run_in_executor(
+                _PDF_EXECUTOR, parse_pdf_specification, content, _progress
+            )
+
+            if not project_name:
+                project_name = _os.path.splitext(fname)[0].strip()
+
+            if not pdf_items:
+                _push(json.dumps(
+                    {"file_idx": idx, "filename": fname,
+                     "file_error": f"Спецификация не найдена в файле {fname}"},
+                    ensure_ascii=False,
+                ))
+                results_store[idx] = None
+                return
+
+            if use_ai and settings.OPENAI_API_KEY:
+                _progress(72, "tech_params", f"{fname}: параметры...")
+                try:
+                    await extract_tech_params(pdf_items)
+                except Exception as _e:
+                    logger.warning("extract_tech_params [%s]: %s", fname, _e)
+
+            _n_items = sum(1 for i in pdf_items if not i.get("is_heading", False))
+            _progress(75, "match", f"{fname}: подбор {_n_items} поз...")
+            try:
+                if use_ai:
+                    matched = await asyncio.wait_for(
+                        match_items_ai(pdf_items, db, segments=seg_list), timeout=600
+                    )
+                else:
+                    matched = await asyncio.wait_for(
+                        match_items(pdf_items, db, segments=seg_list), timeout=600
+                    )
+            except asyncio.TimeoutError:
+                _push(json.dumps(
+                    {"file_idx": idx, "filename": fname,
+                     "file_error": f"Подбор завис (> 10 мин) для {fname}"},
+                    ensure_ascii=False,
+                ))
+                results_store[idx] = None
+                return
+
+            await _log_upload(db, current_user, fname, project_name, matched)
+            await write_audit(db, current_user, "parse_pdf",
+                              resource=fname,
+                              details=f"items={len(matched)}, project={project_name[:60]}",
+                              ip=ip)
+
+            _n_matched = sum(1 for i in matched if i.get("status") != "heading")
+            _progress(100, "done", f"{fname}: готово! {_n_matched} позиций")
+            result = _build_result(fname, project_name, use_ai, matched)
+            results_store[idx] = result
+
+            _push(json.dumps(
+                {"file_idx": idx, "filename": fname, "file_done": True, "result": result},
+                ensure_ascii=False,
+            ))
+            logger.info("Multi-PDF parse DONE [%d/%d]: %s — %d items",
+                        idx + 1, n_files, fname, len(matched))
+
+        except Exception as exc:
+            logger.exception("Multi-PDF parse ERROR [%d/%d]: %s", idx + 1, n_files, fname)
+            loop.call_soon_threadsafe(queue.put_nowait, json.dumps(
+                {"file_idx": idx, "filename": fname, "file_error": str(exc)},
+                ensure_ascii=False,
+            ))
+            results_store[idx] = None
+
+    async def _run_all() -> None:
+        await asyncio.gather(*[
+            _process_one(i, fname, content)
+            for i, fname, content in file_data
+        ])
+        final = [results_store[i] for i in range(n_files) if results_store.get(i) is not None]
+        loop.call_soon_threadsafe(queue.put_nowait, json.dumps(
+            {"all_done": True, "results": final}, ensure_ascii=False,
+        ))
+
+    asyncio.create_task(_run_all())
+
+    async def _events():
+        while True:
+            data = await queue.get()
+            yield "data: " + data + "\n\n"
+            ev = json.loads(data)
+            if "all_done" in ev or "all_error" in ev:
+                break
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 # ── Classic parse (non-streaming) ────────────────────────────────────────────
 

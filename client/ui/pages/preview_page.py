@@ -610,7 +610,12 @@ class PreviewPage(ctk.CTkFrame):
         self._rate_str_var = None
         # Уникальный идентификатор сессии для группировки исправлений
         import uuid
-        self._session_id = str(uuid.uuid4())[:16]
+        self._session_id    = str(uuid.uuid4())[:16]
+        self._select_mode   = False
+        self._checked_items: set = set()   # id(item) выбранных строк
+        # Multi-project support
+        self._projects: list = []
+        self._current_project_idx: int = -1
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
@@ -676,11 +681,39 @@ class PreviewPage(ctk.CTkFrame):
             height=36, width=180, corner_radius=RADIUS_SM,
             state="disabled", command=self._save
         )
-        self.save_btn.grid(row=0, column=6, padx=(0, 16))
+        self.save_btn.grid(row=0, column=6, padx=(0, 4))
 
-        # Легенда
+        # Легенда + кнопки выделения (одна строка)
         leg = ctk.CTkFrame(self, fg_color="transparent")
-        leg.grid(row=1, column=0, sticky="w", padx=pad, pady=(0, 4))
+        leg.grid(row=1, column=0, sticky="ew", padx=pad, pady=(0, 4))
+
+        # Кнопки справа — пакуем первыми (до пилюль), чтобы pack(side="right") работал правильно
+        self.delete_checked_btn = ctk.CTkButton(
+            leg, text="🗑 Удалить (0)",
+            font=FONT_SMALL, fg_color="#E74C3C", hover_color="#C0392B",
+            height=28, width=150, corner_radius=RADIUS_SM,
+            command=self._delete_checked,
+        )
+        self.delete_checked_btn.pack(side="right", padx=(0, 0))
+        self.delete_checked_btn.pack_forget()
+
+        self.reset_checked_btn = ctk.CTkButton(
+            leg, text="🔄 Сбросить (0)",
+            font=FONT_SMALL, fg_color="#2E86AB", hover_color="#1A5E7A",
+            height=28, width=150, corner_radius=RADIUS_SM,
+            command=self._reset_checked,
+        )
+        self.reset_checked_btn.pack(side="right", padx=(0, 4))
+        self.reset_checked_btn.pack_forget()
+
+        self.select_btn = ctk.CTkButton(
+            leg, text="☑ Выбрать",
+            font=FONT_SMALL, fg_color="#AEB6BF", hover_color=NAVY_LIGHT,
+            height=28, width=120, corner_radius=RADIUS_SM,
+            command=self._toggle_select_mode,
+        )
+        self.select_btn.pack(side="right", padx=(8, 4))
+
         for bg, key in [
             (C_EXACT,    "preview_legend_exact"),
             (C_MULTIPLE, "preview_legend_warn"),
@@ -794,7 +827,13 @@ class PreviewPage(ctk.CTkFrame):
             label=t("ctx_reset_item"),
             command=self._reset_item_selected,
         )
+        self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(
+            label=t("ctx_delete_item"),
+            command=self._delete_selected,
+        )
         self.tree.bind("<Button-3>", self._show_ctx_menu)
+        self.tree.bind("<Delete>",   lambda e: self._delete_selected())
 
         # Панель «Константы по бренду»
         cf = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
@@ -862,6 +901,8 @@ class PreviewPage(ctk.CTkFrame):
     # ── Сброс сессии ─────────────────────────────────────────────────────────
     def _reset_session(self):
         """Сброс страницы к начальному состоянию — возврат на вкладку загрузки."""
+        self._projects = []
+        self._current_project_idx = -1
         self.items = []
         self.tree.delete(*self.tree.get_children())
         self._filter_mode = "all"
@@ -871,9 +912,156 @@ class PreviewPage(ctk.CTkFrame):
         self.save_btn.configure(state="disabled")
         self.stat_lbl.configure(text="")
         self._no_data_lbl.lift()
+        if hasattr(self.app, "hide_project_tabs"):
+            self.app.hide_project_tabs()
         self.app._switch_tab(0)
 
     # ── Данные ───────────────────────────────────────────────────────────────
+    def load_multi_data(self, results: list):
+        """Store each PDF result as a separate project; show tabs; load first."""
+        self._projects = []
+        for result in results:
+            if not result:
+                continue
+            items = list(result.get("items", []))
+            # Per-project sequential numbering (not cross-project)
+            pos_counter = 0
+            for it in items:
+                if it.get("status") != "heading":
+                    pos_counter += 1
+                    it["pos"] = str(pos_counter)
+            # Keep result["items"] pointing at the same list so load_data works
+            result["items"] = items
+            self._projects.append({
+                "name":   result.get("filename", "PDF"),
+                "result": result,
+                "items":  items,
+            })
+
+        # Notify nav panel to show project tabs
+        if hasattr(self.app, "show_project_tabs"):
+            self.app.show_project_tabs([p["name"] for p in self._projects])
+
+        if not self._projects:
+            return
+
+        self._current_project_idx = 0
+        # load_data fetches constants from server (only once per multi-load)
+        self.load_data(self._projects[0]["result"])
+
+    def switch_project(self, idx: int):
+        """Switch to a project tab without re-fetching constants from server."""
+        if idx < 0 or idx >= len(self._projects):
+            return
+        self._current_project_idx = idx
+        proj = self._projects[idx]
+
+        # Reset UI state
+        self._filter_mode = "all"
+        self.search_var.set("")
+        for k, btn in self.filter_btns.items():
+            btn.configure(fg_color=NAVY_LIGHT if k == "all" else "#AEB6BF")
+
+        # Exit select mode if active
+        if self._select_mode:
+            self._select_mode = False
+            self._checked_items.clear()
+            self.select_btn.configure(fg_color="#AEB6BF", text="☑ Выбрать")
+            self.tree.heading("c0", text=t("col_num"))
+            self.delete_checked_btn.pack_forget()
+            self.reset_checked_btn.pack_forget()
+
+        # Set items for this project
+        self.items = proj["items"]
+
+        # Reset tree IDs (tree rebuilt by _populate)
+        for it in self.items:
+            it["_iid"] = None
+            it.setdefault("_user_edited", False)
+            it.setdefault("_user_price", None)
+            it.setdefault("_user_const_price", None)
+            it.setdefault("_user_seb_price", None)
+
+        # Update brand dropdown from this project's items
+        brands_in_data = sorted({
+            ((it.get("best_match") or {}).get("brand") or "").strip()
+            for it in self.items
+            if (it.get("best_match") or {}).get("brand")
+        })
+        self._suppress_recalc = True
+        if brands_in_data:
+            self.brand_dd.configure(values=brands_in_data)
+            self.brand_var.set(brands_in_data[0])
+            self._load_const_fields(brands_in_data[0])
+        else:
+            self.brand_dd.configure(values=["—"])
+            self.brand_var.set("—")
+        self._suppress_recalc = False
+
+        self._populate()
+        self._update_stats()
+        self.save_btn.configure(state="normal")
+        self._no_data_lbl.lower()
+
+        # Sync active tab style in nav
+        if hasattr(self.app, "_switch_project_tab_style"):
+            self.app._switch_project_tab_style(idx)
+
+    def save_all_excel(self):
+        """Save all loaded projects to one multi-sheet Excel file."""
+        if not self._projects:
+            messagebox.showinfo("", "Нет проектов для сохранения.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Сохранить Excel всех проектов",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not path:
+            return
+
+        try:
+            # Compute KP prices for ALL projects before saving
+            for proj in self._projects:
+                for it in proj["items"]:
+                    seb, seb_sum, kp, kp_sum = self._compute_kp(it)
+                    it["_computed_kp_price"] = kp
+                    it["_computed_kp_sum"]   = kp_sum
+                    it["_computed_seb_price"] = seb
+                    it["_computed_seb_sum"]   = seb_sum
+
+            gen_projects = [
+                {
+                    "name": p["name"],
+                    "items": p["items"],
+                    "brand_consts": dict(self.brand_consts),
+                }
+                for p in self._projects
+            ]
+
+            from services.excel_generator import generate_excel_multi
+            out = generate_excel_multi(
+                projects=gen_projects,
+                output_path=path,
+                constants=self.constants,
+            )
+
+            total_pos = sum(
+                sum(1 for it in p["items"]
+                    if it.get("status") not in ("heading", "not_found"))
+                for p in self._projects
+            )
+            if messagebox.askyesno(
+                "Сохранить Excel всех проектов",
+                f"Сохранено {len(self._projects)} файлов, {total_pos} позиций.\n"
+                f"Файл: {out}\n\nОткрыть?",
+            ):
+                self._open_file(out)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            messagebox.showerror("Ошибка сохранения", str(e))
+
     def load_data(self, result: dict):
         # Сбрасываем фильтр и поиск чтобы не было «призраков» из предыдущего файла
         self._filter_mode = "all"
@@ -1087,7 +1275,6 @@ class PreviewPage(ctk.CTkFrame):
         data = items if items is not None else self.items
         for item in data:
             self._insert_row(item)
-        self._adjust_row_height()
 
     def _adjust_row_height(self):
         """Set rowheight to fit the tallest cell value across all visible rows."""
@@ -1149,7 +1336,8 @@ class PreviewPage(ctk.CTkFrame):
         if status == "heading":
             # Section-header row — render as a bold blue separator spanning the name column
             heading_name = item.get("name_raw", "").replace("\n", " ").strip()
-            vals = ("", "", "", heading_name, "", "", "", "", "", "", "", "", "", "", "", "", "")
+            _h_cb = ("☑" if id(item) in self._checked_items else "☐") if self._select_mode else ""
+            vals = (_h_cb, "", "", heading_name, "", "", "", "", "", "", "", "", "", "", "", "", "")
             iid = self.tree.insert("", position, values=vals, tags=("heading",))
             item["_iid"] = iid
             return iid
@@ -1211,8 +1399,14 @@ class PreviewPage(ctk.CTkFrame):
         if _no_price_in_db:
             method_lbl = (method_lbl + " | нет цены в БД") if method_lbl else "нет цены в БД"
 
+        _pos_raw = item.get("pos", "")
+        if self._select_mode:
+            _cb = "☑" if id(item) in self._checked_items else "☐"
+            _pos_display = f"{_cb} {_pos_raw}" if _pos_raw else _cb
+        else:
+            _pos_display = _pos_raw
         vals = (
-            item.get("pos", ""),
+            _pos_display,
             brand,
             article,
             name,
@@ -1389,6 +1583,18 @@ class PreviewPage(ctk.CTkFrame):
         """Одиночный клик по таблице: если активно inline-поле — сохраняем его."""
         if self._edit_entry and self._edit_iid:
             self._commit_edit(self._edit_entry)
+        if self._select_mode:
+            region = self.tree.identify_region(event.x, event.y)
+            col    = self.tree.identify_column(event.x)
+            if col == "#1":   # колонка № — переключаем чекбокс
+                if region == "heading":
+                    self._select_all_toggle()
+                    return "break"
+                elif region == "cell":
+                    iid = self.tree.identify_row(event.y)
+                    if iid:
+                        self._toggle_item_check(iid)
+                    return "break"
         # НЕ возвращаем "break" — обычная выборка строки продолжается
 
     # ── Двойной клик ─────────────────────────────────────────────────────────
@@ -1776,6 +1982,125 @@ class PreviewPage(ctk.CTkFrame):
         self._redraw_row(item)
         self._update_stats()
 
+    def _delete_selected(self):
+        """Удалить выбранную строку из списка позиций."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        item = self._get_item_by_iid(iid)
+        if item is None:
+            return
+        # Удаляем из данных и из дерева
+        try:
+            self.items.remove(item)
+        except ValueError:
+            pass
+        if self.tree.exists(iid):
+            self.tree.delete(iid)
+        # Обновляем счётчики статусов
+        self._update_stats()
+
+    # ── Режим выбора (галочки) ────────────────────────────────────────────
+    def _toggle_select_mode(self):
+        self._select_mode = not self._select_mode
+        self._checked_items.clear()
+        if self._select_mode:
+            self.select_btn.configure(fg_color=NAVY_LIGHT, text="✖ Выйти")
+            self.tree.heading("c0", text="☐  №")
+        else:
+            self.select_btn.configure(fg_color="#AEB6BF", text="☑ Выбрать")
+            self.tree.heading("c0", text=t("col_num"))
+            self.delete_checked_btn.pack_forget()
+        self._populate()
+
+    def _toggle_item_check(self, iid: str):
+        item = self._get_item_by_iid(iid)
+        if item is None:
+            return
+        is_heading = item.get("status") == "heading"
+        pos = "" if is_heading else str(item.get("pos", ""))
+        if id(item) in self._checked_items:
+            self._checked_items.discard(id(item))
+            cb = "☐"
+        else:
+            self._checked_items.add(id(item))
+            cb = "☑"
+        cur = list(self.tree.item(iid, "values"))
+        cur[0] = f"{cb} {pos}" if pos else cb
+        self.tree.item(iid, values=cur)
+        self._update_delete_btn()
+
+    def _select_all_toggle(self):
+        all_iids = list(self.tree.get_children())
+        items_list = [self._get_item_by_iid(iid) for iid in all_iids]
+        pairs = [(iid, it) for iid, it in zip(all_iids, items_list) if it is not None]
+        all_checked = bool(pairs) and all(id(it) in self._checked_items for _, it in pairs)
+        for iid, it in pairs:
+            is_heading = it.get("status") == "heading"
+            pos = "" if is_heading else str(it.get("pos", ""))
+            if all_checked:
+                self._checked_items.discard(id(it))
+                cb = "☐"
+            else:
+                self._checked_items.add(id(it))
+                cb = "☑"
+            cur = list(self.tree.item(iid, "values"))
+            cur[0] = f"{cb} {pos}" if pos else cb
+            self.tree.item(iid, values=cur)
+        new_all = (not all_checked) and bool(pairs)
+        self.tree.heading("c0", text="☑  №" if new_all else "☐  №")
+        self._update_delete_btn()
+
+    def _update_delete_btn(self):
+        n = len(self._checked_items)
+        if n > 0:
+            self.reset_checked_btn.configure(
+                text=f"🔄 Сбросить ({n})")
+            self.reset_checked_btn.pack(side="right", padx=(0, 4))
+            self.delete_checked_btn.configure(
+                text=f"🗑 Удалить ({n})")
+            self.delete_checked_btn.pack(side="right", padx=(0, 0))
+        else:
+            self.reset_checked_btn.pack_forget()
+            self.delete_checked_btn.pack_forget()
+
+    def _reset_checked(self):
+        """Сбросить выбранные позиции к исходным данным из PDF."""
+        to_reset = [i for i in self.items
+                    if id(i) in self._checked_items and i.get("status") != "heading"]
+        for item in to_reset:
+            for key in ("best_match", "candidates", "match_method",
+                        "ai_confidence", "ai_used", "ai_reason",
+                        "_user_edited", "_user_const_price",
+                        "_corrected_by_manager", "comment", "delivery"):
+                item.pop(key, None)
+            item["status"] = "not_found"
+        self._checked_items.clear()
+        self._toggle_select_mode()   # выходим + перерисовываем
+        self._update_stats()
+
+    def _delete_checked(self):
+        to_del = [i for i in self.items if id(i) in self._checked_items]
+        for item in to_del:
+            iid = item.get("_iid")
+            try:
+                self.items.remove(item)
+            except ValueError:
+                pass
+            if iid and self.tree.exists(iid):
+                self.tree.delete(iid)
+        # Renumber remaining non-heading items sequentially after deletion
+        _new_pos = 0
+        for _it in self.items:
+            if _it.get("status") == "heading":
+                continue
+            _new_pos += 1
+            _it["pos"] = str(_new_pos)
+        self._checked_items.clear()
+        self._toggle_select_mode()
+        self._update_stats()
+
     # ── Сохранение ───────────────────────────────────────────────────────────
     def _save(self):
         if not self.items:
@@ -1825,6 +2150,8 @@ class PreviewPage(ctk.CTkFrame):
                 seb, seb_sum, kp, kp_sum = self._compute_kp(it)
                 it["_computed_kp_price"] = kp
                 it["_computed_kp_sum"]   = kp_sum
+                it["_computed_seb_price"] = seb
+                it["_computed_seb_sum"]   = seb_sum
 
             import tempfile
             base_tpl = ""
