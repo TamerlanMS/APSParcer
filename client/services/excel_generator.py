@@ -1412,11 +1412,18 @@ def generate_excel_multi(
 
     kp_ws = wb["КП"]
     # Clear old template formulas from the data range before writing.
-    # Rows 13-500 in the template contain IFERROR('WV 4.0'!...) formulas
-    # that remain in cells we don't overwrite and cause stale references.
+    # First unmerge any merged cells in rows 13-500 — openpyxl raises
+    # MergeCell error when writing to non-top-left cells of a merge.
+    for _mr in list(kp_ws.merged_cells.ranges):
+        if _mr.max_row >= 13 and _mr.min_row <= 500:
+            kp_ws.unmerge_cells(str(_mr))
+    # Now safely clear values in rows 13-500.
     for _r in range(13, 501):
         for _c in range(1, 15):
-            kp_ws.cell(row=_r, column=_c).value = None
+            try:
+                kp_ws.cell(row=_r, column=_c).value = None
+            except Exception:
+                pass
     for tbl in kp_ws.tables.values():
         for col in tbl.tableColumns:
             try:
