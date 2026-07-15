@@ -458,6 +458,54 @@ def _has_vector_only_pages(pdf_bytes: bytes) -> bool:
         return False
 
 
+def _detect_table_pages_by_lines(pdf_bytes: bytes) -> List[int]:
+    """Return 0-based page indices that contain a rectangular spec table.
+
+    Uses pdfplumber line-strategy table detection — works on vector PDFs
+    where text is drawn as paths but table borders are still proper lines.
+    Floor-plan pages have complex shapes rather than regular grid tables
+    and are therefore NOT returned by this function.
+    """
+    try:
+        import pdfplumber as _plb
+        import io as _io2
+        _settings = {
+            "vertical_strategy":   "lines",
+            "horizontal_strategy": "lines",
+            "snap_tolerance":  6,
+            "join_tolerance":  6,
+            "min_words_vertical":   0,
+            "min_words_horizontal": 0,
+        }
+        table_pages: List[int] = []
+        with _plb.open(_io2.BytesIO(pdf_bytes)) as _pdf:
+            for _pi, _pg in enumerate(_pdf.pages):
+                try:
+                    tbls = _pg.find_tables(_settings)
+                    for _t in tbls:
+                        rows = len(_t.rows)
+                        cols = len(_t.rows[0].cells) if _t.rows else 0
+                        # Spec tables: many rows, several cols, moderate width.
+                        # Floor plans and TOC pages have different proportions.
+                        _w = _t.bbox[2] - _t.bbox[0] if _t.bbox else 0
+                        _h = _t.bbox[3] - _t.bbox[1] if _t.bbox else 0
+                        if (rows >= 15 and cols >= 6
+                                and 700 <= _w <= 1600
+                                and _h >= 400):
+                            table_pages.append(_pi)
+                            break
+                except Exception:
+                    pass
+        logger.info(
+            "_detect_table_pages_by_lines: found spec-table pages: %s",
+            table_pages,
+        )
+        return table_pages
+    except Exception as _exc:
+        logger.warning("_detect_table_pages_by_lines failed: %s", _exc)
+        return []
+
+
 def _parse_cid_pdf_via_pdfplumber(pdf_bytes: bytes) -> List[Dict]:
     """Extract pos/code/qty from CID-encoded spec PDFs via pdfplumber.
 
@@ -565,6 +613,8 @@ def _parse_pdf_with_ocr(
     progress_cb=None,
     skip_readable_nonspec: bool = False,
     tail_first: bool = False,
+    ocr_dpi: Optional[int] = None,
+    page_whitelist: Optional[List[int]] = None,
 ) -> Tuple[List[Dict], str]:
     """Full OCR path for scanned PDFs.
 
@@ -589,7 +639,7 @@ def _parse_pdf_with_ocr(
         logger.warning("OCR path unavailable: no OPENAI_API_KEY and pytesseract missing")
         return [], ""
 
-    dpi = _VISION_DPI if use_vision else _OCR_DPI
+    dpi = _VISION_DPI if use_vision else (ocr_dpi or _OCR_DPI)
     mat = _fitz.Matrix(dpi / 72, dpi / 72)
     doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = len(doc)
@@ -620,6 +670,9 @@ def _parse_pdf_with_ocr(
         try:
             if i in _readable_nonspec:
                 page_jpegs.append(None)  # skip — readable non-spec
+                continue
+            if page_whitelist is not None and i not in page_whitelist:
+                page_jpegs.append(None)  # skip — not in whitelist
                 continue
             pix = doc[i].get_pixmap(matrix=mat, alpha=False)
             if i == 0:
@@ -848,6 +901,7 @@ HEADER_PATTERNS = {
              "обозначениеитехн"],
     "article": ["типмарка",
                 "тип,марка",
+                "тип.марка",
                 "типмарки",
                 "маркаобозначение",
                 "марка,обозначение",
@@ -1109,9 +1163,22 @@ def extract_specification_from_page(
     auto_num = 0
     last_section: str = ""   # section header text carried forward for context
 
+    # Pre-compile щит sub-description filter (used inside the loop)
+    _VVODE_RE = re.compile(
+        r"^(?:[а-яА-ЯёЁa-zA-Z]\)\s*)?(?:на\s+вводе|на\s+выводе|вводн|на\s+линиях|расцепитель)",
+        re.IGNORECASE,
+    )
+
     for row in table[data_start:]:
         if not isinstance(row, (list, tuple)):
             continue
+        # Skip щит sub-description lines that appear in the "Наименование" column
+        # as continuation text: "а) На вводе: ВН-32-3Р 25А IEK", "б) На линиях: ВА47-29..."
+        # These are NOT separate spec items.
+        if cols.get("name") is not None:
+            _quick_name = _cell(row, cols["name"]).strip()
+            if _quick_name and _VVODE_RE.match(_quick_name):
+                continue
         _is_heading_row = False   # reset each iteration; set True for section headers
         _panel_code_for_sub = ""  # щиток own code to re-emit as standalone after heading
         if "pos" in cols:
@@ -1131,7 +1198,12 @@ def extract_specification_from_page(
                 # characters) are treated as empty and do NOT trigger
                 # _has_content, keeping the row as a plain continuation.
                 _row_art_norm = normalize_article(_row_art)
-                _has_content = bool(_row_name) and bool(_row_art_norm or _row_code)
+                # Pre-compute qty for the has-content check and standalone detection.
+                # Items with name + qty but no article/code are valid spec entries
+                # (e.g. cable, pipe, luminaire rows on pages without position codes).
+                _row_qty_prelim = _cell(row, cols.get("qty")) if cols.get("qty") is not None else ""
+                _row_qty_val    = extract_qty(_row_qty_prelim) if _row_qty_prelim else 0
+                _has_content = bool(_row_name) and bool(_row_art_norm or _row_code or _row_qty_val > 0)
 
                 # A numbered kit sub-item looks like "1 / Component" or "2) Part" —
                 # the name starts with a digit followed by "/" or ")".
@@ -1203,6 +1275,9 @@ def extract_specification_from_page(
                         _is_new_standalone = (
                             prev.get("is_heading")
                             or (_prev_art_b and cont_qty and extract_qty(cont_qty) > 0)
+                            # Positional-code-less items with their own qty:
+                            # e.g. "Светильник PROLED PL-8 | ШТ | 291"
+                            or (not _row_art_norm and not _row_code and _row_qty_val > 0)
                         )
                         if ((_prev_is_panel or prev.get("is_heading") or _codes_differ) and cont_code) or _is_new_standalone:
                             # (B2/B2c) Sub-component of named panel / heading,
@@ -2042,11 +2117,23 @@ def parse_pdf_specification(
             )
             if progress_cb:
                 progress_cb(20, "ocr", "Векторный PDF AutoCAD: запуск OCR...")
+            # Detect which pages actually contain spec tables (vs floor plans)
+            # using pdfplumber line detection. This avoids OCRing large drawing
+            # pages and focuses on the rectangular spec table sheets.
+            _tbl_pages = _detect_table_pages_by_lines(pdf_bytes)
+            _whitelist = _tbl_pages if _tbl_pages else None
+            if _whitelist:
+                logger.info(
+                    "parse_pdf: vector OCR restricted to table pages: %s",
+                    _whitelist,
+                )
             all_items, best_proj_name = _parse_pdf_with_ocr(
                 pdf_bytes,
                 progress_cb=progress_cb,
                 skip_readable_nonspec=True,
                 tail_first=True,
+                ocr_dpi=250,
+                page_whitelist=_whitelist,
             )
 
     # Renumber sequentially + normalise qty to float

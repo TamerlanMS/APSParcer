@@ -1414,9 +1414,15 @@ def generate_excel_multi(
     # Clear old template formulas from the data range before writing.
     # First unmerge any merged cells in rows 13-500 — openpyxl raises
     # MergeCell error when writing to non-top-left cells of a merge.
+    # Unmerge any merged ranges that touch row 12+ (data area + footer).
+    # max_row >= 12 catches: ranges spanning header->data (A12:N13),
+    # ranges entirely inside data zone, and footer merges beyond row 500.
     for _mr in list(kp_ws.merged_cells.ranges):
-        if _mr.max_row >= 13 and _mr.min_row <= 500:
-            kp_ws.unmerge_cells(str(_mr))
+        if _mr.max_row >= 12:
+            try:
+                kp_ws.unmerge_cells(str(_mr))
+            except Exception:
+                pass
     # Now safely clear values in rows 13-500.
     for _r in range(13, 501):
         for _c in range(1, 15):
@@ -1444,7 +1450,10 @@ def generate_excel_multi(
     for proj in projects:
         # Write project header WITHOUT merging — merged cells inside a
         # table range (A12:N500) cause Excel to discard the entire table.
-        kp_ws.cell(row=kp_row, column=1, value=proj.get("name", ""))
+        try:
+            kp_ws.cell(row=kp_row, column=1, value=proj.get("name", ""))
+        except AttributeError:
+            pass   # MergedCell slave — header already cleared
         for ci2 in range(1, KP_N + 1):
             try:
                 c           = kp_ws.cell(row=kp_row, column=ci2)
@@ -1481,7 +1490,22 @@ def generate_excel_multi(
                 rrts_p, rrts_s,
             ]
             for ci2, (val, aln) in enumerate(zip(kp_vals, KP_ALNS), 1):
-                c           = kp_ws.cell(row=kp_row, column=ci2, value=val)
+                try:
+                    c = kp_ws.cell(row=kp_row, column=ci2, value=val)
+                except AttributeError:
+                    # Non-top-left cell of a surviving merge — unmerge on-the-fly
+                    for _mr3 in list(kp_ws.merged_cells.ranges):
+                        if (_mr3.min_row <= kp_row <= _mr3.max_row and
+                                _mr3.min_col <= ci2 <= _mr3.max_col):
+                            try:
+                                kp_ws.unmerge_cells(str(_mr3))
+                            except Exception:
+                                pass
+                            break
+                    try:
+                        c = kp_ws.cell(row=kp_row, column=ci2, value=val)
+                    except Exception:
+                        continue
                 c.alignment = aln
                 c.border    = DATA_BDR
                 if ci2 in KP_PRICE_COL:
