@@ -86,15 +86,27 @@ class DatabasePage(ctk.CTkFrame):
             return False
 
     def _apply_role_visibility(self):
-        """Показывает элементы только для администраторов."""
+        """Показывает элементы согласно роли: admin — полный доступ,
+        manager — только свой сегмент, director — раздел скрыт в nav."""
         if not hasattr(self, "_vectorize_btn"):
             return
         if self._is_admin():
+            # Администратор: выбор сегмента импорта + блок векторизации
             self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
-            self._vectorize_btn.grid(row=4, column=0, padx=16, pady=(0, 8), sticky="ew")
+            self._vec_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._seg_info_lbl.grid_remove()
         else:
+            # Менеджер: только импорт в свой сегмент, векторизация скрыта
             self._seg_frame.grid_remove()
-            self._vectorize_btn.grid_remove()
+            self._vec_frame.grid_remove()
+            seg_code = getattr(self.app.config, "user_segment", "ss")
+            seg_map  = {"ss": "Слаботочные системы", "os": "Осветительные системы",
+                        "sil": "Силовые системы"}
+            seg_name = seg_map.get(seg_code, seg_code.upper())
+            self._seg_info_lbl.configure(
+                text=f"🗂  Ваш сегмент: {seg_name}"
+            )
+            self._seg_info_lbl.grid(row=2, column=0, sticky="w", padx=24, pady=(0, 4))
 
     def _build(self):
         pad = PAD_MD
@@ -136,6 +148,9 @@ class DatabasePage(ctk.CTkFrame):
         self._build_import_tab()
         self._build_logs_tab()
 
+        # Автозагрузка логов при переключении на вкладку «История»
+        self.tabview.configure(command=self._on_tab_change)
+
         # ── Progress / status (shared) ────────────────────────────────────────
         self.progress = ctk.CTkProgressBar(self, progress_color=NAVY_LIGHT,
                                             fg_color="#D5D8DC")
@@ -163,6 +178,16 @@ class DatabasePage(ctk.CTkFrame):
         # Single drop zone for both DB and Constants
         self.db_drop = DropCard(tab, "db_drop_label")
         self.db_drop.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
+
+        # ── Метка сегмента (только для менеджеров) ──────────────────────────────
+        self._seg_info_lbl = ctk.CTkLabel(
+            tab,
+            text="",
+            font=FONT_SMALL,
+            text_color=NAVY_LIGHT,
+        )
+        self._seg_info_lbl.grid(row=2, column=0, sticky="w", padx=24, pady=(0, 4))
+        self._seg_info_lbl.grid_remove()
 
         # ── Segment selector (только для администраторов) ─────────────────────
         self._seg_frame = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
@@ -206,16 +231,45 @@ class DatabasePage(ctk.CTkFrame):
         )
         self.db_btn.grid(row=3, column=0, padx=16, pady=(8, 8), sticky="ew")
 
-        # Vectorize button (только для администраторов)
-        self._vectorize_btn = ctk.CTkButton(
-            tab, text="🔄  Начать векторизацию",
+        # ── Векторизация (только для администраторов) ────────────────────────
+        self._vec_frame = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
+        self._vec_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._vec_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self._vec_frame, text="Векторизация:",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+        ).grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")
+
+        _vec_labels = [t("seg_ss"), t("seg_os"), t("seg_sil"), "Все сегменты"]
+        self._vec_seg_var = ctk.StringVar(value=_vec_labels[3])  # default: Все
+        self._vec_seg_btn = ctk.CTkSegmentedButton(
+            self._vec_frame,
+            values=_vec_labels,
+            variable=self._vec_seg_var,
             font=FONT_SMALL,
-            fg_color="#5D6D7E", hover_color="#2C3E50",
-            height=36, corner_radius=RADIUS_MD,
+            selected_color="#2C3E50",
+            selected_hover_color="#1A252F",
+            unselected_color="#5D6D7E",
+            unselected_hover_color="#4A5568",
+            text_color="white",
+            text_color_disabled="#AABBCC",
+            dynamic_resizing=False,
+            height=32,
+        )
+        self._vec_seg_btn.grid(row=0, column=1, padx=(0, 8), pady=6, sticky="ew")
+        self._vec_seg_labels = _vec_labels
+        self._vec_seg_codes  = ["ss", "os", "sil", "all"]
+
+        self._vectorize_btn = ctk.CTkButton(
+            self._vec_frame, text="🔄  Начать",
+            font=FONT_SMALL,
+            fg_color="#2C3E50", hover_color="#1A252F",
+            height=32, width=110, corner_radius=RADIUS_SM,
             command=self._start_vectorization,
         )
-        self._vectorize_btn.grid(row=4, column=0, padx=16, pady=(0, 8), sticky="ew")
-        self._vectorize_btn.grid_remove()  # скрыт по умолчанию
+        self._vectorize_btn.grid(row=0, column=2, padx=(0, 12), pady=6)
+        self._vec_frame.grid_remove()  # скрыт по умолчанию
 
     def _build_logs_tab(self):
         tab = self.tabview.tab(t("db_tab_logs"))
@@ -336,27 +390,40 @@ class DatabasePage(ctk.CTkFrame):
             messagebox.showinfo("OK", msg)
 
     def _start_vectorization(self):
-        """Запускает переиндексацию Pinecone для выбранного сегмента (только для администраторов)."""
+        """Запускает переиндексацию Pinecone.
+        Администратор выбирает сегмент через _vec_seg_btn (включая «Все сегменты»).
+        Менеджеры не имеют доступа к этой функции.
+        """
         if self._is_admin():
-            label = self._import_seg_var.get()
+            label = self._vec_seg_var.get()
             try:
-                seg = self._import_seg_codes[self._import_seg_labels.index(label)]
+                seg = self._vec_seg_codes[self._vec_seg_labels.index(label)]
             except (ValueError, IndexError):
-                seg = "ss"
+                seg = "all"
+            seg_display = "все сегменты" if seg == "all" else label
         else:
-            seg = getattr(self.app.config, "user_segment", "ss")
-
-        seg_display = label if self._is_admin() else seg
+            # Менеджеры не должны попадать сюда — кнопка скрыта
+            return
 
         def _worker():
             try:
                 result = self.api.start_vectorization(segment=seg)
-                msg = result.get("message", f"Векторизация сегмента «{seg_display}» запущена")
+                msg = result.get("message",
+                                 f"Векторизация ({seg_display}) запущена")
                 self.after(0, lambda: messagebox.showinfo("Векторизация", msg))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Ошибка векторизации", str(e)))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_tab_change(self):
+        """Вызывается при переключении вкладки tabview."""
+        try:
+            tab_name = self.tabview.get()
+            if t("db_tab_logs") in tab_name and not self.log_tree.get_children():
+                self._load_logs()
+        except Exception:
+            pass
 
     def _load_logs(self):
         try:

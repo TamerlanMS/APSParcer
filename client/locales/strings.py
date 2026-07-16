@@ -265,6 +265,9 @@ STRINGS = {
         "udlg_saving": "⏳ Сохранение...",
         "udlg_no_role": "⚠️ Выберите роль",
 
+        # Analytics page (director + admin)
+        "nav_analytics": "📈  Аналитика",
+
         # Excel template page (admin+)
         "nav_template": "📋  Шаблон Excel",
         "tpl_title": "📋  Управление шаблоном Excel",
@@ -604,6 +607,9 @@ STRINGS = {
         "udlg_save": "💾  Сақтау",
         "udlg_cancel": "Болдырмау",
         "udlg_no_name": "⚠️ Аты-жөнін енгізіңіз",
+
+        # Analytics page (director + admin)
+        "nav_analytics": "📈  Аналитика",
 
         # Excel template page (admin+)
         "nav_template": "📋  Excel үлгісі",

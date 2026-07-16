@@ -11,6 +11,7 @@ from app.api import pdf, database, auth
 from app.api import users as users_api
 from app.api import excel_template as excel_template_api
 from app.api import corrections as corrections_api
+from app.api import analytics as analytics_api
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 
@@ -53,6 +54,10 @@ async def lifespan(app: FastAPI):
             # Index for fast segment filtering
             await conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_products_segment ON products (segment)"
+            ))
+            # full_name column on pdf_upload_logs (Phase 1 addendum)
+            await conn.execute(text(
+                "ALTER TABLE pdf_upload_logs ADD COLUMN IF NOT EXISTS full_name VARCHAR(200)"
             ))
         logger.info("Schema migrations applied")
     except Exception as exc:
@@ -141,6 +146,7 @@ app.include_router(pdf.router,      prefix="/api/v1/pdf",      tags=["pdf"])
 app.include_router(database.router, prefix="/api/v1/database", tags=["database"])
 app.include_router(excel_template_api.router, prefix="/api/v1",  tags=["excel-template"])
 app.include_router(corrections_api.router, prefix="/api/v1/corrections", tags=["corrections"])
+app.include_router(analytics_api.router)   # prefix="/api/v1/analytics" внутри роутера
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

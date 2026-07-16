@@ -14,6 +14,7 @@ from ui.pages.preview_page import PreviewPage
 from ui.pages.database_page import DatabasePage
 from ui.pages.users_page import UsersPage
 from ui.pages.template_page import TemplatePage
+from ui.pages.analytics_page import AnalyticsPage
 
 try:
     from tkinterdnd2 import TkinterDnD
@@ -152,15 +153,16 @@ class MainApp(ctk.CTk):
         self.content_frame.grid_rowconfigure(0, weight=1)
         self.content_frame.grid_columnconfigure(0, weight=1)
 
-        self.upload_page   = UploadPage(self.content_frame, self.api, self)
-        self.preview_page  = PreviewPage(self.content_frame, self.api, self)
-        self.database_page = DatabasePage(self.content_frame, self.api, self)
-        self.users_page    = UsersPage(self.content_frame, self.api, self)
-        self.template_page = TemplatePage(self.content_frame, self.api, self)
+        self.upload_page    = UploadPage(self.content_frame, self.api, self)
+        self.preview_page   = PreviewPage(self.content_frame, self.api, self)
+        self.database_page  = DatabasePage(self.content_frame, self.api, self)
+        self.users_page     = UsersPage(self.content_frame, self.api, self)
+        self.template_page  = TemplatePage(self.content_frame, self.api, self)
+        self.analytics_page = AnalyticsPage(self.content_frame, self.api, self)
 
         for page in [self.upload_page, self.preview_page,
                      self.database_page, self.users_page,
-                     self.template_page]:
+                     self.template_page, self.analytics_page]:
             page.grid(row=0, column=0, sticky="nsew")
 
         self.statusbar = ctk.CTkLabel(
@@ -174,7 +176,7 @@ class MainApp(ctk.CTk):
     # ── Nav (pack-based для правильного layout) ───────────────────────────────
 
     # Icon-only text for each tab index (used when sidebar is collapsed)
-    _NAV_ICON_ONLY = {0: "📄", 1: "📊", 2: "🗄", 3: "👥", 4: "📋"}
+    _NAV_ICON_ONLY = {0: "📄", 1: "📊", 2: "🗄", 3: "👥", 4: "📋", 5: "📈"}
 
     def _build_nav(self):
         nav = ctk.CTkFrame(self, fg_color=NAVY, corner_radius=0, width=NAV_W)
@@ -241,6 +243,17 @@ class MainApp(ctk.CTk):
             if idx == 2:
                 self._db_nav_btn = btn  # ссылка для скрытия у директора
 
+        # ── Аналитика (director + admin, скрыта по умолчанию) ─────────────────
+        self._analytics_nav_btn = ctk.CTkButton(
+            nav, text=t("nav_analytics"), font=FONT_NAV,
+            fg_color="transparent", hover_color=BLUE_MID,
+            text_color=TEXT_NAV, anchor="w",
+            height=50, corner_radius=0, border_width=0,
+            command=lambda: self._switch_tab(5),
+        )
+        self.nav_btns.append((self._analytics_nav_btn, "nav_analytics", 5))
+        # Видимость управляется в _update_user_panel (director + admin)
+
         # ── Project tabs panel (shown when multi-PDF files are loaded) ─────────
         self._tab_panel = ctk.CTkFrame(nav, fg_color=NAVY_DARK, corner_radius=0)
         # Not packed here — shown dynamically via show_project_tabs()
@@ -274,7 +287,7 @@ class MainApp(ctk.CTk):
 
         # ── Admin section ──────────────────────────────────────────────────────
         self._admin_container = ctk.CTkFrame(nav, fg_color="transparent", corner_radius=0)
-        self._admin_container.pack(fill="x")
+        # пакуется позже (side="bottom") после user_card и кнопок
 
         self._admin_sep = ctk.CTkFrame(
             self._admin_container, fg_color=BLUE_MID, height=1, corner_radius=0)
@@ -302,8 +315,26 @@ class MainApp(ctk.CTk):
         self.nav_btns.append((self._template_btn, "nav_template", 4))
 
         # ── User card ─────────────────────────────────────────────────────────
+        self.change_key_btn = ctk.CTkButton(
+            nav, text=t("nav_change_key"), font=("Calibri", 10),
+            fg_color="transparent", hover_color=BLUE_MID,
+            text_color=TEXT_NAV, height=24, border_width=0,
+            corner_radius=RADIUS_SM,
+            command=lambda: self._show_auth(first=False),
+        )
+        self.change_key_btn.pack(fill="x", padx=14, pady=(0, 12), side="bottom")
+
+        self.logout_btn = ctk.CTkButton(
+            nav, text=t("nav_logout"), font=FONT_SMALL,
+            fg_color="transparent", hover_color="#922B21",
+            text_color=TEXT_NAV_LIGHT, height=30,
+            border_width=1, border_color=BLUE_MID,
+            corner_radius=RADIUS_SM, command=self._logout,
+        )
+        self.logout_btn.pack(fill="x", padx=14, pady=(4, 2), side="bottom")
+
         self._user_card = ctk.CTkFrame(nav, fg_color=NAVY_DARK, corner_radius=8)
-        self._user_card.pack(fill="x", padx=10, pady=(4, 4))
+        self._user_card.pack(fill="x", padx=10, pady=(4, 4), side="bottom")
 
         name_row = ctk.CTkFrame(self._user_card, fg_color="transparent")
         name_row.pack(fill="x", padx=10, pady=(10, 2))
@@ -322,24 +353,7 @@ class MainApp(ctk.CTk):
         )
         self._user_role_lbl.pack(fill="x", padx=10, pady=(0, 8))
 
-        # ── Logout / Change key ────────────────────────────────────────────────
-        self.logout_btn = ctk.CTkButton(
-            nav, text=t("nav_logout"), font=FONT_SMALL,
-            fg_color="transparent", hover_color="#922B21",
-            text_color=TEXT_NAV_LIGHT, height=30,
-            border_width=1, border_color=BLUE_MID,
-            corner_radius=RADIUS_SM, command=self._logout,
-        )
-        self.logout_btn.pack(fill="x", padx=14, pady=(4, 2))
-
-        self.change_key_btn = ctk.CTkButton(
-            nav, text=t("nav_change_key"), font=("Calibri", 10),
-            fg_color="transparent", hover_color=BLUE_MID,
-            text_color=TEXT_NAV, height=24, border_width=0,
-            corner_radius=RADIUS_SM,
-            command=lambda: self._show_auth(first=False),
-        )
-        self.change_key_btn.pack(fill="x", padx=14, pady=(0, 12))
+        self._admin_container.pack(fill="x", side="bottom")
 
         self._update_user_panel()
 
@@ -356,9 +370,10 @@ class MainApp(ctk.CTk):
             self.lang_btn.pack_forget()
             if hasattr(self, "_tab_panel") and self._tabs_visible:
                 self._tab_panel.pack_forget()
-            self._user_card.pack_forget()
             self.logout_btn.pack_forget()
             self.change_key_btn.pack_forget()
+            self._user_card.pack_forget()
+            self._admin_container.pack_forget()
             self._admin_sep.pack_forget()
             self._admin_lbl.pack_forget()
 
@@ -385,10 +400,13 @@ class MainApp(ctk.CTk):
                     self._tab_panel.pack(fill="x", after=preview_btn)
                 else:
                     self._tab_panel.pack(fill="x")
-            self.lang_btn.pack(anchor="e", padx=16, pady=(10, 6))
-            self._user_card.pack(fill="x", padx=10, pady=(4, 4))
-            self.logout_btn.pack(fill="x", padx=14, pady=(4, 2))
-            self.change_key_btn.pack(fill="x", padx=14, pady=(0, 12))
+            self.lang_btn.pack(anchor="e", padx=16, pady=(10, 6),
+                               after=self._logo_frame)
+            # Re-pack bottom section (side="bottom", порядок снизу вверх)
+            self.change_key_btn.pack(fill="x", padx=14, pady=(0, 12), side="bottom")
+            self.logout_btn.pack(fill="x", padx=14, pady=(4, 2), side="bottom")
+            self._user_card.pack(fill="x", padx=10, pady=(4, 4), side="bottom")
+            self._admin_container.pack(fill="x", side="bottom")
 
             # Restore nav buttons
             for btn, key, idx in self.nav_btns:
@@ -420,13 +438,15 @@ class MainApp(ctk.CTk):
         is_super = (self.config.user_role == "superadmin")
         is_admin_up = self.config.user_role in ("superadmin", "administrator")
         if is_admin_up:
-            # Показываем admin-секцию
+            # Показываем admin-секцию (сброс порядка после collapse/expand)
+            self._admin_sep.pack_forget()
+            self._admin_lbl.pack_forget()
+            self._users_btn.pack_forget()
+            self._template_btn.pack_forget()
             self._admin_sep.pack(fill="x", padx=14, pady=(6, 0))
             self._admin_lbl.pack(fill="x", padx=4, pady=(4, 0))
             if is_super:
                 self._users_btn.pack(fill="x")
-            else:
-                self._users_btn.pack_forget()
             self._template_btn.pack(fill="x")
         else:
             # Скрываем admin-секцию
@@ -436,6 +456,22 @@ class MainApp(ctk.CTk):
             self._template_btn.pack_forget()
             if self._current_tab in (3, 4):
                 self._switch_tab(0)
+
+        # Кнопка "Аналитика" видна только director + admin
+        is_analytics_user = self.config.user_role in (
+            "superadmin", "administrator", "director"
+        )
+        if hasattr(self, "_analytics_nav_btn"):
+            if is_analytics_user:
+                if not self._analytics_nav_btn.winfo_ismapped():
+                    # after= ставит кнопку прямо под "База данных"
+                    self._analytics_nav_btn.pack(
+                        fill="x", padx=(16, 0), after=self._db_nav_btn
+                    )
+            else:
+                self._analytics_nav_btn.pack_forget()
+                if self._current_tab == 5:
+                    self._switch_tab(0)
 
         # Кнопка "База данных" скрыта для директора
         is_director = (self.config.user_role == "director")
@@ -460,7 +496,8 @@ class MainApp(ctk.CTk):
     def _switch_tab(self, index: int):
         self._current_tab = index
         pages = [self.upload_page, self.preview_page,
-                 self.database_page, self.users_page, self.template_page]
+                 self.database_page, self.users_page,
+                 self.template_page, self.analytics_page]
         for i, page in enumerate(pages):
             page.lift() if i == index else page.lower()
 
@@ -476,6 +513,8 @@ class MainApp(ctk.CTk):
             self.users_page.load_users()
         if index == 4 and self.config.user_role in ("superadmin", "administrator"):
             self.template_page.load()
+        if index == 5:
+            self.analytics_page.load()
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 

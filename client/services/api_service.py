@@ -457,6 +457,17 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
+    def get_logs(self, limit: int = 50) -> list:
+        """GET /database/logs — история импорта базы данных."""
+        r = requests.get(
+            f"{self._base}/api/v1/database/logs",
+            headers=self._h,
+            params={"limit": limit},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
     # ── Corrections (Phase 2.6 — ML learning from manager selections) ─────────
 
     def record_correction(
@@ -549,6 +560,30 @@ class ApiService:
         except Exception:
             pass
         return []
+
+    # ── Фаза 4: Аналитика ────────────────────────────────────────────────────
+
+    def get_analytics_summary(self, period: int = 30) -> dict:
+        """GET /analytics/summary?period=N — сводная статистика системы."""
+        r = requests.get(
+            f"{self._base}/api/v1/analytics/summary",
+            headers=self._h,
+            params={"period": period},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_analytics_kpi(self, period: int = 30) -> dict:
+        """GET /analytics/kpi?period=N — KPI по менеджерам."""
+        r = requests.get(
+            f"{self._base}/api/v1/analytics/kpi",
+            headers=self._h,
+            params={"period": period},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
 
     def get_correction_stats(self) -> dict:
         """Статистика накопленных исправлений. {"total_corrections", "pinecone_indexed", "unique_products"}"""

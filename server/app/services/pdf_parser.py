@@ -1168,17 +1168,29 @@ def extract_specification_from_page(
         r"^(?:[а-яА-ЯёЁa-zA-Z]\)\s*)?(?:на\s+вводе|на\s+выводе|вводн|на\s+линиях|расцепитель)",
         re.IGNORECASE,
     )
+    # Detect named щит enclosures by NAME: "ЩО-0,1 ...", "ЩАО-1,1 ...", "ЩС-2 ..."
+    # Pattern: starts with Щ + 0-3 capital Cyrillic letters + dash/en-dash + digit
+    _SHCHIT_NAME_RE = re.compile(
+        r"^\u0429[\u0410-\u042F\u0401]{0,3}[-\u2013]\d",
+        re.UNICODE,
+    )
 
     for row in table[data_start:]:
         if not isinstance(row, (list, tuple)):
             continue
         # Skip щит sub-description lines that appear in the "Наименование" column
-        # as continuation text: "а) На вводе: ВН-32-3Р 25А IEK", "б) На линиях: ВА47-29..."
-        # These are NOT separate spec items.
+        # ONLY if they have no article/code — pure descriptions like
+        # "а) На вводе: ВН-32-3Р 25А IEK" without a separate article column.
+        # When the row HAS an article+code (e.g. NXHB-125 / 247-217-3311),
+        # it is a genuine spec item and must NOT be skipped.
         if cols.get("name") is not None:
             _quick_name = _cell(row, cols["name"]).strip()
             if _quick_name and _VVODE_RE.match(_quick_name):
-                continue
+                _vv_art  = _cell(row, cols["article"]).strip() if cols.get("article") is not None else ""
+                _vv_code = _get_code(row, cols.get("code")) if cols.get("code") is not None else ""
+                if not normalize_article(_vv_art) and not _vv_code:
+                    continue   # pure sub-description, no product — skip
+                # else: has article/code → real item, fall through
         _is_heading_row = False   # reset each iteration; set True for section headers
         _panel_code_for_sub = ""  # щиток own code to re-emit as standalone after heading
         if "pos" in cols:
@@ -1420,6 +1432,13 @@ def extract_specification_from_page(
             elif not _raw_qty_col and _is_section_header_text(name):
                 # Section label: no qty in column AND name looks like a title
                 _is_heading_row = True
+
+        # Named щит enclosures detected by NAME prefix: "ЩО-0,1", "ЩАО-1,1", "ЩС-2".
+        # Mark as heading; the щит корпус article/code is re-emitted as a
+        # standalone purchasable sub-item via _panel_code_for_sub below.
+        if not _is_heading_row and name and _SHCHIT_NAME_RE.match(name):
+            _is_heading_row = True
+            _panel_code_for_sub = code or ""
 
         full_text = (name + " " + article).lower()
         # Heading rows are never filtered by SKIP_KEYWORDS — they intentionally
