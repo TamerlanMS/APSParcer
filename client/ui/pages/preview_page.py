@@ -612,7 +612,9 @@ class PreviewPage(ctk.CTkFrame):
         import uuid
         self._session_id    = str(uuid.uuid4())[:16]
         self._select_mode   = False
+        self._hdg_var: "tk.BooleanVar | None" = None  # инициализируется в _build
         self._checked_items: set = set()   # id(item) выбранных строк
+        self._deleted_items: list = []     # позиции удалённые через ппкм; возвращаются по «Сбросить»
         # Multi-project support
         self._projects: list = []
         self._current_project_idx: int = -1
@@ -683,6 +685,7 @@ class PreviewPage(ctk.CTkFrame):
         )
         self.save_btn.grid(row=0, column=6, padx=(0, 4))
 
+
         # Легенда + кнопки выделения (одна строка)
         leg = ctk.CTkFrame(self, fg_color="transparent")
         leg.grid(row=1, column=0, sticky="ew", padx=pad, pady=(0, 4))
@@ -713,6 +716,14 @@ class PreviewPage(ctk.CTkFrame):
             command=self._toggle_select_mode,
         )
         self.select_btn.pack(side="right", padx=(8, 4))
+
+        self._hdg_var = tk.BooleanVar(value=True)
+        self.hdg_chk = ctk.CTkCheckBox(
+            leg, text="Заголовки в Excel", font=FONT_SMALL,
+            variable=self._hdg_var, onvalue=True, offvalue=False,
+            width=130, checkbox_width=16, checkbox_height=16,
+        )
+        self.hdg_chk.pack(side="right", padx=(4, 8))
 
         for bg, key in [
             (C_EXACT,    "preview_legend_exact"),
@@ -1031,10 +1042,14 @@ class PreviewPage(ctk.CTkFrame):
                     it["_computed_seb_price"] = seb
                     it["_computed_seb_sum"]   = seb_sum
 
+            _incl_hdg = self._hdg_var.get() if self._hdg_var else True
             gen_projects = [
                 {
                     "name": p["name"],
-                    "items": p["items"],
+                    "items": [
+                        it for it in p["items"]
+                        if _incl_hdg or not it.get("is_heading")
+                    ],
                     "brand_consts": dict(self.brand_consts),
                 }
                 for p in self._projects
@@ -1991,6 +2006,8 @@ class PreviewPage(ctk.CTkFrame):
         item = self._get_item_by_iid(iid)
         if item is None:
             return
+        # Сохраняем для возможного восстановления через «Сбросить»
+        self._deleted_items.append(item)
         # Удаляем из данных и из дерева
         try:
             self.items.remove(item)
@@ -1998,6 +2015,8 @@ class PreviewPage(ctk.CTkFrame):
             pass
         if self.tree.exists(iid):
             self.tree.delete(iid)
+        # Показываем кнопку «Вернуть» если не в режиме выбора
+        self._update_delete_btn()
         # Обновляем счётчики статусов
         self._update_stats()
 
@@ -2012,6 +2031,7 @@ class PreviewPage(ctk.CTkFrame):
             self.select_btn.configure(fg_color="#AEB6BF", text="☑ Выбрать")
             self.tree.heading("c0", text=t("col_num"))
             self.delete_checked_btn.pack_forget()
+            self.reset_checked_btn.pack_forget()  # исправление: скрываем при выходе из режима
         self._populate()
 
     def _toggle_item_check(self, iid: str):
@@ -2054,19 +2074,27 @@ class PreviewPage(ctk.CTkFrame):
 
     def _update_delete_btn(self):
         n = len(self._checked_items)
+        n_del = len(getattr(self, "_deleted_items", []))
         if n > 0:
+            _del_sfx = f" +{n_del}удал." if n_del else ""
             self.reset_checked_btn.configure(
-                text=f"🔄 Сбросить ({n})")
+                text=f"🔄 Сбросить ({n}){_del_sfx}")
             self.reset_checked_btn.pack(side="right", padx=(0, 4))
             self.delete_checked_btn.configure(
                 text=f"🗑 Удалить ({n})")
             self.delete_checked_btn.pack(side="right", padx=(0, 0))
+        elif n_del > 0:
+            # Показываем кнопку возврата даже вне режима выбора
+            self.reset_checked_btn.configure(
+                text=f"🔄 Вернуть ({n_del})")
+            self.reset_checked_btn.pack(side="right", padx=(0, 4))
+            self.delete_checked_btn.pack_forget()
         else:
             self.reset_checked_btn.pack_forget()
             self.delete_checked_btn.pack_forget()
 
     def _reset_checked(self):
-        """Сбросить выбранные позиции к исходным данным из PDF."""
+        """Сбросить выбранные позиции к исходным данным из PDF и вернуть удалённые."""
         to_reset = [i for i in self.items
                     if id(i) in self._checked_items and i.get("status") != "heading"]
         for item in to_reset:
@@ -2076,12 +2104,28 @@ class PreviewPage(ctk.CTkFrame):
                         "_corrected_by_manager", "comment", "delivery"):
                 item.pop(key, None)
             item["status"] = "not_found"
+        # Восстанавливаем позиции удалённые через ппкм / Delete
+        if self._deleted_items:
+            self.items.extend(self._deleted_items)
+            self._deleted_items.clear()
+            # Перенумеруем все не-заголовочные позиции последовательно
+            _new_pos = 0
+            for _it in self.items:
+                if _it.get("is_heading"):
+                    continue
+                _new_pos += 1
+                _it["pos"] = str(_new_pos)
         self._checked_items.clear()
-        self._toggle_select_mode()   # выходим + перерисовываем
+        if self._select_mode:
+            self._toggle_select_mode()  # выходим из режима + перерисовываем
+        else:
+            self.reset_checked_btn.pack_forget()  # скрываем кнопку «Вернуть»
+            self._populate()  # перерисовываем дерево
         self._update_stats()
 
     def _delete_checked(self):
         to_del = [i for i in self.items if id(i) in self._checked_items]
+        self._deleted_items.extend(to_del)  # трекинг для восстановления через «Сбросить»
         for item in to_del:
             iid = item.get("_iid")
             try:
@@ -2174,9 +2218,13 @@ class PreviewPage(ctk.CTkFrame):
                 except Exception as e_db:
                     print(f"[Save] get_all_products: {e_db}")
 
+            _incl_hdg = self._hdg_var.get() if self._hdg_var else True
+            _excel_items = self.items if _incl_hdg else [
+                it for it in self.items if not it.get("is_heading")
+            ]
             try:
                 out = generate_excel(
-                    self.items, path,
+                    _excel_items, path,
                     constants=self.constants,
                     products=products,
                     brand_consts=self.brand_consts,

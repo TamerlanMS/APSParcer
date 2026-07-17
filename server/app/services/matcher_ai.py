@@ -51,7 +51,7 @@ VECTOR_MIN_SCORE = settings.AI_CONFIDENCE_THRESHOLD  # default 0.72
 
 # Items in [VECTOR_MIN_SCORE, VECTOR_LOW_CONF) are returned as ai_match
 # but flagged ai_low_confidence=True so UI can highlight them for review
-VECTOR_LOW_CONF = 0.82
+VECTOR_LOW_CONF = 0.87
 
 # How many vector candidates to fetch before reranking
 VECTOR_TOP_K = 8
@@ -337,6 +337,18 @@ async def _match_one_ai(
             "kaznisa_code": (row["kaznisa_code"] or "").strip(),
         }
         _low_conf = best_sim < VECTOR_LOW_CONF
+        if _low_conf:
+            return {
+                **item,
+                "status":            "not_found",
+                "best_match":        None,
+                "candidates":        [],
+                "match_method":      None,
+                "ai_used":           True,
+                "ai_confidence":     round(best_sim, 3),
+                "ai_low_confidence": True,
+                "ai_reason":         f"Сходство {best_sim:.0%} ниже порога уверенности ({VECTOR_LOW_CONF:.0%})",
+            }
         return {
             **item,
             "status":            "ai_match",
@@ -345,12 +357,8 @@ async def _match_one_ai(
             "candidates":        [{**product_dict, "score": round(best_sim * 100), "method": "vector"}],
             "ai_used":           True,
             "ai_confidence":     round(best_sim, 3),
-            "ai_low_confidence": _low_conf,
-            "ai_reason":         (
-                f"Семантическое совпадение {best_sim:.0%} — рекомендуется проверить"
-                if _low_conf
-                else f"Семантическое совпадение {best_sim:.0%}"
-            ),
+            "ai_low_confidence": False,
+            "ai_reason":         f"Семантическое совпадение {best_sim:.0%}",
         }
 
     # Ambiguous top results → ask GPT-4o-mini
@@ -393,6 +401,18 @@ async def _match_one_ai(
         "kaznisa_code": (row["kaznisa_code"] or "").strip(),
     }
     _low_conf = best_sim < VECTOR_LOW_CONF
+    if _low_conf:
+        return {
+            **item,
+            "status":            "not_found",
+            "best_match":        None,
+            "candidates":        [],
+            "match_method":      None,
+            "ai_used":           True,
+            "ai_confidence":     round(best_sim, 3),
+            "ai_low_confidence": True,
+            "ai_reason":         f"Сходство {best_sim:.0%} ниже порога уверенности ({VECTOR_LOW_CONF:.0%})",
+        }
     return {
         **item,
         "status":            "ai_match",
@@ -401,7 +421,7 @@ async def _match_one_ai(
         "candidates":        [{**product_dict, "score": round(best_sim * 100), "method": "gpt_rerank"}],
         "ai_used":           True,
         "ai_confidence":     round(best_sim, 3),
-        "ai_low_confidence": _low_conf,
+        "ai_low_confidence": False,
         "ai_reason":         gpt_choice.get("ai_reason", "Выбрано ИИ"),
     }
 

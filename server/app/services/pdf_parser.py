@@ -1168,6 +1168,10 @@ def extract_specification_from_page(
         r"^(?:[а-яА-ЯёЁa-zA-Z]\)\s*)?(?:на\s+вводе|на\s+выводе|вводн|на\s+линиях|расцепитель)",
         re.IGNORECASE,
     )
+    # Detect "ТШ.1", "КВ.2" style: Cyrillic/Latin letters + "." + digit
+    # These are numbered items (e.g. "Телефонный шкаф 1"), NOT panel headings.
+    _DOTNUM_RE = re.compile(r"^[\u0410-\u042F\u0401\u0430-\u044F\u0451A-Za-z]+\.\d", re.UNICODE)
+
     # Detect named щит enclosures by NAME: "ЩО-0,1 ...", "ЩАО-1,1 ...", "ЩС-2 ..."
     # Pattern: starts with Щ + 0-3 capital Cyrillic letters + dash/en-dash + digit
     _SHCHIT_NAME_RE = re.compile(
@@ -1414,9 +1418,14 @@ def extract_specification_from_page(
         # Named equipment-panel / щиток IDs (ВРУ-1, ШАВР-1, ЩC-ТХ1.2.19…)
         # are ALWAYS group headings, even when the щиток row has its own
         # KazNIISA code (that code is preserved as a standalone sub-item below).
+        # EXCEPTION: "ТШ.1", "КВ.2" style (letters + "." + digit) are numbered
+        # items, not panel headers — excluded via _DOTNUM_RE.
         if not _is_heading_row:
             _pcheck = pos
-            if _pcheck and not _pcheck[0].isdigit() and not _pcheck.startswith("-"):
+            if (_pcheck
+                    and not _pcheck[0].isdigit()
+                    and not _pcheck.startswith("-")
+                    and not _DOTNUM_RE.match(_pcheck)):
                 _is_heading_row = True
                 _panel_code_for_sub = code or ""
 
@@ -1479,12 +1488,15 @@ def extract_specification_from_page(
         # ЩC-ТХ1.2.19 → 247-201-0108 "Щит распределительный навесной"),
         # also emit that корпус as a regular standalone position so it
         # appears in the spec and goes to Excel.
-        if _is_heading_row and _panel_code_for_sub:
+        # Emit standalone purchasable sub-item for heading rows that have
+        # an article OR a code (ВРУ-1 / ЩО-0.1 / etc.).
+        _panel_art_for_sub = normalize_article(article) if _is_heading_row else ""
+        if _is_heading_row and (_panel_code_for_sub or _panel_art_for_sub):
             auto_num += 1
             _panel_sub: Dict = {
                 "pos":              f"-{auto_num}",
                 "name_raw":         name,
-                "article_raw":      normalize_article(article),
+                "article_raw":      _panel_art_for_sub,
                 "kaznisa_code_raw": _panel_code_for_sub,
                 "unit":             unit or "шт.",
                 "qty":              qty,
