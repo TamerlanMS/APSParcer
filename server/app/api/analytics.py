@@ -10,13 +10,15 @@ period = количество последних дней (7 / 30 / 90).
 
 Статистика суперадминов и администраторов НЕ учитывается —
 аналитика отражает только работу менеджеров и директоров.
+
+Все временные метки переводятся в UTC+5 (Astana/Almaty).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, literal_column
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -28,6 +30,10 @@ router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 require_analytics = require_roles("superadmin", "administrator", "director")
 
 _EXCLUDED_ROLES = ("superadmin", "administrator")
+
+# Сдвиг для перевода UTC → UTC+5 (Astana/Almaty)
+_TZ5H = literal_column("INTERVAL '5 hours'")
+_TZ5_DELTA = timedelta(hours=5)
 
 
 def _since(days: int) -> datetime:
@@ -93,16 +99,18 @@ async def get_summary(
     total_errors = int(q_err.scalar() or 0)
 
     try:
+        # date_trunc по локальному времени UTC+5
+        _ts5 = PdfUploadLog.uploaded_at + _TZ5H
         q_daily = await db.execute(
             select(
-                func.date_trunc("day", PdfUploadLog.uploaded_at).label("day"),
+                func.date_trunc("day", _ts5).label("day"),
                 func.count(PdfUploadLog.id).label("kp_count"),
                 func.coalesce(func.sum(PdfUploadLog.items_count), 0).label("items"),
             )
             .where(PdfUploadLog.uploaded_at >= since)
             .where(excl)
-            .group_by(func.date_trunc("day", PdfUploadLog.uploaded_at))
-            .order_by(func.date_trunc("day", PdfUploadLog.uploaded_at))
+            .group_by(func.date_trunc("day", _ts5))
+            .order_by(func.date_trunc("day", _ts5))
         )
         daily = [
             {
@@ -155,6 +163,8 @@ async def get_kpi(
         last_act      = r.last_activity
         total_kp_r    = int(r.total_kp)
         total_items_r = int(r.total_items)
+        # Переводим last_activity в UTC+5 для отображения
+        last_act_local = (last_act + _TZ5_DELTA) if last_act else None
         result.append({
             "user_id":       r.user_id,
             "username":      r.username or "—",
@@ -162,7 +172,7 @@ async def get_kpi(
             "total_kp":      total_kp_r,
             "total_items":   total_items_r,
             "avg_items":     round(total_items_r / total_kp_r, 1) if total_kp_r else 0.0,
-            "last_activity": last_act.strftime("%d.%m.%Y %H:%M") if last_act else "—",
+            "last_activity": last_act_local.strftime("%d.%m.%Y %H:%M") if last_act_local else "—",
         })
 
     return {"period_days": period, "managers": result}
@@ -178,10 +188,12 @@ async def get_activity(
     since = _since(period)
     excl  = _excl_admins_filter()
     try:
+        # Сдвигаем на UTC+5 перед извлечением часа и дня недели
+        _ts5 = PdfUploadLog.uploaded_at + _TZ5H
         q = await db.execute(
             select(
-                func.extract("dow",  PdfUploadLog.uploaded_at).label("dow"),
-                func.extract("hour", PdfUploadLog.uploaded_at).label("hour"),
+                func.extract("dow",  _ts5).label("dow"),
+                func.extract("hour", _ts5).label("hour"),
                 func.count(PdfUploadLog.id).label("cnt"),
             )
             .where(PdfUploadLog.uploaded_at >= since)
