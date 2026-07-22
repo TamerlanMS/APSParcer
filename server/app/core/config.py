@@ -31,6 +31,22 @@ class Settings(BaseSettings):
     PINECONE_API_KEY: str = ""
     PINECONE_HOST:    str = ""
 
+    # Analog search provider keys
+    # DKC  — master_key из личного кабинета api.dkc.ru
+    DKC_API_KEY: str = ""
+    # EKF IMS3 B2B портал (ims3.ekf.su) — логин/пароль от аккаунта
+    EKF_USERNAME: str = ""
+    EKF_PASSWORD: str = ""
+    # EKF  — cookie-строка сессии (альтернатива логин/пароль):
+    #         войдите в браузере → DevTools → Application → Cookies → ims3.ekf.su
+    #         скопируйте всю строку → EKF_COOKIE=token=xxx; session=yyy; ...
+    EKF_COOKIE:   str = ""
+    # EKF  — Bearer-токен публичного Partner API (опционально, ekfgroup.com/ru/support/api)
+    EKF_API_KEY:  str = ""
+    # IEK  — cookie-строка сессии asist.iek.ru (скопировать из браузера
+    #         после входа: DevTools → Application → Cookies → asist.iek.ru)
+    IEK_COOKIE:  str = ""
+
     DEBUG: bool = False
 
     # Valid API keys for desktop client (backward compat)

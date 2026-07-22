@@ -262,3 +262,19 @@ class ManagerCorrection(Base):
 
     user     = relationship("User", foreign_keys=[user_id])
     product  = relationship("Product", foreign_keys=[selected_product_id])
+
+
+class ProductAnalog(Base):
+    """
+    Кэш аналогов, найденных по артикулу через внешние провайдеры (DKC, EKF, IEK, CHINT, BonPet).
+    Обновляется если запись старше 30 дней или force_refresh=True.
+    """
+    __tablename__ = "product_analogs"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    article         = Column(String(200), nullable=False, index=True)   # оригинальный артикул
+    source          = Column(String(50),  nullable=False)               # dkc / ekf / iek / chint / bonpet
+    analog_article  = Column(String(200), nullable=False)               # найденный аналог
+    analog_name     = Column(Text,        nullable=True)                # название аналога (если есть)
+    fetched_at      = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at      = Column(DateTime(timezone=True), nullable=True)    # NULL = бессрочно

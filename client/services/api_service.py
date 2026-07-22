@@ -597,3 +597,39 @@ class ApiService:
             return r.json()
         except Exception:
             return {"total_corrections": 0, "pinecone_indexed": 0, "unique_products": 0}
+
+    # ── Фаза 5: Подбор аналогов ────────────────────────────────────────────────────────
+
+    def search_analogs(self, article: str, provider: str,
+                        force_refresh: bool = False,
+                        segment: str = "ss") -> dict:
+        """
+        POST /api/v1/analogs/search
+
+        Возвращает:
+            {
+                "analogs": [
+                    {
+                        "analog_article": str,
+                        "analog_name": str | None,
+                        "source": str,
+                        "db_match": dict | None,  # Product если найден в БД
+                    }
+                ],
+                "cached": bool,
+                "provider_error": str | None,
+            }
+        """
+        r = requests.post(
+            f"{self._base}/api/v1/analogs/search",
+            headers=self._h,
+            json={
+                "article": article,
+                "provider": provider,
+                "force_refresh": force_refresh,
+                "segment": segment,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()

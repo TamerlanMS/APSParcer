@@ -10,6 +10,7 @@ from typing import List, Dict, Optional
 from assets.theme import *
 from locales.strings import t
 from services.api_service import ApiService
+from ui.dialogs.analog_dialog import AnalogDialog
 from services.excel_generator import generate_excel
 
 
@@ -837,6 +838,11 @@ class PreviewPage(ctk.CTkFrame):
         self._ctx_menu.add_command(
             label=t("ctx_reset_item"),
             command=self._reset_item_selected,
+        )
+        self._ctx_menu.add_separator()
+        self._ctx_menu.add_command(
+            label="🔍 Подобрать аналог",
+            command=self._find_analog_selected,
         )
         self._ctx_menu.add_separator()
         self._ctx_menu.add_command(
@@ -1995,6 +2001,46 @@ class PreviewPage(ctk.CTkFrame):
             item.pop(key, None)
         item["status"] = "not_found"
         self._redraw_row(item)
+        self._update_stats()
+
+    # Аналог –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+    def _find_analog_selected(self):
+        """Открывает диалог подбора аналога для выделенной позиции."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid  = sel[0]
+        # Дерево хранит iid в item["_iid"] (автогенерированный tkinter id)
+        item = next((i for i in self.items if i.get("_iid") == iid), None)
+        if item is None or item.get("status") == "heading":
+            return
+        # Артикул: из best_match (приоритет) → из оригинального PDF
+        # Если артикул не найден — открываем диалог с пустым полем (ручной ввод)
+        article = ((item.get("best_match") or {}).get("article")
+                   or item.get("article") or "")
+        article = article.strip()
+        # Сегмент берём из конфига приложения
+        segment = getattr(getattr(self, "app", None), "config", None)
+        segment = getattr(segment, "user_segment", "ss") or "ss"
+        AnalogDialog(
+            parent=self,
+            article=article,
+            segment=segment,
+            api_service=self.api,
+            on_apply=lambda match, _item=item: self._apply_analog_match(_item, match),
+        )
+
+    def _apply_analog_match(self, item: dict, db_match: dict):
+        """Применяет найденный аналог как best_match для данной позиции."""
+        item["best_match"]   = db_match
+        item["status"]       = "ai_match"
+        item["match_method"] = "analog"
+        item["_user_edited"] = True
+        # Сбрасываем старые артефакты
+        for k in ("_user_const_price", "ai_confidence", "ai_reason"):
+            item.pop(k, None)
+        self._populate()
         self._update_stats()
 
     def _delete_selected(self):

@@ -45,6 +45,13 @@ services:
       PINECONE_HOST:    ${PINECONE_HOST:-}
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-change_me_on_first_login}
+      # Analog providers
+      DKC_API_KEY:   ${DKC_API_KEY:-}
+      EKF_USERNAME:  ${EKF_USERNAME:-}
+      EKF_PASSWORD:  ${EKF_PASSWORD:-}
+      EKF_COOKIE:    ${EKF_COOKIE:-}
+      EKF_API_KEY:   ${EKF_API_KEY:-}
+      IEK_COOKIE:    ${IEK_COOKIE:-}
     ports:
       - "80:8000"
     volumes:

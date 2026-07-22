@@ -12,6 +12,7 @@ from app.api import users as users_api
 from app.api import excel_template as excel_template_api
 from app.api import corrections as corrections_api
 from app.api import analytics as analytics_api
+from app.api import analogs as analogs_api
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 
@@ -147,6 +148,7 @@ app.include_router(database.router, prefix="/api/v1/database", tags=["database"]
 app.include_router(excel_template_api.router, prefix="/api/v1",  tags=["excel-template"])
 app.include_router(corrections_api.router, prefix="/api/v1/corrections", tags=["corrections"])
 app.include_router(analytics_api.router)   # prefix="/api/v1/analytics" внутри роутера
+app.include_router(analogs_api.router)     # prefix="/api/v1/analogs"   внутри роутера
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
