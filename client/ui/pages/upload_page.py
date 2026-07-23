@@ -490,10 +490,17 @@ class UploadPage(ctk.CTkFrame):
         return segs
 
     def on_login(self):
-        seg = getattr(self.app.cfg, "user_segment", "ss")
-        self._seg_ss.set(seg == "ss")
-        self._seg_os.set(seg == "os")
-        self._seg_sil.set(seg == "sil")
+        role = getattr(self.app.config, "user_role", "manager")
+        seg  = getattr(self.app.config, "user_segment", "ss")
+        if role in ("superadmin", "administrator"):
+            # Admins have access to all segments — enable all by default
+            self._seg_ss.set(True)
+            self._seg_os.set(True)
+            self._seg_sil.set(True)
+        else:
+            self._seg_ss.set(seg == "ss")
+            self._seg_os.set(seg == "os")
+            self._seg_sil.set(seg == "sil")
 
     def _send(self):
         if self._processing or not self._files:

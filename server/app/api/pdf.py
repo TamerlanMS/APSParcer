@@ -258,6 +258,8 @@ async def parse_pdf_multi_stream(
     queue: asyncio.Queue = asyncio.Queue()
     use_ai = ai_mode and bool(settings.OPENAI_API_KEY)
     seg_list = _parse_segments(segments)
+    logger.info("parse-multi-stream: segments_raw=%r → seg_list=%s, files=%d",
+                segments, seg_list, len(files))
 
     # Read all files into memory before streaming starts
     file_data: List[tuple] = []

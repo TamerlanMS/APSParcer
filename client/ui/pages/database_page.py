@@ -216,6 +216,15 @@ class DatabasePage(ctk.CTkFrame):
             height=32,
         )
         self._import_seg_btn.grid(row=0, column=1, padx=(0, 12), pady=6, sticky="ew")
+
+        # Warning hint
+        ctk.CTkLabel(
+            self._seg_frame,
+            text="⚠  Выберите сегмент базы перед импортом (SS / OS / SIL)",
+            font=(*FONT_SMALL[:2], "italic"),
+            text_color="#B45309",
+        ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 6), sticky="w")
+
         # map label→code for lookup
         self._import_seg_labels = seg_labels
         self._import_seg_codes  = ["ss", "os", "sil"]
@@ -321,6 +330,23 @@ class DatabasePage(ctk.CTkFrame):
         if not path:
             messagebox.showwarning("", t("db_no_file"))
             return
+        # For admins: confirm the target segment before import
+        if self._is_admin():
+            label = self._import_seg_var.get()
+            try:
+                seg_code = self._import_seg_codes[self._import_seg_labels.index(label)]
+            except (ValueError, IndexError):
+                seg_code = "ss"
+            seg_map = {"ss": "Слаботочные (SS)", "os": "Освещение (OS)", "sil": "Силовые (SIL)"}
+            seg_name = seg_map.get(seg_code, seg_code.upper())
+            ok = messagebox.askyesno(
+                "Подтвердите импорт",
+                f"Файл будет импортирован в сегмент:\n\n  {seg_name}\n\n"
+                f"Убедитесь, что выбран правильный сегмент!\nПродолжить?",
+                parent=self,
+            )
+            if not ok:
+                return
         self._run_import_both(path, "")
 
     def _run_import_both(self, path: str, pwd: str):
