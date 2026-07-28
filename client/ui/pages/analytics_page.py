@@ -151,7 +151,7 @@ class AnalyticsPage(ctk.CTkFrame):
         # ── KPI таблица менеджеров ─────────────────────────────────────────────
         tbl_header = ctk.CTkFrame(scroll, fg_color="transparent")
         tbl_header.grid(row=3, column=0, sticky="ew", padx=PAD_MD, pady=(16, 0))
-        ctk.CTkLabel(tbl_header, text="KPI менеджеров",
+        ctk.CTkLabel(tbl_header, text="Анализ менеджеров",
                      font=FONT_HEADING, text_color=NAVY_DARK).pack(side="left")
 
         tbl_wrap = ctk.CTkFrame(scroll, fg_color=BG_CARD,

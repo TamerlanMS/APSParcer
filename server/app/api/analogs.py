@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import Product, ProductAnalog
-from app.services.analog_providers import PROVIDERS
+from app.services.analog_providers import PROVIDERS, _ekf_last_error, _ekf_jwt
+from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -191,3 +192,54 @@ async def search_analogs(
         cached=False,
         provider_error=error,
     )
+
+
+# ─── Diagnostic endpoint ──────────────────────────────────────────────────────
+
+@router.get("/diagnostics")
+async def diagnostics(_user=Depends(get_current_user)):
+    """Проверяет конфигурацию и связь с провайдерами аналогов.
+    Возвращает статус каждого провайдера без выполнения реального поиска."""
+    import httpx as _httpx
+
+    result: dict = {"providers": {}, "connectivity": {}}
+
+    # ── Проверяем настройки провайдеров ──────────────────────────────────────
+    ekf_user   = getattr(settings, "EKF_USERNAME", "")
+    ekf_pass   = getattr(settings, "EKF_PASSWORD", "")
+    ekf_cookie = getattr(settings, "EKF_COOKIE", "")
+    ekf_key    = getattr(settings, "EKF_API_KEY", "")
+    dkc_key    = getattr(settings, "DKC_API_KEY", "")
+    iek_cookie = getattr(settings, "IEK_COOKIE", "")
+
+    from app.services.analog_providers import _ekf_jwt as jwt_cached, _ekf_last_error as last_err
+
+    result["providers"]["ekf"] = {
+        "credentials_set": bool(ekf_user and ekf_pass) or bool(ekf_cookie) or bool(ekf_key),
+        "login_password":  bool(ekf_user and ekf_pass),
+        "cookie_set":      bool(ekf_cookie),
+        "api_key_set":     bool(ekf_key),
+        "jwt_cached":      bool(jwt_cached),
+        "last_error":      last_err,
+    }
+    result["providers"]["dkc"] = {"credentials_set": bool(dkc_key)}
+    result["providers"]["iek"] = {"credentials_set": bool(iek_cookie)}
+
+    # ── Проверяем сетевую связь ───────────────────────────────────────────────
+    test_urls = {
+        "hasura.ekfgroup.com": "https://hasura.ekfgroup.com/healthz",
+        "ekfgroup.com":        "https://ekfgroup.com/",
+    }
+    async with _httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+        for name, url in test_urls.items():
+            try:
+                r = await client.get(url)
+                result["connectivity"][name] = {"ok": True, "status": r.status_code}
+            except _httpx.ConnectError as e:
+                result["connectivity"][name] = {"ok": False, "error": f"ConnectError: {e}"}
+            except _httpx.TimeoutException:
+                result["connectivity"][name] = {"ok": False, "error": "timeout (>8s)"}
+            except Exception as e:
+                result["connectivity"][name] = {"ok": False, "error": str(e)}
+
+    return result

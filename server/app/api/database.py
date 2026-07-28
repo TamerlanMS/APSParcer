@@ -10,7 +10,10 @@ from app.core.security import verify_api_key, verify_any_auth, get_current_user_
 from app.core.audit import write_audit
 from app.core.config import settings
 from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
-from app.services.db_importer import import_products_from_excel, import_constants_from_excel
+from app.services.db_importer import (
+    import_products_from_excel, import_constants_from_excel,
+    clear_segment_products, get_segment_stats,
+)
 from app.services.matcher import invalidate_product_cache
 from app.services.excel_cache import rebuild_base_template, CACHE_PATH, TEMPLATE_PATH
 from pydantic import BaseModel
@@ -214,7 +217,8 @@ async def import_products(
     ip = request.client.host if request.client else None
     try:
         added, updated = await import_products_from_excel(
-            content, db, file.filename, segment=import_segment
+            content, db, file.filename, segment=import_segment,
+            changed_by=getattr(current_user, "username", ""),
         )
     except ValueError as e:
         await write_audit(db, current_user, "import_products",
@@ -271,32 +275,99 @@ async def import_constants(
 
 # ─── Manual vectorization ─────────────────────────────────────────────────────
 
+@router.get("/embed-budget")
+async def get_embed_budget(
+    _auth: str = Depends(verify_any_auth),
+):
+    """Возвращает состояние дневного бюджета на векторизацию (OpenAI embeddings)."""
+    from app.services.embedder import get_budget_snapshot
+    return get_budget_snapshot()
+
+
+@router.get("/pinecone/status")
+async def pinecone_status(
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Проверяет подключение к Pinecone и возвращает статистику индекса."""
+    if not _is_admin_user(current_user):
+        raise HTTPException(403, "Требуются права администратора")
+    from app.services.embedder import test_pinecone_connection
+    return await test_pinecone_connection()
+
+
+@router.post("/pinecone/reconnect")
+async def pinecone_reconnect(
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Сбрасывает кешированный Pinecone-клиент и переподключается с текущими ключами.
+    Используй после обновления PINECONE_API_KEY / PINECONE_HOST в .env без перезапуска."""
+    if not _is_admin_user(current_user):
+        raise HTTPException(403, "Требуются права администратора")
+    from app.services.embedder import reset_pinecone_client, test_pinecone_connection
+    reset_pinecone_client()
+    result = await test_pinecone_connection()
+    logger.info("pinecone/reconnect by %s: ok=%s", getattr(current_user, "username", "?"), result.get("ok"))
+    return {"reconnected": True, "test": result}
+
+
 @router.post("/vectorize")
 async def start_vectorization(
     segment: Optional[str] = Query(default=None, description="Сегмент для векторизации: ss/os/sil или all"),
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
 ):
-    """Запускает векторизацию товаров в Pinecone (только admin/superadmin)."""
+    """
+    Запускает векторизацию товаров в Pinecone (только admin/superadmin).
+
+    Сегменты обрабатываются строго последовательно (SS → OS → SIL).
+    Перед каждым батчем проверяется дневной бюджет ($EMBED_DAILY_BUDGET_USD).
+    Если бюджет исчерпан — оставшиеся позиции пропускаются.
+    """
     if not _is_admin_user(current_user):
         raise HTTPException(403, "Требуются права администратора")
 
     from app.core.database import AsyncSessionLocal
-    from app.services.embedder import embed_products_batch
+    from app.services.embedder import embed_products_batch, get_budget_snapshot
     from app.models.models import ALL_SEGMENTS
 
     segs = ALL_SEGMENTS if (not segment or segment == "all") else [segment]
 
+    # Accumulate results from all segments for progress tracking
+    _results: list[dict] = []
+
     async def _run():
         for seg in segs:
-            await embed_products_batch(AsyncSessionLocal, segment=seg, force=True)
+            logger.info("vectorize: starting segment=%s", seg)
+            res = await embed_products_batch(AsyncSessionLocal, segment=seg, force=True)
+            _results.append({"segment": seg, **res})
+            logger.info(
+                "vectorize: segment=%s done — upserted=%d skipped=%d "
+                "cost=$%.5f budget_remaining=$%.5f budget_exceeded=%s",
+                seg,
+                res.get("upserted", 0), res.get("skipped", 0),
+                res.get("cost_usd", 0.0), res.get("budget_remaining", 0.0),
+                res.get("budget_exceeded", False),
+            )
+            if res.get("budget_exceeded"):
+                logger.warning("vectorize: daily budget exceeded — stopping after %s", seg)
+                break   # stop processing further segments
 
     asyncio.create_task(_run())
     logger.info("vectorize: manual start segments=%s by user=%s",
                 segs, getattr(current_user, "username", "?"))
-    return {"status": "started",
-            "segments": segs,
-            "message": f"Векторизация сегментов {segs} запущена в фоне"}
+    budget = get_budget_snapshot()
+    return {
+        "status":   "started",
+        "segments": segs,
+        "message":  (
+            f"Векторизация сегментов {segs} запущена последовательно. "
+            f"Бюджет: ${budget['budget_usd']:.2f} / потрачено сегодня: "
+            f"${budget['spent_usd']:.4f} / остаток: ${budget['remaining_usd']:.4f}"
+        ),
+        "budget": budget,
+    }
 
 
 # ─── Base template download ────────────────────────────────────────────────────
@@ -323,7 +394,53 @@ async def get_base_template(
 
 
 
-# ─── Product price lookup (diagnostic) ──────────────────────────────────────────
+# ─── Segment stats & clear ───────────────────────────────────────────────────
+
+@router.get("/stats")
+async def db_stats(
+    db: AsyncSession = Depends(get_db),
+    _auth: str = Depends(verify_any_auth),
+):
+    """Возвращает количество активных товаров по каждому сегменту (ss / os / sil / total)."""
+    stats = await get_segment_stats(db)
+    return stats
+
+
+@router.delete("/segment/{segment}")
+async def clear_segment(
+    segment: str,
+    hard: bool = Query(default=False, description="True = физическое удаление строк"),
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """
+    Очищает базу товаров для указанного сегмента (ss / os / sil).
+    Требует прав администратора.
+    hard=false → деактивация (is_active=False), данные сохраняются
+    hard=true  → физическое удаление строк из БД
+    """
+    if not _is_admin_user(current_user):
+        raise HTTPException(403, "Требуются права администратора")
+    valid = ("ss", "os", "sil")
+    if segment not in valid:
+        raise HTTPException(400, f"Недопустимый сегмент. Доступны: {', '.join(valid)}")
+
+    count = await clear_segment_products(
+        db, segment, hard_delete=hard,
+        changed_by=getattr(current_user, "username", ""),
+    )
+    invalidate_product_cache()
+    asyncio.create_task(rebuild_base_template(db))
+
+    action = "удалено" if hard else "деактивировано"
+    logger.info("clear_segment[%s]: %d products %s by %s",
+                segment, count, action,
+                getattr(current_user, "username", "?"))
+    return {"status": "ok", "segment": segment, "affected": count, "action": action}
+
+
+# ─── Product price lookup (diagnostic) ───────────────────────────────────────
 
 @router.get("/products/search")
 async def search_products(
@@ -524,8 +641,19 @@ async def get_import_logs(
     )
     logs = result.scalars().all()
     return [
-        {"id": l.id, "filename": l.filename, "rows_added": l.rows_added,
-         "rows_updated": l.rows_updated, "status": l.status,
-         "message": l.message, "created_at": str(l.created_at)}
+        {
+            "id":           l.id,
+            "filename":     l.filename,
+            "segment":      l.segment or "",
+            "action":       l.action or "import",
+            "rows_added":   l.rows_added,
+            "rows_updated": l.rows_updated,
+            "count_before": l.count_before,
+            "count_after":  l.count_after,
+            "changed_by":   l.changed_by or "",
+            "status":       l.status,
+            "message":      l.message,
+            "created_at":   str(l.created_at),
+        }
         for l in logs
     ]

@@ -27,7 +27,8 @@ class RematchRequest(BaseModel):
 
 router = APIRouter()
 
-MAX_PDF_SIZE = 200 * 1024 * 1024  # 200 MB
+MAX_PDF_SIZE       = 200 * 1024 * 1024  # 200 MB — single file (scan) limit
+MAX_PDF_SIZE_MULTI =  20 * 1024 * 1024  # 20 MB per file when multiple files sent
 _PDF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pdf_parser")
 
 
@@ -262,13 +263,22 @@ async def parse_pdf_multi_stream(
                 segments, seg_list, len(files))
 
     # Read all files into memory before streaming starts
+    # Size rules: single file → up to 200 MB (may be a large scan);
+    #             multiple files → each must be ≤ 20 MB.
+    is_multi = len(files) > 1
+    size_limit = MAX_PDF_SIZE_MULTI if is_multi else MAX_PDF_SIZE
+    size_limit_mb = size_limit // (1024 * 1024)
     file_data: List[tuple] = []
     for i, uf in enumerate(files):
         if not uf.filename.lower().endswith(".pdf"):
             raise HTTPException(400, f"File {uf.filename} must be PDF")
         content = await uf.read()
-        if len(content) > MAX_PDF_SIZE:
-            raise HTTPException(413, f"File {uf.filename} too large (max 200 MB)")
+        if len(content) > size_limit:
+            raise HTTPException(
+                413,
+                f"File {uf.filename} too large ({len(content) // (1024*1024)} MB). "
+                f"{'Multiple files: max ' + str(size_limit_mb) + ' MB each. For larger files upload one at a time.' if is_multi else 'Max ' + str(size_limit_mb) + ' MB.'}",
+            )
         file_data.append((i, uf.filename, content))
 
     n_files = len(file_data)

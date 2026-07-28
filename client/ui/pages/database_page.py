@@ -91,14 +91,18 @@ class DatabasePage(ctk.CTkFrame):
         if not hasattr(self, "_vectorize_btn"):
             return
         if self._is_admin():
-            # Администратор: выбор сегмента импорта + блок векторизации
+            # Администратор: выбор сегмента импорта + блок векторизации + статистика
             self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._vec_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._stats_frame.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._seg_info_lbl.grid_remove()
+            self._refresh_stats()
+            self._refresh_budget()
         else:
             # Менеджер: только импорт в свой сегмент, векторизация скрыта
             self._seg_frame.grid_remove()
             self._vec_frame.grid_remove()
+            self._stats_frame.grid_remove()
             seg_code = getattr(self.app.config, "user_segment", "ss")
             seg_map  = {"ss": "Слаботочные системы", "os": "Осветительные системы",
                         "sil": "Силовые системы"}
@@ -107,6 +111,21 @@ class DatabasePage(ctk.CTkFrame):
                 text=f"🗂  Ваш сегмент: {seg_name}"
             )
             self._seg_info_lbl.grid(row=2, column=0, sticky="w", padx=24, pady=(0, 4))
+
+    def _enforce_role_layout(self, _event=None):
+        """Лёгкая версия _apply_role_visibility без API-запросов.
+        Вызывается при Configure-событиях CTkTabview чтобы предотвратить
+        повторный показ скрытых фреймов при перемещении окна."""
+        if not hasattr(self, "_vectorize_btn"):
+            return
+        if self._is_admin():
+            self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._vec_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._stats_frame.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 8))
+        else:
+            self._seg_frame.grid_remove()
+            self._vec_frame.grid_remove()
+            self._stats_frame.grid_remove()
 
     def _build(self):
         pad = PAD_MD
@@ -278,7 +297,93 @@ class DatabasePage(ctk.CTkFrame):
             command=self._start_vectorization,
         )
         self._vectorize_btn.grid(row=0, column=2, padx=(0, 12), pady=6)
+
+        self._reconnect_btn = ctk.CTkButton(
+            self._vec_frame, text="🔌 Переподключить",
+            font=FONT_SMALL, fg_color="#4A235A", hover_color="#2E1538",
+            height=32, width=150, corner_radius=RADIUS_SM,
+            command=self._reconnect_pinecone,
+        )
+        self._reconnect_btn.grid(row=0, column=3, padx=(0, 12), pady=6)
+
+        # Budget row
+        ctk.CTkLabel(
+            self._vec_frame, text="Бюджет сегодня:",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+        ).grid(row=1, column=0, padx=(12, 8), pady=(0, 8), sticky="w")
+
+        self._budget_lbl = ctk.CTkLabel(
+            self._vec_frame, text="—",
+            font=FONT_SMALL, text_color=TEXT_PRIMARY,
+        )
+        self._budget_lbl.grid(row=1, column=1, padx=(0, 8), pady=(0, 8), sticky="w")
+
+        self._budget_refresh_btn = ctk.CTkButton(
+            self._vec_frame, text="↻",
+            font=FONT_SMALL, fg_color="#2C3E50", hover_color="#1A252F",
+            height=24, width=36, corner_radius=RADIUS_SM,
+            command=self._refresh_budget,
+        )
+        self._budget_refresh_btn.grid(row=1, column=2, padx=(0, 12), pady=(0, 8))
+
         self._vec_frame.grid_remove()  # скрыт по умолчанию
+
+        # ── Статистика по сегментам + кнопка очистки (только для admin) ──────
+        self._stats_frame = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
+        self._stats_frame.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._stats_frame.grid_columnconfigure(1, weight=1)
+        self._stats_frame.grid_remove()
+
+        ctk.CTkLabel(
+            self._stats_frame, text="Статистика БД:",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+        ).grid(row=0, column=0, padx=(12, 8), pady=(10, 2), sticky="w")
+
+        self._stats_lbl = ctk.CTkLabel(
+            self._stats_frame, text="—",
+            font=FONT_SMALL, text_color=TEXT_PRIMARY,
+        )
+        self._stats_lbl.grid(row=0, column=1, padx=(0, 8), pady=(10, 2), sticky="w")
+
+        self._stats_refresh_btn = ctk.CTkButton(
+            self._stats_frame, text="↻",
+            font=FONT_SMALL, fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=28, width=36, corner_radius=RADIUS_SM,
+            command=self._refresh_stats,
+        )
+        self._stats_refresh_btn.grid(row=0, column=2, padx=(0, 8), pady=(10, 2))
+
+        ctk.CTkLabel(
+            self._stats_frame, text="Очистить сегмент:",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+        ).grid(row=1, column=0, padx=(12, 8), pady=(4, 10), sticky="w")
+
+        _clear_seg_labels = [t("seg_ss"), t("seg_os"), t("seg_sil")]
+        self._clear_seg_var = ctk.StringVar(value=_clear_seg_labels[0])
+        self._clear_seg_btn = ctk.CTkSegmentedButton(
+            self._stats_frame,
+            values=_clear_seg_labels,
+            variable=self._clear_seg_var,
+            font=FONT_SMALL,
+            selected_color="#7B2D00", selected_hover_color="#5C1F00",
+            unselected_color="#5D6D7E", unselected_hover_color="#4A5568",
+            text_color="white", dynamic_resizing=False, height=28,
+        )
+        self._clear_seg_btn.grid(row=1, column=1, padx=(0, 8), pady=(4, 10), sticky="ew")
+        self._clear_seg_labels = _clear_seg_labels
+        self._clear_seg_codes  = ["ss", "os", "sil"]
+
+        self._do_clear_btn = ctk.CTkButton(
+            self._stats_frame, text="🗑 Очистить",
+            font=FONT_SMALL, fg_color="#7B2D00", hover_color="#5C1F00",
+            height=28, width=110, corner_radius=RADIUS_SM,
+            command=self._clear_segment,
+        )
+        self._do_clear_btn.grid(row=1, column=2, padx=(0, 8), pady=(4, 10))
+
+        # Привязываем Configure чтобы CTkTabview не «поднимал» скрытые фреймы при
+        # перемещении или изменении размера окна
+        tab.bind("<Configure>", self._enforce_role_layout, add="+")
 
     def _build_logs_tab(self):
         tab = self.tabview.tab(t("db_tab_logs"))
@@ -291,12 +396,11 @@ class DatabasePage(ctk.CTkFrame):
                         background=NAVY, foreground="white",
                         font=("Calibri", 12, "bold"))
 
-        cols = ["file", "added", "updated", "status", "date"]
+        cols = ["segment", "action", "before_after", "who", "date", "file"]
         self.log_tree = ttk.Treeview(tab, columns=cols, show="headings",
                                       style="Log.Treeview")
-        hdrs = [t("db_log_file"), t("db_log_added"), t("db_log_updated"),
-                t("db_log_status"), t("db_log_date")]
-        for col, hdr, w in zip(cols, hdrs, [280, 90, 90, 100, 180]):
+        hdrs = ["Сегмент", "Действие", "До → После", "Кто", "Дата", "Файл"]
+        for col, hdr, w in zip(cols, hdrs, [60, 90, 130, 130, 155, 250]):
             self.log_tree.heading(col, text=hdr)
             self.log_tree.column(col, width=w)
 
@@ -323,6 +427,99 @@ class DatabasePage(ctk.CTkFrame):
                     text=t("db_count", count=f"{count:,}")))
             except Exception as e:
                 self.after(0, lambda: self.count_lbl.configure(text=f"Ошибка: {e}"))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _reconnect_pinecone(self):
+        """Сбрасывает кеш Pinecone и переподключается с текущими ключами."""
+        def _worker():
+            try:
+                res  = self.api.pinecone_reconnect()
+                test = res.get("test", {})
+                if test.get("ok"):
+                    vecs = test.get("total_vector_count", "?")
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Pinecone", f"✅ Подключено\nВекторов в индексе: {vecs}"))
+                else:
+                    err = test.get("error", "неизвестная ошибка")
+                    self.after(0, lambda: messagebox.showerror(
+                        "Pinecone", f"❌ Ошибка подключения:\n{err}"))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Ошибка", str(e)))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _refresh_budget(self):
+        """Загружает состояние дневного бюджета векторизации."""
+        def _worker():
+            try:
+                b = self.api.get_embed_budget()
+                spent     = b.get("spent_usd", 0.0)
+                remaining = b.get("remaining_usd", 0.0)
+                budget    = b.get("budget_usd", 1.60)
+                segs      = b.get("segments", {})
+                seg_parts = "  ".join(
+                    f"{s.upper()}: ${v['cost_usd']:.4f}" for s, v in segs.items()
+                ) if segs else ""
+                color = "#27AE60" if remaining > 0.10 else ("#E67E22" if remaining > 0 else "#E74C3C")
+                text  = (f"потрачено ${spent:.4f} / остаток ${remaining:.4f} "
+                         f"(лимит ${budget:.2f})"
+                         + (f"  │  {seg_parts}" if seg_parts else ""))
+                self.after(0, lambda: self._budget_lbl.configure(text=text, text_color=color))
+            except Exception as e:
+                self.after(0, lambda: self._budget_lbl.configure(
+                    text=f"Ошибка: {e}", text_color="#E74C3C"))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _refresh_stats(self):
+        """Загружает статистику по сегментам и обновляет _stats_lbl."""
+        def _worker():
+            try:
+                s = self.api.get_db_stats()
+                ss  = s.get("ss",  0)
+                os_ = s.get("os",  0)
+                sil = s.get("sil", 0)
+                tot = s.get("total", ss + os_ + sil)
+                text = (f"SS: {ss:,}  │  OS: {os_:,}  │  SIL: {sil:,}  │  "
+                        f"Всего: {tot:,}")
+                self.after(0, lambda: self._stats_lbl.configure(text=text))
+            except Exception as e:
+                self.after(0, lambda: self._stats_lbl.configure(text=f"Ошибка: {e}"))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _clear_segment(self):
+        """Очищает выбранный сегмент БД после подтверждения."""
+        label = self._clear_seg_var.get()
+        try:
+            seg_code = self._clear_seg_codes[self._clear_seg_labels.index(label)]
+        except (ValueError, IndexError):
+            seg_code = "ss"
+        seg_map  = {"ss": "Слаботочные (SS)", "os": "Освещение (OS)", "sil": "Силовые (SIL)"}
+        seg_name = seg_map.get(seg_code, seg_code.upper())
+        ok = messagebox.askyesno(
+            "Подтвердите очистку",
+            f"⚠  Все товары сегмента\n\n  {seg_name}\n\n"
+            f"будут деактивированы.\n"
+            f"Восстановить можно только повторным импортом.\n\nПродолжить?",
+            parent=self,
+        )
+        if not ok:
+            return
+
+        def _worker():
+            try:
+                result = self.api.clear_segment(seg_code)
+                affected = result.get("affected", "?")
+                self.after(0, lambda: (
+                    messagebox.showinfo(
+                        "Готово",
+                        f"Сегмент {seg_name} очищен.\nДеактивировано позиций: {affected}",
+                        parent=self,
+                    ),
+                    self._refresh_count(),
+                    self._refresh_stats(),
+                ))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Ошибка", str(e), parent=self))
+
         threading.Thread(target=_worker, daemon=True).start()
 
     def _import_both(self):
@@ -397,6 +594,8 @@ class DatabasePage(ctk.CTkFrame):
         self.progress.set(1.0)
         self.db_btn.configure(state="normal")
         self._refresh_count()
+        if self._is_admin():
+            self._refresh_stats()
 
         if errors:
             self.status_lbl.configure(
@@ -434,9 +633,16 @@ class DatabasePage(ctk.CTkFrame):
         def _worker():
             try:
                 result = self.api.start_vectorization(segment=seg)
-                msg = result.get("message",
-                                 f"Векторизация ({seg_display}) запущена")
-                self.after(0, lambda: messagebox.showinfo("Векторизация", msg))
+                budget = result.get("budget", {})
+                spent  = budget.get("spent_usd", 0.0)
+                rem    = budget.get("remaining_usd", 0.0)
+                base_msg = result.get("message", f"Векторизация ({seg_display}) запущена")
+                msg = (f"{base_msg}\n\n"
+                       f"Бюджет: потрачено ${spent:.4f}, остаток ${rem:.4f}")
+                self.after(0, lambda: (
+                    messagebox.showinfo("Векторизация", msg),
+                    self._refresh_budget(),
+                ))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Ошибка векторизации", str(e)))
 
@@ -452,18 +658,28 @@ class DatabasePage(ctk.CTkFrame):
             pass
 
     def _load_logs(self):
+        _action_map = {
+            "import":      "импорт",
+            "clear":       "очистка",
+            "hard_delete": "удаление",
+            "vectorize":   "векторизация",
+        }
         try:
             logs = self.api.get_logs()
             self.log_tree.delete(*self.log_tree.get_children())
             for log in logs:
-                status = log.get("status", "")
-                vals = (
-                    log.get("filename", ""),
-                    log.get("rows_added", 0),
-                    log.get("rows_updated", 0),
-                    "✅ ok" if status == "success" else f"❌ {status}",
-                    str(log.get("created_at", ""))[:19],
-                )
+                status     = log.get("status", "")
+                seg        = (log.get("segment") or "").upper() or "—"
+                action_raw = log.get("action") or "import"
+                action     = _action_map.get(action_raw, action_raw)
+                cb         = log.get("count_before")
+                ca         = log.get("count_after")
+                before_after = (f"{cb:,} → {ca:,}" if cb is not None and ca is not None
+                                else "—")
+                who  = log.get("changed_by") or "—"
+                date = str(log.get("created_at", ""))[:19]
+                fname = log.get("filename", "")
+                vals = (seg, action, before_after, who, date, fname)
                 tag = "ok" if status == "success" else "err"
                 self.log_tree.insert("", "end", values=vals, tags=(tag,))
             self.log_tree.tag_configure("ok",  background="#D4EDDA")

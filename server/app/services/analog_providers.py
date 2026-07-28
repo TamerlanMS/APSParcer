@@ -206,21 +206,22 @@ mutation login($username: String!, $password: String!) {
 
 _ekf_jwt: Optional[str] = None
 _ekf_jwt_expires: Optional[datetime] = None
+_ekf_last_error: Optional[str] = None   # последняя ошибка — для диагностики
 
 
-async def _ekf_login(client: httpx.AsyncClient) -> Optional[str]:
+async def _ekf_login(client: httpx.AsyncClient) -> Tuple[Optional[str], Optional[str]]:
     """Авторизация через Hasura GraphQL mutation ims3_login.
-    Возвращает access_token (JWT) или None."""
-    global _ekf_jwt, _ekf_jwt_expires
+    Возвращает (access_token, error_message). При успехе error=None."""
+    global _ekf_jwt, _ekf_jwt_expires, _ekf_last_error
 
     # Проверяем кэш
     if _ekf_jwt and _ekf_jwt_expires and datetime.utcnow() < _ekf_jwt_expires:
-        return _ekf_jwt
+        return _ekf_jwt, None
 
     username = getattr(settings, "EKF_USERNAME", "")
     password = getattr(settings, "EKF_PASSWORD", "")
     if not username or not password:
-        return None
+        return None, "EKF: логин/пароль не заданы в настройках сервера"
 
     try:
         r = await client.post(
@@ -248,20 +249,36 @@ async def _ekf_login(client: httpx.AsyncClient) -> Optional[str]:
             )
             if token:
                 _ekf_jwt = token
-                # Токен живёт ~7 дней, кэшируем на 6 дней
                 _ekf_jwt_expires = datetime.utcnow() + timedelta(days=6)
+                _ekf_last_error = None
                 log.info("EKF IMS3: авторизация успешна (GraphQL)")
-                return token
-            else:
-                log.warning("EKF IMS3: токен не найден в ответе: %s",
-                            str(data)[:200])
+                return token, None
+            # GQL-ошибка внутри 200 (неверный логин/пароль)
+            gql_errors = data.get("errors") or []
+            msg = gql_errors[0].get("message", "неверный ответ") if gql_errors else "токен не найден"
+            err = f"EKF: ошибка авторизации — {msg}"
+            log.warning("EKF IMS3: %s | ответ: %s", msg, str(data)[:200])
+        elif r.status_code in (403, 429):
+            err = (f"EKF: сервер вернул HTTP {r.status_code} — "
+                   "возможно, API блокирует запросы с серверного IP. "
+                   "Добавьте EKF_COOKIE из браузера в .env как запасной метод.")
+            log.warning("EKF IMS3: login blocked HTTP %s", r.status_code)
         else:
-            log.warning("EKF IMS3: login HTTP %s", r.status_code)
+            err = f"EKF: HTTP {r.status_code} при авторизации"
+            log.warning("EKF IMS3: login HTTP %s — %s", r.status_code, r.text[:200])
 
+    except httpx.ConnectError as e:
+        err = f"EKF: нет связи с {HASURA_URL} — {e}"
+        log.error("EKF IMS3: connect error: %s", e)
+    except httpx.TimeoutException:
+        err = "EKF: таймаут подключения к hasura.ekfgroup.com (>15 с)"
+        log.error("EKF IMS3: login timeout")
     except Exception as e:
+        err = f"EKF: неожиданная ошибка при авторизации — {e}"
         log.error("EKF IMS3 login error: %s", e)
 
-    return None
+    _ekf_last_error = err
+    return None, err
 
 
 def _parse_ekf_analogs(data: dict, orig: str) -> List[AnalogResult]:
@@ -308,11 +325,22 @@ async def search_ekf(article: str) -> ProviderResult:
     ekf_cookie = getattr(settings, "EKF_COOKIE",  "")
     ekf_key    = getattr(settings, "EKF_API_KEY", "")
 
+    if not ekf_user and not ekf_cookie and not ekf_key:
+        return [], (
+            "EKF: не настроены учётные данные.\n"
+            "Добавьте в .env:\n"
+            "EKF_USERNAME=ваш_логин\n"
+            "EKF_PASSWORD=ваш_пароль\n"
+            "(от аккаунта на ims3.ekf.su)"
+        )
+
+    login_error: Optional[str] = None
+
     async with _make_client() as client:
 
         # ── 1. Логин/пароль → JWT → Hasura GraphQL ──────────────────────────
         if ekf_user and ekf_pass:
-            jwt = await _ekf_login(client)
+            jwt, login_error = await _ekf_login(client)
             if jwt:
                 r = await _call_hasura(client, jwt, article)
                 if r is not None:
@@ -321,20 +349,31 @@ async def search_ekf(article: str) -> ProviderResult:
                         results = _parse_ekf_analogs(r.json(), article)
                         if results:
                             return results, None
-                        # Нет аналогов — но запрос успешен
                         return [], f"EKF: аналог для «{article}» не найден"
                     elif r.status_code == 401:
                         # JWT протух — сбрасываем и повторяем
                         global _ekf_jwt, _ekf_jwt_expires
                         _ekf_jwt = None
                         _ekf_jwt_expires = None
-                        jwt2 = await _ekf_login(client)
+                        jwt2, _ = await _ekf_login(client)
                         if jwt2:
                             r2 = await _call_hasura(client, jwt2, article)
                             if r2 and r2.status_code == 200 and _is_json(r2):
                                 results = _parse_ekf_analogs(r2.json(), article)
                                 return results, (None if results
                                                  else f"EKF: аналог для «{article}» не найден")
+                    elif r.status_code in (403, 429):
+                        login_error = (
+                            f"EKF: Hasura вернул HTTP {r.status_code} — "
+                            "API может блокировать серверные IP-адреса. "
+                            "Попробуйте добавить EKF_COOKIE из браузера в .env."
+                        )
+                    else:
+                        login_error = f"EKF: Hasura HTTP {r.status_code}"
+                else:
+                    # r is None — сетевая ошибка уже залогирована в _call_hasura
+                    if not login_error:
+                        login_error = "EKF: нет ответа от hasura.ekfgroup.com (сетевая ошибка)"
 
         # ── 2. Ручной apollo-token cookie (запасной) ─────────────────────────
         if ekf_cookie:
@@ -362,16 +401,8 @@ async def search_ekf(article: str) -> ProviderResult:
                 except Exception:
                     pass
 
-        if not ekf_user and not ekf_cookie and not ekf_key:
-            return [], (
-                "EKF: не настроены учётные данные.\n"
-                "Добавьте в .env:\n"
-                "EKF_USERNAME=ваш_логин\n"
-                "EKF_PASSWORD=ваш_пароль\n"
-                "(от аккаунта на ims3.ekf.su)"
-            )
-
-        return [], f"EKF: аналог для «{article}» не найден"
+    # Если всё упало — возвращаем реальную причину, а не просто "не найден"
+    return [], login_error or f"EKF: аналог для «{article}» не найден"
 
 
 async def _call_hasura(

@@ -441,6 +441,24 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
+    def pinecone_status(self) -> dict:
+        """GET /database/pinecone/status — статус Pinecone индекса."""
+        r = requests.get(
+            f"{self._base}/api/v1/database/pinecone/status",
+            headers=self._h, timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def pinecone_reconnect(self) -> dict:
+        """POST /database/pinecone/reconnect — сбросить кеш и переподключиться."""
+        r = requests.post(
+            f"{self._base}/api/v1/database/pinecone/reconnect",
+            headers=self._h, timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def start_vectorization(self, segment: str = "all") -> dict:
         """Запускает ручную векторизацию товаров в Pinecone (только admin).
 
@@ -453,6 +471,38 @@ class ApiService:
             headers=self._h,
             params=params,
             timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_embed_budget(self) -> dict:
+        """GET /database/embed-budget — дневной бюджет векторизации."""
+        r = requests.get(
+            f"{self._base}/api/v1/database/embed-budget",
+            headers=self._h,
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_db_stats(self) -> dict:
+        """GET /database/stats — количество товаров по сегментам."""
+        r = requests.get(
+            f"{self._base}/api/v1/database/stats",
+            headers=self._h,
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def clear_segment(self, segment: str, hard: bool = False) -> dict:
+        """DELETE /database/segment/{segment} — очистить сегмент БД."""
+        import requests as _req
+        r = _req.delete(
+            f"{self._base}/api/v1/database/segment/{segment}",
+            headers=self._h,
+            params={"hard": str(hard).lower()},
+            timeout=30,
         )
         r.raise_for_status()
         return r.json()
@@ -630,6 +680,16 @@ class ApiService:
                 "segment": segment,
             },
             timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_analog_diagnostics(self) -> dict:
+        """GET /api/v1/analogs/diagnostics — проверяет настройки и связь с провайдерами."""
+        r = requests.get(
+            f"{self._base}/api/v1/analogs/diagnostics",
+            headers=self._h,
+            timeout=15,
         )
         r.raise_for_status()
         return r.json()

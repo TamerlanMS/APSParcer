@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     OPENAI_CHAT_MODEL:  str = "gpt-4o-mini"              # reranking
     AI_CONFIDENCE_THRESHOLD: float = 0.72  # cosine similarity floor
 
+    # Embedding budget guard — stops vectorization before exceeding this daily limit.
+    # text-embedding-3-small = $0.020 / 1M tokens
+    # text-embedding-3-large = $0.130 / 1M tokens
+    # text-embedding-ada-002 = $0.100 / 1M tokens
+    EMBED_DAILY_BUDGET_USD: float = 1.60
+
     # Pinecone — vector index (Phase 2)
     # PINECONE_API_KEY  — API key from console.pinecone.io
     # PINECONE_HOST     — index host URL, e.g. https://<index>-<project>.svc.<env>.pinecone.io

@@ -187,6 +187,11 @@ class ImportLog(Base):
     status       = Column(String(50), default="success")
     message      = Column(Text, nullable=True)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    # ── Расширенная история ────────────────────────────────────────────────────
+    action       = Column(String(50), nullable=True, default="import")  # import / clear / vectorize
+    count_before = Column(Integer, nullable=True)   # кол-во активных позиций ДО операции
+    count_after  = Column(Integer, nullable=True)   # кол-во активных позиций ПОСЛЕ
+    changed_by   = Column(String(150), nullable=True)  # username пользователя
 
 
 class PdfUploadLog(Base):

@@ -3,7 +3,7 @@
 STRINGS = {
     "ru": {
         # App
-        "app_title": "GQ-Builder — Обработка спецификаций",
+        "app_title": "GQ-EPC — Обработка спецификаций",
         "app_subtitle": "GQ Group",
         "lang_switch": "ҚАЗ",
 
@@ -119,6 +119,7 @@ STRINGS = {
         "preview_legend_edit": "✏️ Изменено",
         "preview_legend_ai": "🤖 ИИ-подбор",
         "preview_legend_manager": "📚 Из истории",
+        "preview_legend_analog": "↳ Аналог",
         "preview_constants": "Константы расчёта",
         "preview_margin": "Маржа",
         "preview_logistics": "Логистика",
@@ -129,7 +130,7 @@ STRINGS = {
         "preview_open_file": "Открыть файл в Excel?",
         "preview_save_error": "Ошибка сохранения",
         "ctx_copy_article":  "Копировать артикул",
-        "ctx_copy_kaznisa":  "Копировать код КазНИИСА",
+        "ctx_copy_kaznisa":  "Копировать код АГСК",
         "ctx_copy_row":      "Копировать артикул + код (через Tab)",
         "ctx_ai_rematch":    "🤖 Подобрать через ИИ",
         "preview_ai_rematch_btn": "🤖 Подобрать ИИ",
@@ -178,12 +179,12 @@ STRINGS = {
         "col_const":         "Константа цена",
         "col_price_seb":     "Цена себес",
         "col_sum_seb":       "Сумма себес",
-        "col_kaznisa_code":  "Код КазНИИСА",
+        "col_kaznisa_code":  "Код АГСК",
         "col_delivery":      "Срок поставки",
         "preview_constants_brand": "Константы по бренду",
         "preview_brand_select":    "Бренд:",
         "preview_rate_type":       "Расценка (1-5)",
-        "preview_rate_hint":       "Расценка: 1=РРЦ, 2=МРЦ, 3=Опт, 4=Партнёр/Проект, 5=КазНИИСА",
+        "preview_rate_hint":       "Расценка: 1=РРЦ, 2=МРЦ, 3=Опт, 4=Партнёр/Проект, 5=АГСК",
         "save_kp_title":     "Сохранение КП",
         "save_kp_subtitle":  "Заполните данные для коммерческого предложения",
         "save_kp_manager":   "Менеджер:",
@@ -352,7 +353,7 @@ STRINGS = {
 
     "kz": {
         # App
-        "app_title": "GQ-Builder — Сипаттамаларды өңдеу",
+        "app_title": "GQ-EPC — Сипаттамаларды өңдеу",
         "app_subtitle": "GQ Group",
         "lang_switch": "РУС",
 
@@ -467,6 +468,7 @@ STRINGS = {
         "preview_legend_edit": "✏️ Өзгертілді",
         "preview_legend_ai": "🤖 ЖИ-іріктеу",
         "preview_legend_manager": "📚 Тарихтан",
+        "preview_legend_analog": "↳ Аналог",
         "preview_constants": "Есептеу константалары",
         "preview_margin": "Маржа",
         "preview_logistics": "Логистика",
@@ -476,7 +478,7 @@ STRINGS = {
         "preview_saved": "Файл сақталды:\n{path}\n\nПозициялар: {count}",
         "preview_open_file": "Файлды Excel-де ашу керек пе?",
         "ctx_copy_article":  "Артикулды көшіру",
-        "ctx_copy_kaznisa":  "ҚазНИИСА кодын көшіру",
+        "ctx_copy_kaznisa":  "АГСК кодын көшіру",
         "ctx_copy_row":      "Артикул + код көшіру (Tab арқылы)",
         "ctx_ai_rematch":    "🤖 ЖИ арқылы іріктеу",
         "preview_ai_rematch_btn": "🤖 ЖИ іріктеу",
@@ -526,12 +528,12 @@ STRINGS = {
         "col_const":         "Бекітілген баға",
         "col_price_seb":     "Өзіндік құн",
         "col_sum_seb":       "Өзіндік құн сомасы",
-        "col_kaznisa_code":  "ҚазНИИСА коды",
+        "col_kaznisa_code":  "АГСК коды",
         "col_delivery":      "Жеткізу мерзімі",
         "preview_constants_brand": "Бренд бойынша константалар",
         "preview_brand_select":    "Бренд:",
         "preview_rate_type":       "Баға түрі (1-5)",
-        "preview_rate_hint":       "Баға түрі: 1=РРБ, 2=МРБ, 3=Опт, 4=Серіктес/Жоба, 5=ҚазНИИСА",
+        "preview_rate_hint":       "Баға түрі: 1=РРБ, 2=МРБ, 3=Опт, 4=Серіктес/Жоба, 5=АГСК",
         "save_kp_title":     "КҰ сақтау",
         "save_kp_subtitle":  "Коммерциялық ұсынысқа арналған деректерді толтырыңыз",
         "save_kp_manager":   "Менеджер:",

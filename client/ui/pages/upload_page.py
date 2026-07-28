@@ -412,16 +412,32 @@ class UploadPage(ctk.CTkFrame):
         if paths:
             self._add_files(list(paths))
 
+    _MAX_MULTI_SIZE = 20 * 1024 * 1024  # 20 MB per file when multiple; single file = unlimited
+
     def _add_files(self, paths: list):
         existing = {f["path"] for f in self._files}
+        rejected = []
         for p in paths:
             if p not in existing:
                 try:
                     size = os.path.getsize(p)
                 except OSError:
                     size = 0
+                # Single file — unlimited size (may be a large scan).
+                # Multiple files — each must be <= 20 MB.
+                would_be_multi = (len(self._files) + len(paths)) > 1
+                if would_be_multi and size > self._MAX_MULTI_SIZE:
+                    rejected.append((os.path.basename(p), size))
+                    continue
                 self._files.append({"path": p, "name": os.path.basename(p), "size": size})
                 existing.add(p)
+        if rejected:
+            lines = "\n".join(f"  {n}  ({_fmt_size(s)})" for n, s in rejected)
+            messagebox.showwarning(
+                "Файл слишком большой",
+                "При загрузке нескольких файлов каждый должен быть не более 20 МБ.\n"
+                "Для одного файла (скана) размер не ограничен.\n\nПропущено:\n" + lines,
+            )
         self._rebuild_file_list()
 
     def _remove_file(self, path: str):

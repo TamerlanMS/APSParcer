@@ -24,6 +24,8 @@ C_AI       = "#B0BEC5"   # серебристый — ИИ-совпадение 
 C_AI_LOW   = "#F5F5F5"   # почти белый — ИИ-совпадение (низкая уверенность, требует проверки)
 C_MANAGER  = "#EDE7F6"   # сиреневый — подобрано из истории выборов менеджеров
 C_HEADING  = "#D6EAF8"   # голубой — строка-заголовок раздела (is_heading=True)
+C_ANALOG      = "#B2EBF2"   # циановый — строка аналога (is_analog_row=True)
+C_ORIG_ANALOG = "#ECEFF1"   # светло-серый — оригинал, замещённый аналогом
 
 
 # Колонки строго в порядке WV 4.0 + два служебных
@@ -41,7 +43,7 @@ COLS = [
     ("seb_sum",    "col_sum_seb"),      # 9 — Сумма себес
     ("kp",         "col_price_kp"),     # 10 — Цена КП, редактируется
     ("kp_sum",     "col_sum_kp"),       # 11 — Сумма КП
-    ("kaznisa",    "col_kaznisa_code"), # 12 — Код КазНИИСА
+    ("kaznisa",    "col_kaznisa_code"), # 12 — Код АГСК
     ("comment",    "col_comment"),      # 13 — Комментарии (редактируется)
     ("delivery",   "col_delivery"),     # 14 — Срок поставки (редактируется)
     ("status",     "col_status"),       # 15 — Статус
@@ -53,8 +55,8 @@ EDITABLE_COLS = {5, 6, 7, 8, 9, 10, 11, 13, 14}  # Кол-во, Кратн., К�
 
 # Соответствие rate-индекс (1..8) → ключ цены из БД
 RATE_FIELD = {
-    1: "kaznisa",  # Сумма КазНИИСА  (kaznisa × кол-во)
-    2: "kaznisa",  # Цена КазНИИСА
+    1: "kaznisa",  # Сумма АГСК  (kaznisa × кол-во)
+    2: "kaznisa",  # Цена АГСК
     3: "rrts",     # РРЦ
     4: "mrc",      # МРЦ
     5: "opt",      # Опт
@@ -67,8 +69,8 @@ GP_RATE_TYPES = {6, 7}
 
 # Подписи типов расценки (индекс 1 = RATE_LABELS[0])
 RATE_LABELS = [
-    "Сумма КазНИИСА",  # 1
-    "Цена КазНИИСА",   # 2
+    "Сумма АГСК",  # 1
+    "Цена АГСК",   # 2
     "РРЦ",             # 3
     "МРЦ",             # 4
     "Опт",             # 5
@@ -321,7 +323,7 @@ class SaveKPDialog(ctk.CTkToplevel):
 class ArticleSearchDialog(ctk.CTkToplevel):
     """
     Диалог поиска товара в базе данных.
-    Показывает данные из PDF (артикул, наименование, код КазНИИСА), позволяет
+    Показывает данные из PDF (артикул, наименование, код АГСК), позволяет
     выбрать сегмент базы и выполнить единый поиск по всем полям сразу.
     """
 
@@ -373,7 +375,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         for col_idx, (label, value) in enumerate([
             ("Артикул",    self._pdf_art  or "—"),
             ("Наименование", self._pdf_name[:70] + ("…" if len(self._pdf_name) > 70 else "") if self._pdf_name else "—"),
-            ("Код КазНИИСА", self._pdf_code or "—"),
+            ("Код АГСК", self._pdf_code or "—"),
         ]):
             lbl_col = col_idx * 2 + 1
             val_col = col_idx * 2 + 2
@@ -423,11 +425,11 @@ class ArticleSearchDialog(ctk.CTkToplevel):
                      font=FONT_NORMAL, text_color=TEXT_SECONDARY).grid(
             row=0, column=0, padx=(12, 6), pady=10, sticky="e")
 
-        # Предзаполняем: приоритет — артикул, потом код КазНИИСА, потом имя
+        # Предзаполняем: приоритет — артикул, потом код АГСК, потом имя
         default_q = self._pdf_art or self._pdf_code or self._pdf_name[:60]
         self._q_var = tk.StringVar(value=default_q)
         q_entry = ctk.CTkEntry(search_frame, textvariable=self._q_var,
-                                placeholder_text="Артикул, наименование или код КазНИИСА…",
+                                placeholder_text="Артикул, наименование или код АГСК…",
                                 height=34, font=FONT_NORMAL)
         q_entry.grid(row=0, column=1, padx=(0, 8), pady=10, sticky="ew")
         q_entry.bind("<Return>", lambda e: self._do_search())
@@ -453,7 +455,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
 
         cols = ["article", "name", "brand", "unit", "kaznisa_code", "rrts", "mrc"]
         hdrs = [t("search_col_article"), t("search_col_name"),
-                t("search_col_brand"), "Ед.", "Код КазНИИСА", "РРЦ", "МРЦ"]
+                t("search_col_brand"), "Ед.", "Код АГСК", "РРЦ", "МРЦ"]
         widths = [150, 280, 90, 40, 120, 80, 80]
 
         style = ttk.Style()
@@ -733,6 +735,7 @@ class PreviewPage(ctk.CTkFrame):
             (C_EDITED,   "preview_legend_edit"),
             (C_AI,       "preview_legend_ai"),
             (C_MANAGER,  "preview_legend_manager"),
+            (C_ANALOG,   "preview_legend_analog"),
         ]:
             lf = tk.Frame(leg, bg=bg, relief="solid", bd=1)
             lf.pack(side="left", padx=(0, 8))
@@ -795,6 +798,9 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("manager",  background=C_MANAGER)
         self.tree.tag_configure("heading",  background=C_HEADING,
                                 font=("Calibri", 10, "bold"))
+        self.tree.tag_configure("analog",       background=C_ANALOG)
+        self.tree.tag_configure("orig_analog",  background=C_ORIG_ANALOG,
+                                font=("Calibri", 10, "italic"))
 
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_tree_single_click)
@@ -1226,7 +1232,7 @@ class PreviewPage(ctk.CTkFrame):
         Возвращает (price_seb, sum_seb, price_kp, sum_kp).
         Формула из WV_template.xlsm:
             base = выбор по rate-индексу бренда из БД:
-                   1=Сумма КазНИИСА, 2=Цена КазНИИСА, 3=РРЦ, 4=МРЦ,
+                   1=Сумма АГСК, 2=Цена АГСК, 3=РРЦ, 4=МРЦ,
                    5=Опт, 6=Цена ГП (РРЦ×ГП), 7=Сумма ГП, 8=Проект
                    либо ручная константа из поля G
             price_seb = base × курс × НДС × лог-ка
@@ -1324,8 +1330,8 @@ class PreviewPage(ctk.CTkFrame):
             "name_contains":            "Название (вхожд.)",
             "name_fuzzy":               "Название (нечётк.)",
             "name_partial":             "Название (частич.)",
-            "code_exact":               "КазНИИСА (код)",
-            "kaznisa":                  "КазНИИСА (код)",
+            "code_exact":               "АГСК (код)",
+            "kaznisa":                  "АГСК (код)",
         }
         if method in _MAP:
             return _MAP[method]
@@ -1350,6 +1356,36 @@ class PreviewPage(ctk.CTkFrame):
             self._insert_row(item)
 
     def _insert_row(self, item: dict, position: object = "end") -> str:
+
+        # ── Аналог-строка (подобранный аналог, вставляется под оригиналом) ────
+        if item.get("is_analog_row"):
+            bm      = item.get("best_match") or {}
+            qty_raw = item.get("qty", 1)
+            brand   = bm.get("brand", "")
+            article = (bm.get("article", "") or "").replace("\n", " ").strip()
+            name    = (bm.get("name",    "") or "").replace("\n", " ").strip()
+            unit    = bm.get("unit", "шт.")
+            mult    = bm.get("multiplicity") or ""
+            kaznisa_code = bm.get("kaznisa_code") or ""
+
+            seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+            def _f(v): return f"{v:.2f}" if v else ""
+
+            _cb = ("☑" if id(item) in self._checked_items else "☐") if self._select_mode else ""
+            pos_lbl = f"{_cb} ↳ Аналог" if _cb else "↳ Аналог"
+            vals = (
+                pos_lbl, brand, article, name, unit, qty_raw, mult, "",
+                _f(seb), _f(seb_sum), _f(kp), _f(kp_sum),
+                kaznisa_code,
+                item.get("comment", "") or "",
+                item.get("delivery", "") or "",
+                "↳ Аналог",
+                "analog",
+            )
+            iid = self.tree.insert("", position, values=vals, tags=("analog",))
+            item["_iid"] = iid
+            return iid
+
         bm           = item.get("best_match") or {}
         status       = item.get("status", "not_found")
         match_method = item.get("match_method")
@@ -1384,7 +1420,14 @@ class PreviewPage(ctk.CTkFrame):
         if item.get("_user_edited"):
             tag = "edited"
 
+        # Оригинал, замещённый аналогом — показываем серым, без цен
+        if item.get("has_analog_row"):
+            tag = "orig_analog"
+
         seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+        # Скрываем цены оригинала когда есть аналог-строка (цены учитываются в аналоге)
+        if item.get("has_analog_row"):
+            seb = seb_sum = kp = kp_sum = 0.0
         qty_raw = item.get("qty", 1)
         brand = bm.get("brand", "")
         article = (bm.get("article", "") or item.get("article_raw", "")).replace("\n", " ").strip()
@@ -1420,6 +1463,9 @@ class PreviewPage(ctk.CTkFrame):
         if _no_price_in_db:
             method_lbl = (method_lbl + " | нет цены в БД") if method_lbl else "нет цены в БД"
 
+        if item.get("has_analog_row"):
+            method_lbl = "↓ аналог подобран"
+
         _pos_raw = item.get("pos", "")
         if self._select_mode:
             _cb = "☑" if id(item) in self._checked_items else "☐"
@@ -1450,8 +1496,8 @@ class PreviewPage(ctk.CTkFrame):
         return iid
 
     def _update_stats(self):
-        # Exclude section-header rows from all counters
-        total    = sum(1 for i in self.items if i.get("status") != "heading")
+        # Exclude section-header rows and analog sub-rows from all counters
+        total    = sum(1 for i in self.items if i.get("status") != "heading" and not i.get("is_analog_row"))
         exact    = sum(1 for i in self.items if i.get("status") == "exact")
         warn     = sum(1 for i in self.items if i.get("status") in ("multiple", "fuzzy"))
         ai_match = sum(1 for i in self.items if i.get("status") == "ai_match")
@@ -1578,7 +1624,7 @@ class PreviewPage(ctk.CTkFrame):
             partner = _fmt(bm.get("partner"))
             parts.append(
                 f"{t('preview_info_db')}: [{bm.get('article','')}] Бренд={brand}  "
-                f"КазНИИСА={kaznisa}  РРЦ={rrts}  МРЦ={mrc}  Опт={opt}  Проект={partner}"
+                f"АГСК={kaznisa}  РРЦ={rrts}  МРЦ={mrc}  Опт={opt}  Проект={partner}"
             )
 
         # Техпараметры (Phase 2.2)
@@ -2032,14 +2078,61 @@ class PreviewPage(ctk.CTkFrame):
         )
 
     def _apply_analog_match(self, item: dict, db_match: dict):
-        """Применяет найденный аналог как best_match для данной позиции."""
-        item["best_match"]   = db_match
-        item["status"]       = "ai_match"
-        item["match_method"] = "analog"
-        item["_user_edited"] = True
-        # Сбрасываем старые артефакты
-        for k in ("_user_const_price", "ai_confidence", "ai_reason"):
+        """Вставляет аналог-строку под оригинальной позицией.
+
+        Оригинал остаётся видимым (для понимания менеджерами), получает тег
+        has_analog_row=True и теряет цены. Новая аналог-строка (is_analog_row=True)
+        вставляется сразу после оригинала в self.items — она несёт цены и попадает в КП.
+        """
+        # Убираем существующую аналог-строку если была (повторный вызов)
+        old_analog = next(
+            (i for i in self.items if i.get("is_analog_row") and i.get("_analog_parent_id") == id(item)),
+            None,
+        )
+        if old_analog:
+            self.items.remove(old_analog)
+
+        # Помечаем оригинал как замещённый
+        item["has_analog_row"] = True
+        item["_user_edited"]   = True
+        # Сбрасываем старые ценовые артефакты у оригинала
+        for k in ("_user_const_price", "_user_price", "_user_seb_price", "ai_confidence", "ai_reason"):
             item.pop(k, None)
+
+        # Создаём аналог-строку
+        analog_item: dict = {
+            "is_analog_row":     True,
+            "_analog_parent_id": id(item),
+            "best_match":        db_match,
+            "status":            "analog",
+            "match_method":      "analog",
+            "qty":               item.get("qty", 1),
+            "unit":              (db_match.get("unit") or item.get("unit") or "шт."),
+            "pos":               "",
+            "name_raw":          db_match.get("name", ""),
+            "article_raw":       db_match.get("article", ""),
+            "_user_edited":      True,
+        }
+
+        # Вставляем сразу после оригинала
+        try:
+            idx = self.items.index(item)
+            self.items.insert(idx + 1, analog_item)
+        except ValueError:
+            self.items.append(analog_item)
+
+        self._populate()
+        self._update_stats()
+
+    def _remove_analog_row(self, parent_item: dict):
+        """Убирает аналог-строку у позиции (сброс аналога)."""
+        old_analog = next(
+            (i for i in self.items if i.get("is_analog_row") and i.get("_analog_parent_id") == id(parent_item)),
+            None,
+        )
+        if old_analog:
+            self.items.remove(old_analog)
+        parent_item.pop("has_analog_row", None)
         self._populate()
         self._update_stats()
 
@@ -2054,6 +2147,20 @@ class PreviewPage(ctk.CTkFrame):
             return
         # Сохраняем для возможного восстановления через «Сбросить»
         self._deleted_items.append(item)
+        # Если удаляем оригинал — удаляем и аналог-строку под ним
+        analog_sub = next(
+            (i for i in self.items
+             if i.get("is_analog_row") and i.get("_analog_parent_id") == id(item)),
+            None,
+        )
+        if analog_sub:
+            try:
+                self.items.remove(analog_sub)
+            except ValueError:
+                pass
+            sub_iid = analog_sub.get("_iid")
+            if sub_iid and self.tree.exists(sub_iid):
+                self.tree.delete(sub_iid)
         # Удаляем из данных и из дерева
         try:
             self.items.remove(item)

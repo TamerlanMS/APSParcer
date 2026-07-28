@@ -60,6 +60,19 @@ async def lifespan(app: FastAPI):
             await conn.execute(text(
                 "ALTER TABLE pdf_upload_logs ADD COLUMN IF NOT EXISTS full_name VARCHAR(200)"
             ))
+            # Extended import history
+            await conn.execute(text(
+                "ALTER TABLE import_logs ADD COLUMN IF NOT EXISTS action VARCHAR(50) DEFAULT 'import'"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE import_logs ADD COLUMN IF NOT EXISTS count_before INTEGER"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE import_logs ADD COLUMN IF NOT EXISTS count_after INTEGER"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE import_logs ADD COLUMN IF NOT EXISTS changed_by VARCHAR(150)"
+            ))
         logger.info("Schema migrations applied")
     except Exception as exc:
         logger.error("Schema migration failed: %s", exc)
@@ -73,9 +86,17 @@ async def lifespan(app: FastAPI):
                 from app.models.models import ALL_SEGMENTS
                 total = 0
                 for seg in ALL_SEGMENTS:
-                    n = await embed_products_batch(AsyncSessionLocal, segment=seg)
+                    res = await embed_products_batch(AsyncSessionLocal, segment=seg)
+                    n = res.get("upserted", 0) if isinstance(res, dict) else int(res or 0)
                     if n:
-                        logger.info("Startup embedding [%s]: %d products upserted", seg, n)
+                        cost = res.get("cost_usd", 0.0) if isinstance(res, dict) else 0.0
+                        logger.info(
+                            "Startup embedding [%s]: %d upserted, cost=$%.5f",
+                            seg, n, cost,
+                        )
+                    if isinstance(res, dict) and res.get("budget_exceeded"):
+                        logger.warning("Startup embedding: daily budget exceeded — stopping")
+                        break
                     total += n
                 if not total:
                     logger.info("Startup embedding: guard conditions not met for any segment")

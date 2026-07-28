@@ -219,7 +219,10 @@ def _inject_x14_dv(xlsm_path: str) -> None:
 
 
 
-_HEADING_FILL = PatternFill("solid", fgColor="D9E1F2")  # light blue-gray
+_HEADING_FILL    = PatternFill("solid", fgColor="D9E1F2")  # light blue-gray
+_ANALOG_FILL     = PatternFill("solid", fgColor="B2EBF2")  # циановый — аналог-строка
+_ORIG_ANALOG_FILL= PatternFill("solid", fgColor="ECEFF1")  # серый — оригинал с аналогом
+_ANALOG_FONT     = Font(name="Calibri", size=10, italic=True)
 _HEADING_FONT = Font(bold=True)
 
 def _apply_heading_style(ws, row: int, max_col: int = 14) -> None:
@@ -462,6 +465,36 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
             _apply_heading_style(kp, row, max_col=14)
             last_data_row = row
             continue
+
+        # ── Оригинал с аналогом: пишем без цен (цены в аналог-строке) ───────
+        if item.get("has_analog_row"):
+            # Оригинал в КП не пишем — в КП идёт только строка аналога
+            continue
+
+        # ── Аналог-строка: мятный фон + полные цены ──────────────────────────
+        if item.get("is_analog_row"):
+            bm_a     = item.get("best_match") or {}
+            a_article = bm_a.get("article", "") or item.get("article_raw", "")
+            a_name    = bm_a.get("name",    "") or item.get("name_raw",    "")
+            a_brand   = bm_a.get("brand", "")
+            a_unit    = (bm_a.get("unit") if bm_a else item.get("unit", "шт.")) or ""
+            a_qty     = float(item.get("qty", 1) or 1)
+            a_price   = float(item.get("_computed_kp_price") or 0)
+            a_sum     = float(item.get("_computed_kp_sum")   or 0)
+            kp.cell(row=row, column=KP_BRAND,    value=a_brand or None)
+            kp.cell(row=row, column=KP_ARTICLE,  value=a_article or None)
+            kp.cell(row=row, column=KP_NAME,     value=a_name    or None)
+            kp.cell(row=row, column=KP_UNIT,     value=a_unit    or None)
+            kp.cell(row=row, column=KP_QTY,      value=a_qty)
+            kp.cell(row=row, column=KP_PRICE_KP, value=a_price or None)
+            kp.cell(row=row, column=KP_SUM_KP,   value=a_sum   or None)
+            kp.cell(row=row, column=KP_COMMENT,  value="↳ аналог")
+            for col in range(1, 10):
+                kp.cell(row=row, column=col).fill = _ANALOG_FILL
+                kp.cell(row=row, column=col).font = _ANALOG_FONT
+            last_data_row = row
+            continue
+
         bm   = item.get("best_match") or {}
 
         article  = bm.get("article", "") or item.get("article_raw", "")
@@ -1158,6 +1191,63 @@ def generate_excel(
             ws.cell(row=row, column=WV_KAZNIISA, value=h_kaz     or None)
             _apply_heading_style(ws, row)
             continue
+
+        # ── Аналог-строка (is_analog_row) ─────────────────────────────────────
+        if item.get("is_analog_row"):
+            bm_a    = item.get("best_match") or {}
+            brand_a = bm_a.get("brand") or ""
+            art_a   = bm_a.get("article") or item.get("article_raw") or ""
+            name_a  = "↳ " + (bm_a.get("name") or item.get("name_raw") or "")
+            unit_a  = bm_a.get("unit") or item.get("unit") or ""
+            qty_a   = item.get("qty", 1)
+            ws.cell(row=row, column=WV_BRAND,   value=f"↳ {brand_a}" if brand_a else "↳ аналог")
+            ws.cell(row=row, column=WV_ARTICLE, value=art_a)
+            ws.cell(row=row, column=WV_QTY,     value=qty_a)
+            ws.cell(row=row, column=WV_NAME,    value=name_a)
+            ws.cell(row=row, column=WV_UNIT,    value=unit_a)
+            ws.cell(row=row, column=WV_COMMENT, value="↳ аналог")
+            # Заполняем G — константа цены (kaznisa приоритет, затем rrts)
+            _a_brand_up = brand_a.upper()
+            _a_bc       = (brand_consts or {}).get(_a_brand_up, {})
+            _a_nds  = float(_a_bc.get("nds",           1.0) or 1.0)
+            _a_lo   = float(_a_bc.get("logistics",     1.0) or 1.0)
+            _a_cur  = float(_a_bc.get("currency_rate", 1.0) or 1.0)
+            _a_mg   = float(_a_bc.get("margin",        1.0) or 1.0)
+            _a_denom_k = _a_nds * _a_lo * _a_cur * _a_mg
+            _a_price = float(bm_a.get("kaznisa") or bm_a.get("rrts") or 0)
+            if _a_price and _a_denom_k:
+                try:
+                    ws.cell(row=row, column=WV_CONST_PRC, value=_a_price / _a_denom_k)
+                except (TypeError, ValueError):
+                    pass
+            for col in range(1, 15):
+                ws.cell(row=row, column=col).fill = _ANALOG_FILL
+                ws.cell(row=row, column=col).font = _ANALOG_FONT
+            continue
+
+        # ── Оригинал, замещённый аналогом (has_analog_row) ───────────────────
+        if item.get("has_analog_row"):
+            bm      = item.get("best_match") or {}
+            brand   = bm.get("brand") or ""
+            article = bm.get("article") or item.get("article_raw") or ""
+            qty     = item.get("qty", 1)
+            ws.cell(row=row, column=WV_BRAND,   value=brand)
+            ws.cell(row=row, column=WV_ARTICLE, value=article)
+            ws.cell(row=row, column=WV_QTY,     value=qty)
+            wv_name = bm.get("name", "") or item.get("name_raw", "")
+            wv_unit = bm.get("unit", "") or item.get("unit", "")
+            if wv_name:
+                ws.cell(row=row, column=WV_NAME, value=wv_name)
+            if wv_unit:
+                ws.cell(row=row, column=WV_UNIT, value=wv_unit)
+            # Оригинал замещён аналогом — НЕ пишем G, чтобы формулы не считали цену
+            ws.cell(row=row, column=WV_COMMENT, value="→ заменён аналогом")
+            _orig_font = Font(name="Calibri", size=10, italic=True, strike=True, color="808080")
+            for col in range(1, 15):
+                ws.cell(row=row, column=col).fill = _ORIG_ANALOG_FILL
+                ws.cell(row=row, column=col).font = _orig_font
+            continue
+
         bm      = item.get("best_match") or {}
         brand   = bm.get("brand") or ""
         article = bm.get("article") or item.get("article_raw") or ""
@@ -1353,6 +1443,63 @@ def generate_excel_multi(
                 data_row += 1
                 continue
 
+            # ── Аналог-строка (is_analog_row) ──────────────────────────────
+            if item.get("is_analog_row"):
+                bm_a    = item.get("best_match") or {}
+                brand_a = bm_a.get("brand") or ""
+                qty_a   = float(item.get("qty", 1) or 1)
+                kp_price_a = float(item.get("_computed_kp_price") or 0) or None
+                kp_sum_a   = float(item.get("_computed_kp_sum")   or 0) or None
+                seb_price_a = float(item.get("_computed_seb_price") or 0) or None
+                seb_sum_a   = float(item.get("_computed_seb_sum")   or 0) or None
+                row_vals_a = [
+                    f"↳ {brand_a}" if brand_a else "↳ аналог",
+                    bm_a.get("article") or item.get("article_raw") or "",
+                    "↳ " + (bm_a.get("name") or item.get("name_raw") or ""),
+                    bm_a.get("unit") or item.get("unit") or "",
+                    qty_a,
+                    bm_a.get("multiplicity") or None,
+                    None,
+                    seb_price_a, seb_sum_a,
+                    kp_price_a, kp_sum_a,
+                    bm_a.get("kaznisa_code") or "",
+                    "↳ аналог", "",
+                ]
+                for ci2, (val, aln) in enumerate(zip(row_vals_a, WV_ALNS), 1):
+                    c = ws.cell(row=data_row, column=ci2, value=val)
+                    c.alignment = aln
+                    c.border    = DATA_BDR
+                    c.fill      = _ANALOG_FILL
+                    c.font      = _ANALOG_FONT
+                    if ci2 in WV_PRICE_COLS:
+                        c.number_format = NUM_FMT
+                data_row += 1
+                continue
+
+            # ── Оригинал, замещённый аналогом (has_analog_row) ──────────────
+            if item.get("has_analog_row"):
+                bm_o  = item.get("best_match") or {}
+                qty_o = float(item.get("qty", 1) or 1)
+                row_vals_o = [
+                    bm_o.get("brand")   or "",
+                    bm_o.get("article") or item.get("article_raw") or "",
+                    bm_o.get("name")    or item.get("name_raw")    or "",
+                    bm_o.get("unit")    or item.get("unit")        or "",
+                    qty_o,
+                    None, None, None, None, None, None,
+                    bm_o.get("kaznisa_code") or item.get("kaznisa_code_raw") or "",
+                    "→ заменён аналогом", "",
+                ]
+                _orig_font_m = Font(name="Calibri", size=10, italic=True, strike=True, color="808080")
+                for ci2, (val, aln) in enumerate(zip(row_vals_o, WV_ALNS), 1):
+                    c = ws.cell(row=data_row, column=ci2, value=val)
+                    c.alignment = aln
+                    c.border    = DATA_BDR
+                    c.fill      = _ORIG_ANALOG_FILL
+                    c.font      = _orig_font_m
+                data_row += 1
+                continue
+
             bm  = item.get("best_match") or {}
             qty = float(item.get("qty", 1) or 1)
             kp_price = float(item.get("_computed_kp_price") or 0) or None
@@ -1468,8 +1615,53 @@ def generate_excel_multi(
         for item in proj.get("items", []):
             if item.get("status") == "heading" or item.get("is_heading"):
                 continue
+            # Оригинал, замещённый аналогом — в КП не включаем
+            if item.get("has_analog_row"):
+                continue
             bm        = item.get("best_match") or {}
             qty       = float(item.get("qty", 1) or 1)
+            # Аналог-строка: берём данные из best_match аналога
+            if item.get("is_analog_row"):
+                bm    = item.get("best_match") or {}
+                brand_kp = bm.get("brand") or ""
+                kp_price = float(item.get("_computed_kp_price") or 0) or None
+                kp_sum   = float(item.get("_computed_kp_sum")   or 0) or None
+                kaz_price = float(bm.get("kaznisa") or 0) or None
+                kaz_sum   = (kaz_price * qty) if kaz_price else None
+                rrts_p    = float(bm.get("rrts") or 0) or None
+                rrts_s    = (rrts_p * qty) if rrts_p else None
+                kp_vals = [
+                    brand_kp,
+                    bm.get("article") or item.get("article_raw") or "",
+                    bm.get("name")    or item.get("name_raw")    or "",
+                    bm.get("unit")    or item.get("unit")        or "",
+                    qty,
+                    kp_price, kp_sum,
+                    "↳ аналог", "",
+                    kaz_price, kaz_sum,
+                    bm.get("kaznisa_code") or "",
+                    rrts_p, rrts_s,
+                ]
+                for ci2, (val, aln) in enumerate(zip(kp_vals, KP_ALNS), 1):
+                    try:
+                        c = kp_ws.cell(row=kp_row, column=ci2, value=val)
+                    except AttributeError:
+                        for _mr3 in list(kp_ws.merged_cells.ranges):
+                            if (_mr3.min_row <= kp_row <= _mr3.max_row and
+                                    _mr3.min_col <= ci2 <= _mr3.max_col):
+                                try: kp_ws.unmerge_cells(str(_mr3))
+                                except Exception: pass
+                                break
+                        try: c = kp_ws.cell(row=kp_row, column=ci2, value=val)
+                        except Exception: continue
+                    c.alignment = aln
+                    c.border    = DATA_BDR
+                    c.fill      = _ANALOG_FILL
+                    c.font      = _ANALOG_FONT
+                    if ci2 in KP_PRICE_COL:
+                        c.number_format = NUM_FMT
+                kp_row += 1
+                continue
             kp_price  = float(item.get("_computed_kp_price") or 0) or None
             kp_sum    = float(item.get("_computed_kp_sum")   or 0) or None
             kaz_price = float(bm.get("kaznisa") or 0) or None

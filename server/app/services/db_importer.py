@@ -1,7 +1,7 @@
 import openpyxl
 import io
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update, delete
 from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
 from typing import Tuple
 import logging
@@ -49,6 +49,7 @@ async def import_products_from_excel(
     db: AsyncSession,
     filename: str = "import.xlsm",
     segment: str = "ss",
+    changed_by: str = "",
 ) -> Tuple[int, int]:
     wb = _open_workbook(file_bytes)
 
@@ -67,7 +68,25 @@ async def import_products_from_excel(
     added = 0
     updated = 0
 
-    # Загружаем только товары этого сегмента — не трогаем другие сегменты
+    # ── Считаем кол-во ДО операции ───────────────────────────────────────────
+    from sqlalchemy import func as _func
+    _cnt_before_q = await db.execute(
+        select(_func.count()).select_from(Product)
+        .where(Product.segment == segment, Product.is_active == True)
+    )
+    count_before = _cnt_before_q.scalar() or 0
+
+    # ── Полная перезапись сегмента ────────────────────────────────────────────
+    # Деактивируем ВСЕ текущие позиции сегмента перед импортом.
+    # После обработки файла активируются только те, что есть в новом файле.
+    await db.execute(
+        update(Product)
+        .where(Product.segment == segment)
+        .values(is_active=False)
+    )
+    await db.flush()
+
+    # Карта article → id для ВСЕХ (в т.ч. только что деактивированных) позиций сегмента
     existing = await db.execute(
         select(Product.article, Product.id).where(Product.segment == segment)
     )
@@ -133,13 +152,28 @@ async def import_products_from_excel(
         )
         updated += 1
 
+    # ── Считаем кол-во ПОСЛЕ операции ────────────────────────────────────────
+    _cnt_after_q = await db.execute(
+        select(_func.count()).select_from(Product)
+        .where(Product.segment == segment, Product.is_active == True)
+    )
+    count_after = _cnt_after_q.scalar() or 0
+
     db.add(ImportLog(
         filename=filename,
         segment=segment,
         rows_added=added,
         rows_updated=updated,
         status="success",
-        message=f"[{segment}] Добавлено: {added}, обновлено: {updated}"
+        action="import",
+        count_before=count_before,
+        count_after=count_after,
+        changed_by=changed_by or None,
+        message=(
+            f"[{segment.upper()}] {count_before} → {count_after}  "
+            f"(+{added} новых, ~{updated} обновлено)"
+            + (f"  | {changed_by}" if changed_by else "")
+        ),
     ))
 
     await db.commit()
@@ -160,6 +194,82 @@ async def import_products_from_excel(
         added, updated, total_p, with_prices, total_p - with_prices
     )
     return added, updated
+
+
+async def clear_segment_products(
+    db: AsyncSession,
+    segment: str,
+    hard_delete: bool = False,
+    changed_by: str = "",
+) -> int:
+    """
+    Очищает базу продуктов для указанного сегмента.
+    hard_delete=False  → деактивирует (is_active=False), данные сохраняются
+    hard_delete=True   → физически удаляет строки
+    Возвращает количество затронутых позиций.
+    """
+    from sqlalchemy import func as _func
+    _cnt_q = await db.execute(
+        select(_func.count()).select_from(Product)
+        .where(Product.segment == segment, Product.is_active == True)
+    )
+    count_before = _cnt_q.scalar() or 0
+
+    if hard_delete:
+        result = await db.execute(
+            delete(Product).where(Product.segment == segment)
+        )
+        count = result.rowcount
+    else:
+        result = await db.execute(
+            update(Product)
+            .where(Product.segment == segment, Product.is_active == True)
+            .values(is_active=False)
+        )
+        count = result.rowcount
+
+    count_after = 0 if hard_delete else (count_before - count)
+    action = "hard_delete" if hard_delete else "clear"
+
+    db.add(ImportLog(
+        filename=f"<очистка сегмента {segment.upper()}>",
+        segment=segment,
+        rows_added=0,
+        rows_updated=count,
+        status="success",
+        action=action,
+        count_before=count_before,
+        count_after=count_after,
+        changed_by=changed_by or None,
+        message=(
+            f"[{segment.upper()}] Очищено: {count} позиций "
+            f"({'удалено' if hard_delete else 'деактивировано'})"
+            + (f"  | {changed_by}" if changed_by else "")
+        ),
+    ))
+    await db.commit()
+    logger.info("clear_segment[%s]: %d products %s by %s",
+                segment, count, "deleted" if hard_delete else "deactivated", changed_by or "?")
+    return count
+
+
+async def get_segment_stats(db: AsyncSession) -> dict:
+    """Возвращает количество активных товаров по каждому сегменту."""
+    from sqlalchemy import func
+    from app.models.models import ALL_SEGMENTS
+    stats = {}
+    for seg in ALL_SEGMENTS:
+        q = await db.execute(
+            select(func.count())
+            .select_from(Product)
+            .where(Product.segment == seg, Product.is_active == True)
+        )
+        stats[seg] = q.scalar() or 0
+    total = await db.execute(
+        select(func.count()).select_from(Product).where(Product.is_active == True)
+    )
+    stats["total"] = total.scalar() or 0
+    return stats
 
 
 async def import_constants_from_excel(
