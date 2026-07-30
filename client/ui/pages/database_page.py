@@ -4,7 +4,7 @@ import threading, os
 
 from assets.theme import *
 from locales.strings import t
-from services.api_service import ApiService
+from services.api_service import ApiService, SessionExpiredError
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -162,9 +162,11 @@ class DatabasePage(ctk.CTkFrame):
         )
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=pad, pady=(0, pad))
         self.tabview.add(t("db_tab_import"))
+        self.tabview.add("Бренды")
         self.tabview.add(t("db_tab_logs"))
 
         self._build_import_tab()
+        self._build_brands_tab()
         self._build_logs_tab()
 
         # Автозагрузка логов при переключении на вкладку «История»
@@ -385,6 +387,87 @@ class DatabasePage(ctk.CTkFrame):
         # перемещении или изменении размера окна
         tab.bind("<Configure>", self._enforce_role_layout, add="+")
 
+    def _build_brands_tab(self):
+        tab = self.tabview.tab("Бренды")
+        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+
+        # ── Top bar: поиск + обновить ──────────────────────────────────────────
+        top = ctk.CTkFrame(tab, fg_color="transparent")
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(12, 4))
+        top.grid_columnconfigure(0, weight=1)
+
+        self._brand_search_var = ctk.StringVar()
+        self._brand_search_var.trace_add("write", lambda *_: self._filter_brands())
+        ctk.CTkEntry(
+            top, textvariable=self._brand_search_var,
+            placeholder_text="🔍  Фильтр по бренду...",
+            font=FONT_SMALL, height=32,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        ctk.CTkButton(
+            top, text="↻ Обновить", font=FONT_SMALL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=32, width=120, corner_radius=RADIUS_SM,
+            command=self._load_brand_stats,
+        ).grid(row=0, column=1)
+
+        # ── Легенда цветов ────────────────────────────────────────────────────
+        legend = ctk.CTkFrame(tab, fg_color="transparent")
+        legend.grid(row=0, column=0, columnspan=2, sticky="e", padx=16)
+        for txt, color in [
+            ("▮ увеличение", "#27AE60"),
+            ("▮ уменьшение", "#E74C3C"),
+            ("▮ новый бренд", "#2980B9"),
+            ("▮ удалён", "#E67E22"),
+        ]:
+            ctk.CTkLabel(legend, text=txt, font=FONT_SMALL,
+                         text_color=color).pack(side="left", padx=(0, 10))
+
+        # ── Treeview ──────────────────────────────────────────────────────────
+        style = ttk.Style()
+        style.configure("Brand.Treeview", rowheight=24, font=("Calibri", 11))
+        style.configure("Brand.Treeview.Heading",
+                        background=NAVY, foreground="white",
+                        font=("Calibri", 11, "bold"))
+
+        cols = ["brand", "ss", "os", "sil", "total", "delta"]
+        self._brand_tree = ttk.Treeview(
+            tab, columns=cols, show="headings", style="Brand.Treeview"
+        )
+        for col, hdr, w, anc in zip(
+            cols,
+            ["Бренд", "SS", "OS", "SIL", "Всего", "Δ изменение"],
+            [200, 65, 65, 65, 80, 110],
+            ["w", "center", "center", "center", "center", "center"],
+        ):
+            self._brand_tree.heading(col, text=hdr,
+                                     command=lambda c=col: self._sort_brands(c))
+            self._brand_tree.column(col, width=w, anchor=anc, minwidth=40)
+
+        vsb = ttk.Scrollbar(tab, orient="vertical", command=self._brand_tree.yview)
+        self._brand_tree.configure(yscrollcommand=vsb.set)
+        self._brand_tree.grid(row=1, column=0, sticky="nsew",
+                               padx=(16, 0), pady=(4, 4))
+        vsb.grid(row=1, column=1, sticky="ns", pady=(4, 4), padx=(0, 16))
+
+        self._brand_tree.tag_configure("increased", background="#D4EDDA")
+        self._brand_tree.tag_configure("decreased", background="#F8D7DA")
+        self._brand_tree.tag_configure("new_brand", background="#D1ECF1")
+        self._brand_tree.tag_configure("removed",   background="#FFF3CD")
+
+        # ── Итоговая строка ───────────────────────────────────────────────────
+        self._brand_summary_lbl = ctk.CTkLabel(
+            tab, text="", font=FONT_SMALL, text_color=TEXT_SECONDARY
+        )
+        self._brand_summary_lbl.grid(row=2, column=0, pady=(0, 10))
+
+        # ── Данные ────────────────────────────────────────────────────────────
+        self._brand_data: list = []
+        self._prev_brand_stats: dict = {}
+        self._brand_sort_col   = "total"
+        self._brand_sort_asc   = False
+
     def _build_logs_tab(self):
         tab = self.tabview.tab(t("db_tab_logs"))
         tab.grid_rowconfigure(0, weight=1)
@@ -419,6 +502,24 @@ class DatabasePage(ctk.CTkFrame):
 
     # ── Logic ─────────────────────────────────────────────────────────────────
 
+    def _handle_api_error(self, exc: Exception, context: str = ""):
+        """Показывает диалог ошибки. Для SessionExpiredError — предлагает перелогиниться."""
+        if isinstance(exc, SessionExpiredError):
+            ans = messagebox.askyesno(
+                "Сессия истекла",
+                "Ваша сессия истекла или прав администратора недостаточно.\n\n"
+                "Войти заново?",
+                parent=self,
+            )
+            if ans:
+                try:
+                    self.app._show_auth()
+                except Exception:
+                    pass
+        else:
+            title = f"Ошибка{': ' + context if context else ''}"
+            messagebox.showerror(title, str(exc), parent=self)
+
     def _refresh_count(self):
         def _worker():
             try:
@@ -444,7 +545,7 @@ class DatabasePage(ctk.CTkFrame):
                     self.after(0, lambda: messagebox.showerror(
                         "Pinecone", f"❌ Ошибка подключения:\n{err}"))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Ошибка", str(e)))
+                self.after(0, lambda: self._handle_api_error(e, "Pinecone переподключение"))
         threading.Thread(target=_worker, daemon=True).start()
 
     def _refresh_budget(self):
@@ -481,6 +582,8 @@ class DatabasePage(ctk.CTkFrame):
                 text = (f"SS: {ss:,}  │  OS: {os_:,}  │  SIL: {sil:,}  │  "
                         f"Всего: {tot:,}")
                 self.after(0, lambda: self._stats_lbl.configure(text=text))
+            except SessionExpiredError as e:
+                self.after(0, lambda: self._handle_api_error(e))
             except Exception as e:
                 self.after(0, lambda: self._stats_lbl.configure(text=f"Ошибка: {e}"))
         threading.Thread(target=_worker, daemon=True).start()
@@ -518,7 +621,7 @@ class DatabasePage(ctk.CTkFrame):
                     self._refresh_stats(),
                 ))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Ошибка", str(e), parent=self))
+                self.after(0, lambda: self._handle_api_error(e, "Очистка сегмента"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -596,6 +699,8 @@ class DatabasePage(ctk.CTkFrame):
         self._refresh_count()
         if self._is_admin():
             self._refresh_stats()
+        # Всегда обновляем бренды после импорта (видно всем ролям)
+        self._load_brand_stats()
 
         if errors:
             self.status_lbl.configure(
@@ -644,9 +749,155 @@ class DatabasePage(ctk.CTkFrame):
                     self._refresh_budget(),
                 ))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Ошибка векторизации", str(e)))
+                self.after(0, lambda: self._handle_api_error(e, "Векторизация"))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    # ── Brands tab logic ──────────────────────────────────────────────────────
+
+    def _load_brand_stats(self):
+        """Загружает статистику по брендам с сервера."""
+        def _worker():
+            try:
+                data = self.api.get_brand_stats()
+                self.after(0, lambda: self._populate_brand_tree(data))
+            except SessionExpiredError as e:
+                self.after(0, lambda: self._handle_api_error(e))
+            except Exception as e:
+                self.after(0, lambda: self._brand_summary_lbl.configure(
+                    text=f"Ошибка загрузки: {e}", text_color="#E74C3C"))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _populate_brand_tree(self, data: list):
+        """Обогащает данные дельтами и перерисовывает таблицу."""
+        old_prev = dict(self._prev_brand_stats)
+        has_prev = bool(old_prev)
+
+        enriched = []
+        for d in data:
+            brand = (d.get("brand") or "").strip()
+            if not brand:
+                continue
+            total = d.get("total", 0) or 0
+            prev  = old_prev.get(brand)
+
+            if prev is None:
+                if has_prev:
+                    delta_val, delta_str, tag = total, f"+{total:,}", "new_brand"
+                else:
+                    delta_val, delta_str, tag = 0, "—", ""
+            else:
+                diff = total - prev
+                if diff > 0:
+                    delta_val, delta_str, tag = diff, f"+{diff:,}", "increased"
+                elif diff < 0:
+                    delta_val, delta_str, tag = diff, f"−{abs(diff):,}", "decreased"
+                else:
+                    delta_val, delta_str, tag = 0, "—", ""
+
+            enriched.append({
+                **d,
+                "brand":       brand,
+                "_delta_val":  delta_val,
+                "_delta_str":  delta_str,
+                "_tag":        tag,
+            })
+
+        # Бренды, которые полностью исчезли
+        current = {e["brand"] for e in enriched}
+        for brand, prev_total in old_prev.items():
+            if brand not in current and prev_total > 0:
+                enriched.append({
+                    "brand": brand, "ss": 0, "os": 0, "sil": 0, "total": 0,
+                    "_delta_val": -prev_total,
+                    "_delta_str": f"−{prev_total:,}",
+                    "_tag":       "removed",
+                })
+
+        self._brand_data = enriched
+        self._apply_brand_sort()          # сортирует и вызывает _filter_brands
+
+        # Обновляем предыдущее состояние для следующего обновления
+        self._prev_brand_stats = {
+            (d.get("brand") or ""): (d.get("total") or 0) for d in data
+        }
+
+        n_brands    = len(data)
+        n_positions = sum(d.get("total", 0) or 0 for d in data)
+        n_changed   = sum(
+            1 for e in enriched
+            if e.get("_tag") in ("increased", "decreased", "new_brand", "removed")
+        )
+        suffix = f"  │  ✏ изменений: {n_changed}" if n_changed else ""
+        self._brand_summary_lbl.configure(
+            text=f"Брендов: {n_brands}  │  Позиций: {n_positions:,}{suffix}",
+            text_color=TEXT_SECONDARY,
+        )
+
+    def _filter_brands(self):
+        """Фильтрует таблицу по введённому тексту (без повторного запроса к серверу)."""
+        q = ""
+        try:
+            q = self._brand_search_var.get().strip().lower()
+        except Exception:
+            pass
+        self._brand_tree.delete(*self._brand_tree.get_children())
+        for d in self._brand_data:
+            brand = d.get("brand", "")
+            if q and q not in brand.lower():
+                continue
+            ss    = d.get("ss",    0) or 0
+            os_   = d.get("os",    0) or 0
+            sil   = d.get("sil",   0) or 0
+            total = d.get("total", 0) or 0
+            self._brand_tree.insert(
+                "", "end",
+                values=(
+                    brand,
+                    f"{ss:,}"    if ss    else "—",
+                    f"{os_:,}"   if os_   else "—",
+                    f"{sil:,}"   if sil   else "—",
+                    f"{total:,}" if total else "—",
+                    d.get("_delta_str", "—"),
+                ),
+                tags=(d.get("_tag", ""),) if d.get("_tag") else (),
+            )
+
+    def _sort_brands(self, col: str):
+        """Переключает сортировку по нажатой колонке."""
+        if self._brand_sort_col == col:
+            self._brand_sort_asc = not self._brand_sort_asc
+        else:
+            self._brand_sort_col = col
+            self._brand_sort_asc = col == "brand"  # бренды — по возрастанию по умолчанию
+        self._apply_brand_sort()
+
+    def _apply_brand_sort(self):
+        """Сортирует _brand_data и вызывает _filter_brands."""
+        col = self._brand_sort_col
+        asc = self._brand_sort_asc
+
+        _num_cols = {"ss", "os", "sil", "total", "_delta_val"}
+
+        def _key(d):
+            if col == "brand":
+                return (d.get("brand") or "").lower()
+            if col == "delta":
+                return d.get("_delta_val", 0)
+            return d.get(col, 0) or 0
+
+        self._brand_data.sort(key=_key, reverse=not asc)
+
+        # Обновляем заголовки (стрелочки)
+        arrow = " ▲" if asc else " ▼"
+        for c in ["brand", "ss", "os", "sil", "total", "delta"]:
+            hdr_base = {
+                "brand": "Бренд", "ss": "SS", "os": "OS",
+                "sil": "SIL", "total": "Всего", "delta": "Δ изменение",
+            }[c]
+            self._brand_tree.heading(c, text=hdr_base + (arrow if c == col else ""))
+
+        self._filter_brands()
 
     def _on_tab_change(self):
         """Вызывается при переключении вкладки tabview."""
@@ -654,6 +905,8 @@ class DatabasePage(ctk.CTkFrame):
             tab_name = self.tabview.get()
             if t("db_tab_logs") in tab_name and not self.log_tree.get_children():
                 self._load_logs()
+            elif "Бренды" in tab_name and not self._brand_data:
+                self._load_brand_stats()
         except Exception:
             pass
 

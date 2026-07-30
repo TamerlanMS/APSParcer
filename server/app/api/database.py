@@ -628,6 +628,40 @@ async def update_constant(
     return {"status": "updated", "brand": brand}
 
 
+# ─── Brand statistics ─────────────────────────────────────────────────────────
+
+@router.get("/brands/stats")
+async def brands_stats(
+    segment: Optional[str] = Query(default=None, description="Фильтр по сегменту: ss/os/sil"),
+    db: AsyncSession = Depends(get_db),
+    _auth: str = Depends(verify_any_auth),
+):
+    """Количество активных позиций по брендам с разбивкой по сегментам.
+    Возвращает список, отсортированный по убыванию суммарного кол-ва позиций.
+    """
+    stmt = (
+        select(Product.brand, Product.segment, func.count().label("cnt"))
+        .where(Product.is_active == True, Product.brand.isnot(None))
+        .group_by(Product.brand, Product.segment)
+        .order_by(Product.brand)
+    )
+    if segment and segment in ("ss", "os", "sil"):
+        stmt = stmt.where(Product.segment == segment)
+
+    result = await db.execute(stmt)
+    rows = result.fetchall()
+
+    brands: dict = {}
+    for brand, seg, cnt in rows:
+        if brand not in brands:
+            brands[brand] = {"brand": brand, "ss": 0, "os": 0, "sil": 0, "total": 0}
+        if seg in ("ss", "os", "sil"):
+            brands[brand][seg] = cnt
+        brands[brand]["total"] += cnt
+
+    return sorted(brands.values(), key=lambda x: x["total"], reverse=True)
+
+
 # ─── Import Logs ───────────────────────────────────────────────────────────────
 
 @router.get("/logs")

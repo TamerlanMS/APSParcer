@@ -5,9 +5,22 @@ from typing import Tuple, Callable, Optional
 from services.config import AppConfig
 
 
+class SessionExpiredError(PermissionError):
+    """Raised when the server returns 403 Forbidden on an admin endpoint.
+    Usually means the JWT token is expired or the user lost admin rights."""
+
+
 class ApiService:
     def __init__(self, config: AppConfig):
         self.config = config
+
+    def _raise_for_status(self, r) -> None:
+        """Like r.raise_for_status() but converts 403 → SessionExpiredError."""
+        if r.status_code == 403:
+            raise SessionExpiredError(
+                "Сессия истекла или недостаточно прав. Войдите в систему заново."
+            )
+        r.raise_for_status()
 
     @property
     def _h(self) -> dict:
@@ -447,7 +460,7 @@ class ApiService:
             f"{self._base}/api/v1/database/pinecone/status",
             headers=self._h, timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def pinecone_reconnect(self) -> dict:
@@ -456,7 +469,7 @@ class ApiService:
             f"{self._base}/api/v1/database/pinecone/reconnect",
             headers=self._h, timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def start_vectorization(self, segment: str = "all") -> dict:
@@ -472,7 +485,7 @@ class ApiService:
             params=params,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_embed_budget(self) -> dict:
@@ -485,6 +498,16 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
+    def get_brand_stats(self) -> list:
+        """GET /database/brands/stats — количество позиций по брендам (все сегменты)."""
+        r = requests.get(
+            f"{self._base}/api/v1/database/brands/stats",
+            headers=self._h,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def get_db_stats(self) -> dict:
         """GET /database/stats — количество товаров по сегментам."""
         r = requests.get(
@@ -492,7 +515,7 @@ class ApiService:
             headers=self._h,
             timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def clear_segment(self, segment: str, hard: bool = False) -> dict:
@@ -504,7 +527,7 @@ class ApiService:
             params={"hard": str(hard).lower()},
             timeout=30,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_logs(self, limit: int = 50) -> list:
