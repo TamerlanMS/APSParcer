@@ -235,6 +235,27 @@ class ExcelTemplate(Base):
     uploader = relationship("User", foreign_keys=[uploaded_by])
 
 
+class PriceHistory(Base):
+    """
+    История цен по артикулам.
+    При каждом импорте сохраняется снимок старых цен для артикулов,
+    у которых изменилась хотя бы одна ценовая колонка.
+    Текущие цены всегда в таблице products (is_active=True).
+    """
+    __tablename__ = "price_history"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    article     = Column(String(200), index=True, nullable=False)
+    segment     = Column(String(10), nullable=False, index=True)
+    brand       = Column(String(100), nullable=True)
+    name        = Column(Text, nullable=True)
+    kaznisa     = Column(Float, nullable=True)
+    rrts        = Column(Float, nullable=True)
+    mrc         = Column(Float, nullable=True)
+    opt         = Column(Float, nullable=True)
+    recorded_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class ManagerCorrection(Base):
     """
     История исправлений менеджеров.

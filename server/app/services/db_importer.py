@@ -1,10 +1,13 @@
 import openpyxl
 import io
+import json
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
-from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
+from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager, PriceHistory, AuditLog
 from typing import Tuple
 import logging
+
+_ANOMALY_THRESHOLD = 35.0  # % изменения цены для записи аномалии
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,21 @@ async def import_products_from_excel(
     )
     count_before = _cnt_before_q.scalar() or 0
 
+    # ── Снимок текущих цен (до деактивации) ──────────────────────────────────
+    pre_q = await db.execute(
+        select(Product.article, Product.brand, Product.name,
+               Product.kaznisa, Product.rrts, Product.mrc, Product.opt)
+        .where(Product.segment == segment, Product.is_active == True)
+    )
+    pre_prices = {
+        r.article: {
+            "brand": r.brand, "name": r.name,
+            "kaznisa": r.kaznisa, "rrts": r.rrts,
+            "mrc": r.mrc, "opt": r.opt,
+        }
+        for r in pre_q.all() if r.article
+    }
+
     # ── Полная перезапись сегмента ────────────────────────────────────────────
     # Деактивируем ВСЕ текущие позиции сегмента перед импортом.
     # После обработки файла активируются только те, что есть в новом файле.
@@ -144,6 +162,7 @@ async def import_products_from_excel(
         db.add(Product(**data))
         added += 1
 
+    _updated_new_data: dict[str, dict] = {}  # article → новые данные (для сравнения цен)
     for pid, data in rows_to_update:
         await db.execute(
             Product.__table__.update()
@@ -151,6 +170,43 @@ async def import_products_from_excel(
             .values(**data)
         )
         updated += 1
+        _updated_new_data[data["article"]] = data
+
+    # ── История цен и аномалии ────────────────────────────────────────────────
+    for article, new_data in _updated_new_data.items():
+        if article not in pre_prices:
+            continue
+        old = pre_prices[article]
+        any_changed = False
+        for field in ("kaznisa", "rrts", "mrc", "opt"):
+            old_val = float(old.get(field) or 0)
+            new_val = float(new_data.get(field) or 0)
+            if old_val <= 0 or new_val <= 0 or old_val == new_val:
+                continue
+            any_changed = True
+            pct = (new_val - old_val) / old_val * 100
+            if abs(pct) >= _ANOMALY_THRESHOLD:
+                db.add(AuditLog(
+                    action="price_anomaly",
+                    resource=f"{segment}/{article}",
+                    username="system",
+                    details=json.dumps({
+                        "brand":      new_data.get("brand") or old.get("brand", ""),
+                        "name":       new_data.get("name")  or old.get("name", ""),
+                        "field":      field,
+                        "old_price":  round(old_val, 4),
+                        "new_price":  round(new_val, 4),
+                        "pct_change": round(pct, 1),
+                    }, ensure_ascii=False),
+                    status="warning",
+                ))
+        if any_changed:
+            db.add(PriceHistory(
+                article=article, segment=segment,
+                brand=old.get("brand"), name=old.get("name"),
+                kaznisa=old.get("kaznisa"), rrts=old.get("rrts"),
+                mrc=old.get("mrc"), opt=old.get("opt"),
+            ))
 
     # ── Считаем кол-во ПОСЛЕ операции ────────────────────────────────────────
     _cnt_after_q = await db.execute(

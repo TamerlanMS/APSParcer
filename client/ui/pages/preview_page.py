@@ -65,7 +65,9 @@ RATE_FIELD = {
     8: "partner",  # Проект
 }
 # Типы расценки, требующие умножения базовой цены на коэффициент ГП
-GP_RATE_TYPES = {6, 7}
+GP_RATE_TYPES   = {6, 7}
+# Типы расценки на основе цены КазНИИСА (АГСК): уже в тенге, коэффициенты курса/НДС/логистики НЕ применяются
+AGSK_RATE_TYPES = {1, 2}
 
 # Подписи типов расценки (индекс 1 = RATE_LABELS[0])
 RATE_LABELS = [
@@ -1292,7 +1294,12 @@ class PreviewPage(ctk.CTkFrame):
         if not base:
             return 0.0, 0.0, 0.0, 0.0
 
-        price_seb = math.ceil(base * cur * nds * lo)
+        if rate_type in AGSK_RATE_TYPES:
+            # kaznisa / АГСК — цена уже в KZT из государственного прайса КазНИИСА.
+            # Курс валюты, НДС и логистика НЕ применяются (они заложены в цене).
+            price_seb = math.ceil(base)
+        else:
+            price_seb = math.ceil(base * cur * nds * lo)
         price_kp  = math.ceil(price_seb * mg)
         return price_seb, price_seb * qty, price_kp, price_kp * qty
 

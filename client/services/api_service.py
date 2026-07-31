@@ -658,6 +658,53 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
+    def get_analytics_brands(self, period: int = 30) -> dict:
+        """GET /analytics/brands?period=N — топ брендов по числу ручных исправлений."""
+        r = requests.get(
+            f"{self._base}/api/v1/analytics/brands",
+            headers=self._h,
+            params={"period": period},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_analytics_ai_efficiency(self, period: int = 30) -> dict:
+        """GET /analytics/ai-efficiency?period=N — эффективность ИИ-подбора."""
+        r = requests.get(
+            f"{self._base}/api/v1/analytics/ai-efficiency",
+            headers=self._h,
+            params={"period": period},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_price_history(self, article: str, segment: str = None) -> dict:
+        """GET /analytics/price-history?article=xxx&segment=ss — история цен."""
+        params = {"article": article}
+        if segment:
+            params["segment"] = segment
+        r = requests.get(
+            f"{self._base}/api/v1/analytics/price-history",
+            headers=self._h,
+            params=params,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_analytics_anomalies(self, period: int = 30) -> dict:
+        """GET /analytics/anomalies?period=N — аномалии цен за период."""
+        r = requests.get(
+            f"{self._base}/api/v1/analytics/anomalies",
+            headers=self._h,
+            params={"period": period},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def get_correction_stats(self) -> dict:
         """Статистика накопленных исправлений. {"total_corrections", "pinecone_indexed", "unique_products"}"""
         try:

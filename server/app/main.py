@@ -77,35 +77,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("Schema migration failed: %s", exc)
 
-    if settings.OPENAI_API_KEY and settings.PINECONE_API_KEY and settings.PINECONE_HOST:
-        async def _embed_task():
-            # Small delay so the server is fully up before heavy work starts
-            await asyncio.sleep(5)
-            try:
-                from app.services.embedder import embed_products_batch
-                from app.models.models import ALL_SEGMENTS
-                total = 0
-                for seg in ALL_SEGMENTS:
-                    res = await embed_products_batch(AsyncSessionLocal, segment=seg)
-                    n = res.get("upserted", 0) if isinstance(res, dict) else int(res or 0)
-                    if n:
-                        cost = res.get("cost_usd", 0.0) if isinstance(res, dict) else 0.0
-                        logger.info(
-                            "Startup embedding [%s]: %d upserted, cost=$%.5f",
-                            seg, n, cost,
-                        )
-                    if isinstance(res, dict) and res.get("budget_exceeded"):
-                        logger.warning("Startup embedding: daily budget exceeded — stopping")
-                        break
-                    total += n
-                if not total:
-                    logger.info("Startup embedding: guard conditions not met for any segment")
-            except Exception as exc:
-                logger.error("Startup embedding failed: %s", exc)
-
-        asyncio.create_task(_embed_task())
-    else:
-        logger.info("OPENAI_API_KEY or PINECONE_API_KEY not set — AI matching disabled")
+    # Автоматическая векторизация при старте отключена.
+    # Запускать вручную через кнопку в разделе «База данных».
+    logger.info("Auto-embedding on startup is disabled")
 
     yield   # server runs here
 
