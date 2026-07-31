@@ -8,6 +8,7 @@
 import threading
 import datetime
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from assets.theme import *
@@ -421,6 +422,7 @@ class AnalyticsPage(ctk.CTkFrame):
         )
         article_entry.grid(row=0, column=1, padx=6, pady=10)
         article_entry.bind("<Return>", lambda _: self._search_price_history())
+        self._bind_paste(article_entry)
 
         ctk.CTkLabel(search_frame, text="Сегмент:", font=FONT_SMALL,
                      text_color=TEXT_SECONDARY).grid(row=0, column=2, padx=(12, 6))
@@ -488,7 +490,7 @@ class AnalyticsPage(ctk.CTkFrame):
 
         ctk.CTkLabel(
             tab, font=FONT_SMALL, text_color=TEXT_SECONDARY,
-            text=("Изменения цен > 15% при импортах за период. "
+            text=("Изменения цен > 35% при импортах за период. "
                   "Данные появляются после первого импорта с этой версией приложения."),
         ).grid(row=0, column=0, sticky="w", padx=PAD_MD, pady=(12, 0))
 
@@ -892,6 +894,43 @@ class AnalyticsPage(ctk.CTkFrame):
             self._tree.move(k, "", idx)
             self._tree.item(k, tags=("odd" if idx % 2 else "even",))
         self._tree.heading(col, command=lambda: self._sort_tree(col, not reverse))
+
+    # ── Вспомогательное: вставка в CTkEntry ──────────────────────────────────
+
+    @staticmethod
+    def _bind_paste(entry: ctk.CTkEntry):
+        """Добавляет правую кнопку (Копировать/Вставить/Вырезать/Всё)
+        и явный Ctrl+V для CTkEntry, у которых нет системного контекстного меню."""
+        inner = getattr(entry, "_entry", entry)  # tk.Entry внутри CTkEntry
+
+        def _paste(e=None):
+            try:
+                txt = entry.clipboard_get()
+            except Exception:
+                return
+            try:
+                if inner.selection_present():
+                    inner.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+            inner.insert("insert", txt)
+
+        def _popup(e):
+            menu = tk.Menu(inner, tearoff=0)
+            menu.add_command(label="Вырезать",  command=lambda: inner.event_generate("<<Cut>>"))
+            menu.add_command(label="Копировать", command=lambda: inner.event_generate("<<Copy>>"))
+            menu.add_command(label="Вставить",  command=_paste)
+            menu.add_separator()
+            menu.add_command(label="Выделить всё",
+                             command=lambda: inner.select_range(0, "end"))
+            try:
+                menu.tk_popup(e.x_root, e.y_root)
+            finally:
+                menu.grab_release()
+
+        inner.bind("<Control-v>", _paste)
+        inner.bind("<Control-V>", _paste)
+        inner.bind("<Button-3>",  _popup)
 
     def after_login(self):
         """Вызывается из main_window после успешного логина."""
