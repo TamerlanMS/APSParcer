@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user
-from app.models.models import Product, ProductAnalog
+from app.models.models import Product, ProductAnalog, AnalogDatabase
 from app.services.analog_providers import PROVIDERS, _ekf_last_error, _ekf_jwt
 from app.core.config import settings
 
@@ -192,6 +192,160 @@ async def search_analogs(
         cached=False,
         provider_error=error,
     )
+
+
+# ─── Analog Database CRUD ─────────────────────────────────────────────────────
+
+class AnalogDBSaveRequest(BaseModel):
+    article:        str
+    analog_article: str
+    segment:        Optional[str] = None
+    analog_name:    Optional[str] = None
+    analog_brand:   Optional[str] = None
+    source:         str = "manual"
+    notes:          Optional[str] = None
+
+
+class AnalogDBLookupRequest(BaseModel):
+    articles: list[str]
+    segment:  Optional[str] = None
+
+
+@router.get("/db")
+async def get_analog_db(
+    article: str,
+    segment: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """GET /api/v1/analogs/db?article=xxx&segment=ss — запись аналога из постоянной базы."""
+    stmt = (
+        select(AnalogDatabase)
+        .where(AnalogDatabase.article == article.strip())
+        .where(AnalogDatabase.is_active == True)  # noqa: E712
+    )
+    if segment:
+        stmt = stmt.where(AnalogDatabase.segment == segment)
+    stmt = stmt.order_by(AnalogDatabase.created_at.desc()).limit(1)
+    q = await db.execute(stmt)
+    rec = q.scalars().first()
+    if not rec:
+        return {"found": False, "record": None}
+    return {
+        "found": True,
+        "record": {
+            "id":             rec.id,
+            "article":        rec.article,
+            "segment":        rec.segment,
+            "analog_article": rec.analog_article,
+            "analog_name":    rec.analog_name,
+            "analog_brand":   rec.analog_brand,
+            "source":         rec.source,
+            "notes":          rec.notes,
+            "added_by":       rec.added_by,
+            "created_at":     rec.created_at.isoformat() if rec.created_at else None,
+        },
+    }
+
+
+@router.post("/db/lookup")
+async def lookup_analogs_batch(
+    body: AnalogDBLookupRequest,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """POST /api/v1/analogs/db/lookup — пакетный поиск аналогов для списка артикулов."""
+    articles = [a.strip() for a in body.articles if a and a.strip()]
+    if not articles:
+        return {"analogs": {}}
+
+    stmt = (
+        select(AnalogDatabase)
+        .where(AnalogDatabase.article.in_(articles))
+        .where(AnalogDatabase.is_active == True)  # noqa: E712
+        .order_by(AnalogDatabase.created_at.desc())
+    )
+    if body.segment:
+        stmt = stmt.where(AnalogDatabase.segment == body.segment)
+
+    q = await db.execute(stmt)
+    rows = q.scalars().all()
+
+    # article → first (newest) record
+    result: dict[str, dict] = {}
+    for rec in rows:
+        if rec.article not in result:
+            result[rec.article] = {
+                "id":             rec.id,
+                "analog_article": rec.analog_article,
+                "analog_name":    rec.analog_name,
+                "analog_brand":   rec.analog_brand,
+                "source":         rec.source,
+                "added_by":       rec.added_by,
+            }
+    return {"analogs": result}
+
+
+@router.post("/db")
+async def save_analog_db(
+    body: AnalogDBSaveRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """POST /api/v1/analogs/db — сохранить / обновить аналог для артикула."""
+    article = body.article.strip()
+
+    # Upsert: если запись для этого артикула (+сегмента) уже есть — обновить
+    stmt = (
+        select(AnalogDatabase)
+        .where(AnalogDatabase.article == article)
+        .where(AnalogDatabase.is_active == True)  # noqa: E712
+    )
+    if body.segment:
+        stmt = stmt.where(AnalogDatabase.segment == body.segment)
+    stmt = stmt.order_by(AnalogDatabase.created_at.desc()).limit(1)
+    q = await db.execute(stmt)
+    rec = q.scalars().first()
+
+    if rec:
+        rec.analog_article = body.analog_article.strip()
+        rec.analog_name    = body.analog_name
+        rec.analog_brand   = body.analog_brand
+        rec.source         = body.source
+        rec.notes          = body.notes
+        rec.added_by       = getattr(user, "username", None)
+    else:
+        rec = AnalogDatabase(
+            article        = article,
+            segment        = body.segment,
+            analog_article = body.analog_article.strip(),
+            analog_name    = body.analog_name,
+            analog_brand   = body.analog_brand,
+            source         = body.source,
+            notes          = body.notes,
+            added_by       = getattr(user, "username", None),
+        )
+        db.add(rec)
+
+    await db.commit()
+    await db.refresh(rec)
+    return {"ok": True, "id": rec.id, "analog_article": rec.analog_article}
+
+
+@router.delete("/db/{record_id}")
+async def delete_analog_db(
+    record_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """DELETE /api/v1/analogs/db/{id} — деактивировать запись аналога."""
+    q = await db.execute(select(AnalogDatabase).where(AnalogDatabase.id == record_id))
+    rec = q.scalars().first()
+    if not rec:
+        return {"ok": False, "detail": "not found"}
+    rec.is_active = False
+    await db.commit()
+    return {"ok": True}
 
 
 # ─── Diagnostic endpoint ──────────────────────────────────────────────────────

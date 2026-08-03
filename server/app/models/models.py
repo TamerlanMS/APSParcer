@@ -304,3 +304,25 @@ class ProductAnalog(Base):
     analog_name     = Column(Text,        nullable=True)                # название аналога (если есть)
     fetched_at      = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     expires_at      = Column(DateTime(timezone=True), nullable=True)    # NULL = бессрочно
+
+
+class AnalogDatabase(Base):
+    """
+    Постоянная база аналогов артикулов.
+    В отличие от product_analogs — не кэш, данные хранятся бессрочно.
+    Создаётся вручную или переносится из результатов поиска по провайдерам.
+    """
+    __tablename__ = "analog_database"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    article        = Column(String(200), nullable=False, index=True)   # оригинальный артикул
+    segment        = Column(String(10),  nullable=True,  index=True)   # ss / os / sil (опционально)
+    analog_article = Column(String(200), nullable=False)               # артикул аналога
+    analog_name    = Column(Text,        nullable=True)                # наименование аналога
+    analog_brand   = Column(String(100), nullable=True)                # бренд аналога
+    source         = Column(String(50),  nullable=True)                # manual / provider / correction
+    notes          = Column(Text,        nullable=True)                # заметки
+    added_by       = Column(String(100), nullable=True)                # username добавившего
+    created_at     = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at     = Column(DateTime(timezone=True), onupdate=func.now())
+    is_active      = Column(Boolean, default=True, nullable=False)

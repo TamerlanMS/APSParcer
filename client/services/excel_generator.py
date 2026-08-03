@@ -958,15 +958,27 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
                         item.filename.startswith("xl/tables/")
                     )
                     if _FORCE_FROM_TPL and item.filename in tpl_extras:
-                        data = tpl_extras[item.filename]
                         # Strip calculatedColumnFormula from table files
                         if item.filename.startswith("xl/tables/"):
-                            tbl_xml = data.decode("utf-8", errors="replace")
+                            # Сохраняем ref из openpyxl-версии (уже расширен _extend_kp_styles)
+                            _out_ref_m = _re.search(
+                                r'\bref="([^"]+)"', data.decode("utf-8", errors="replace")
+                            )
+                            tbl_xml = tpl_extras[item.filename].decode("utf-8", errors="replace")
                             tbl_xml = _re.sub(
                                 r'<calculatedColumnFormula[^<]*</calculatedColumnFormula>',
                                 "", tbl_xml,
                             )
+                            # Восстанавливаем расширенный ref чтобы таблица покрывала все данные
+                            if _out_ref_m:
+                                tbl_xml = _re.sub(
+                                    r'\bref="[^"]+"',
+                                    f'ref="{_out_ref_m.group(1)}"',
+                                    tbl_xml, count=1,
+                                )
                             data = tbl_xml.encode("utf-8")
+                        else:
+                            data = tpl_extras[item.filename]
 
 
                     if item.filename in out_rels_merge_map:

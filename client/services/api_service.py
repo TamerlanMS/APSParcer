@@ -754,6 +754,54 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
+    def lookup_analogs_batch(self, articles: list, segment: str = None) -> dict:
+        """POST /api/v1/analogs/db/lookup — пакетный поиск аналогов по артикулам.
+        Возвращает dict: article -> {analog_article, analog_name, analog_brand, ...}"""
+        payload = {"articles": articles}
+        if segment:
+            payload["segment"] = segment
+        r = requests.post(
+            f"{self._base}/api/v1/analogs/db/lookup",
+            headers=self._h,
+            json=payload,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json().get("analogs", {})
+
+    def save_analog_db(self, article: str, analog_article: str,
+                       segment: str = None, analog_name: str = None,
+                       analog_brand: str = None, source: str = "manual",
+                       notes: str = None) -> dict:
+        """POST /api/v1/analogs/db — сохранить/обновить аналог для артикула."""
+        payload = {
+            "article":        article,
+            "analog_article": analog_article,
+            "source":         source,
+        }
+        if segment:      payload["segment"]      = segment
+        if analog_name:  payload["analog_name"]  = analog_name
+        if analog_brand: payload["analog_brand"] = analog_brand
+        if notes:        payload["notes"]        = notes
+        r = requests.post(
+            f"{self._base}/api/v1/analogs/db",
+            headers=self._h,
+            json=payload,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def delete_analog_db(self, record_id: int) -> bool:
+        """DELETE /api/v1/analogs/db/{id} — деактивировать запись аналога."""
+        r = requests.delete(
+            f"{self._base}/api/v1/analogs/db/{record_id}",
+            headers=self._h,
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
     def get_analog_diagnostics(self) -> dict:
         """GET /api/v1/analogs/diagnostics — проверяет настройки и связь с провайдерами."""
         r = requests.get(

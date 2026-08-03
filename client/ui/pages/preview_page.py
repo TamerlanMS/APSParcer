@@ -48,8 +48,9 @@ COLS = [
     ("delivery",   "col_delivery"),     # 14 — Срок поставки (редактируется)
     ("status",     "col_status"),       # 15 — Статус
     ("method",     "col_method"),       # 16 — Метод подбора
+    ("analog_art", "col_analog"),        # 17 — Аналог из базы аналогов
 ]
-COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100, 130]
+COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100, 130, 120]
 EDITABLE_COLS = {5, 6, 7, 8, 9, 10, 11, 13, 14}  # Кол-во, Кратн., Конст.цена, Себес, ΣСеб, КП, ΣКП, Коммент., Срок
 
 
@@ -1027,6 +1028,7 @@ class PreviewPage(ctk.CTkFrame):
         self._update_stats()
         self.save_btn.configure(state="normal")
         self._no_data_lbl.lower()
+        self.after(200, self._refresh_analog_col)
 
         # Sync active tab style in nav
         if hasattr(self.app, "_switch_project_tab_style"):
@@ -1147,6 +1149,7 @@ class PreviewPage(ctk.CTkFrame):
         self._update_stats()
         self.save_btn.configure(state="normal")
         self._no_data_lbl.lower()
+        self.after(200, self._refresh_analog_col)
 
         # Diagnostic: check if matched products have price data in DB
         self._check_prices_in_db()
@@ -1388,6 +1391,7 @@ class PreviewPage(ctk.CTkFrame):
                 item.get("delivery", "") or "",
                 "↳ Аналог",
                 "analog",
+                "",
             )
             iid = self.tree.insert("", position, values=vals, tags=("analog",))
             item["_iid"] = iid
@@ -1401,7 +1405,7 @@ class PreviewPage(ctk.CTkFrame):
             # Section-header row — render as a bold blue separator spanning the name column
             heading_name = item.get("name_raw", "").replace("\n", " ").strip()
             _h_cb = ("☑" if id(item) in self._checked_items else "☐") if self._select_mode else ""
-            vals = (_h_cb, "", "", heading_name, "", "", "", "", "", "", "", "", "", "", "", "", "")
+            vals = (_h_cb, "", "", heading_name, "", "", "", "", "", "", "", "", "", "", "", "", "", "")
             iid = self.tree.insert("", position, values=vals, tags=("heading",))
             item["_iid"] = iid
             return iid
@@ -1497,10 +1501,63 @@ class PreviewPage(ctk.CTkFrame):
             item.get("delivery", "") or "",
             stxt,
             method_lbl,
+            item.get("_analog_art", ""),
         )
         iid = self.tree.insert("", position, values=vals, tags=(tag,))
         item["_iid"] = iid
         return iid
+
+    def _refresh_analog_col(self):
+        """После populate — асинхронно загружает аналоги из БД и вставляет в колонку c17."""
+        # Собираем уникальные артикулы из items (только не-heading, не-analog строки)
+        art_to_iids: dict[str, list] = {}
+        for it in self.items:
+            if it.get("is_analog_row") or it.get("status") == "heading":
+                continue
+            bm  = it.get("best_match") or {}
+            art = (bm.get("article") or it.get("article_raw", "")).replace("\n", " ").strip()
+            if not art:
+                continue
+            iid = it.get("_iid")
+            if not iid:
+                continue
+            art_to_iids.setdefault(art, []).append((iid, it))
+
+        if not art_to_iids:
+            return
+
+        articles = list(art_to_iids.keys())
+        segment  = getattr(getattr(self, "app", None), "config", None)
+        segment  = getattr(segment, "user_segment", "ss") or "ss"
+
+        def _worker():
+            try:
+                analogs = self.api.lookup_analogs_batch(articles, segment=segment)
+            except Exception:
+                try:
+                    analogs = self.api.lookup_analogs_batch(articles)
+                except Exception:
+                    return
+            self.after(0, lambda a=analogs: self._apply_analog_col(a, art_to_iids))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_analog_col(self, analogs: dict, art_to_iids: dict):
+        """Применяет результат lookup к колонке c17 в дереве."""
+        for art, entries in art_to_iids.items():
+            info = analogs.get(art)
+            analog_art = info["analog_article"] if info else ""
+            for iid, item in entries:
+                item["_analog_art"] = analog_art
+                try:
+                    vals = list(self.tree.item(iid, "values"))
+                    while len(vals) < 18:
+                        vals.append("")
+                    vals[17] = analog_art
+                    self.tree.item(iid, values=vals)
+                except Exception:
+                    pass
 
     def _update_stats(self):
         # Exclude section-header rows and analog sub-rows from all counters
@@ -2081,16 +2138,38 @@ class PreviewPage(ctk.CTkFrame):
             article=article,
             segment=segment,
             api_service=self.api,
-            on_apply=lambda match, _item=item: self._apply_analog_match(_item, match),
+            on_apply=lambda match, _item=item, _art=article, _seg=segment: self._apply_analog_match(_item, match, _art, _seg),
         )
 
-    def _apply_analog_match(self, item: dict, db_match: dict):
+    def _apply_analog_match(self, item: dict, db_match: dict,
+                            orig_article: str = "", segment: str = "ss"):
         """Вставляет аналог-строку под оригинальной позицией.
 
         Оригинал остаётся видимым (для понимания менеджерами), получает тег
         has_analog_row=True и теряет цены. Новая аналог-строка (is_analog_row=True)
         вставляется сразу после оригинала в self.items — она несёт цены и попадает в КП.
+
+        Дополнительно: сохраняет выбор в analog_database (постоянная БД аналогов),
+        чтобы колонка «Аналог» заполнялась автоматически при следующих загрузках.
         """
+        # Сохраняем аналог в постоянную БД (фон, не блокируем UI)
+        analog_article_for_db = db_match.get("article", "").strip()
+        if orig_article and analog_article_for_db:
+            def _save_analog_db():
+                try:
+                    self.api.save_analog_db(
+                        article=orig_article,
+                        analog_article=analog_article_for_db,
+                        segment=segment or "ss",
+                        analog_name=db_match.get("name"),
+                        analog_brand=db_match.get("brand"),
+                        source="manual",
+                    )
+                except Exception:
+                    pass  # не блокируем UI при сетевой ошибке
+            import threading
+            threading.Thread(target=_save_analog_db, daemon=True).start()
+
         # Убираем существующую аналог-строку если была (повторный вызов)
         old_analog = next(
             (i for i in self.items if i.get("is_analog_row") and i.get("_analog_parent_id") == id(item)),
@@ -2128,8 +2207,14 @@ class PreviewPage(ctk.CTkFrame):
         except ValueError:
             self.items.append(analog_item)
 
+        # Сразу выставляем артикул аналога в item, чтобы _populate() показал его в c17
+        if orig_article and analog_article_for_db:
+            item["_analog_art"] = analog_article_for_db
+
         self._populate()
         self._update_stats()
+        # Обновляем всю колонку аналогов (на случай других строк с тем же артикулом)
+        self.after(300, self._refresh_analog_col)
 
     def _remove_analog_row(self, parent_item: dict):
         """Убирает аналог-строку у позиции (сброс аналога)."""
