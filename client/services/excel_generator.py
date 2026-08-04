@@ -65,7 +65,7 @@ BD_OPT        = 8   # H — Опт
 BD_PARTNER    = 9   # I — Партнёр
 BD_BRAND      = 10  # J — Бренд
 BD_MULT       = 11  # K — Кратность
-BD_KAZ_CODE   = 12  # L — Код КазНИИСА
+BD_KAZ_CODE   = 12  # L — Код АГСК
 
 # ── Колонки Const (1-based) ──────────────────────────────────────────────────
 CONST_MANAGER  = 2   # B — Менеджер
@@ -489,7 +489,21 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
             kp.cell(row=row, column=KP_PRICE_KP, value=a_price or None)
             kp.cell(row=row, column=KP_SUM_KP,   value=a_sum   or None)
             kp.cell(row=row, column=KP_COMMENT,  value="↳ аналог")
-            for col in range(1, 10):
+            # J–N для аналога
+            try:
+                _a_kaz_p = float(bm_a.get("kaznisa") or 0) or None
+                _a_kaz_s = (_a_kaz_p * a_qty) if _a_kaz_p else None
+                _a_rrc_p = float(bm_a.get("rrts") or 0) or None
+                _a_rrc_s = (_a_rrc_p * a_qty) if _a_rrc_p else None
+                _a_kaz_c = bm_a.get("kaznisa_code") or None
+                kp.cell(row=row, column=KP_PRICE_KAZ, value=_a_kaz_p)
+                kp.cell(row=row, column=KP_SUM_KAZ,   value=_a_kaz_s)
+                kp.cell(row=row, column=KP_KAZ_CODE,  value=_a_kaz_c)
+                kp.cell(row=row, column=KP_PRICE_RRC, value=_a_rrc_p)
+                kp.cell(row=row, column=KP_SUM_RRC,   value=_a_rrc_s)
+            except (TypeError, ValueError, AttributeError):
+                pass
+            for col in range(1, 15):
                 kp.cell(row=row, column=col).fill = _ANALOG_FILL
                 kp.cell(row=row, column=col).font = _ANALOG_FONT
             last_data_row = row
@@ -517,6 +531,20 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
         kp.cell(row=row, column=KP_SUM_KP,   value=sum_kp   or None)
         kp.cell(row=row, column=KP_COMMENT,  value=comment  or None)
         kp.cell(row=row, column=KP_DELIVERY, value=delivery or None)
+        # J–N: КазНИИСА и РРЦ (были пустыми — заполняем из best_match)
+        try:
+            _kaz_p = float(bm.get("kaznisa") or 0) or None
+            _kaz_s = (_kaz_p * qty) if _kaz_p else None
+            _rrc_p = float(bm.get("rrts")    or 0) or None
+            _rrc_s = (_rrc_p * qty) if _rrc_p else None
+            _kaz_c = bm.get("kaznisa_code") or item.get("kaznisa_code_raw") or None
+            kp.cell(row=row, column=KP_PRICE_KAZ, value=_kaz_p)
+            kp.cell(row=row, column=KP_SUM_KAZ,   value=_kaz_s)
+            kp.cell(row=row, column=KP_KAZ_CODE,  value=_kaz_c)
+            kp.cell(row=row, column=KP_PRICE_RRC, value=_rrc_p)
+            kp.cell(row=row, column=KP_SUM_RRC,   value=_rrc_s)
+        except (TypeError, ValueError, AttributeError):
+            pass
         last_data_row = row
 
     # ── 6. Перенести подвал на новую позицию ────────────────────────────────
@@ -971,11 +999,23 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
                             )
                             # Восстанавливаем расширенный ref чтобы таблица покрывала все данные
                             if _out_ref_m:
+                                _new_ref = _out_ref_m.group(1)
+                                # Обновляем ref у элемента <table ...>
                                 tbl_xml = _re.sub(
-                                    r'\bref="[^"]+"',
-                                    f'ref="{_out_ref_m.group(1)}"',
+                                    r'(<table\b[^>]+)\bref="[^"]+"',
+                                    lambda m: m.group(1) + f'ref="{_new_ref}"',
                                     tbl_xml, count=1,
                                 )
+                                # Обновляем ref у <autoFilter ...> чтобы совпадал с table ref
+                                tbl_xml = _re.sub(
+                                    r'(<autoFilter\b[^>]+)\bref="[^"]+"',
+                                    lambda m: m.group(1) + f'ref="{_new_ref}"',
+                                    tbl_xml, count=1,
+                                )
+                            # Переименовываем колонку для единообразия UI
+                            tbl_xml = tbl_xml.replace(
+                                'name="Код КазНИИСА"', 'name="Код АГСК"'
+                            )
                             data = tbl_xml.encode("utf-8")
                         else:
                             data = tpl_extras[item.filename]
@@ -1032,6 +1072,18 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
                         ct_xml_orig = data.decode("utf-8", errors="replace")
                         continue  # re-written at end
 
+                    # Очищаем conditionalFormatting с #REF! в формулах
+                    # (наследуются из шаблона, вызывают "Ошибка содержимого")
+                    if item.filename.startswith("xl/worksheets/") and item.filename.endswith(".xml"):
+                        _ws_xml = data.decode("utf-8", errors="replace")
+                        if "#REF!" in _ws_xml:
+                            _ws_xml = _re.sub(
+                                r'<conditionalFormatting\b[^>]*>.*?</conditionalFormatting>',
+                                lambda _m: "" if "#REF!" in _m.group() else _m.group(),
+                                _ws_xml,
+                                flags=_re.DOTALL,
+                            )
+                            data = _ws_xml.encode("utf-8")
                     zout.writestr(item, data)
 
                 # Write template extra files that are missing from output
@@ -1116,6 +1168,196 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
         print(f"[ws_rels] failed: {exc}")
         traceback.print_exc()
 
+
+def _clean_xlsx_output(path: str) -> None:
+    """Полная ZIP-очистка после openpyxl.save().
+
+    Убирает ВСЁ что связано с макросами и ВСЁ что вызывает
+    "Ошибка в части содержимого":
+      - vbaProject.bin, ctrlProps, activeX, oleObjects, vmlDrawing
+      - слайсеры (slicers/slicerCaches), externalLinks
+      - codeName, macro=, legacyDrawing, <controls>
+      - conditionalFormatting и definedNames с #REF!/#N/A/#NAME?
+      - calculatedColumnFormula, рассинхрон autoFilter/table ref
+    """
+    import zipfile, io as _io, re as _re2
+
+    # Части, удаляемые целиком
+    _DROP_PREFIX = (
+        "xl/slicers/", "xl/slicerCaches/", "xl/externalLinks/",
+        "xl/ctrlProps/", "xl/activeX/", "xl/vba",
+    )
+
+    def _is_dropped(fn: str) -> bool:
+        low = fn.lower()
+        if any(fn.startswith(p) for p in _DROP_PREFIX):
+            return True
+        if fn == "xl/vbaProject.bin":
+            return True
+        if low.endswith(".vml") or "vmldrawing" in low:
+            return True
+        if "/ctrlprops/" in low or "/activex/" in low:
+            return True
+        return False
+
+    def _strip_macro_bits(xml: str) -> str:
+        """Общая для всех XML-частей чистка макро-атрибутов/элементов."""
+        # codeName — привязка листа/книги к VBA-модулю
+        xml = _re2.sub(r'\s+codeName="[^"]*"', "", xml)
+        # macro= на фигурах и контролах (даже пустой вызывает предупреждение)
+        xml = _re2.sub(r'\s+(?:r:)?macro="[^"]*"', "", xml)
+        # fmlaMacro / ActiveX-атрибуты
+        xml = _re2.sub(r'\s+fmla(?:Macro|Link|Range|Group|TxbxData)="[^"]*"', "", xml)
+        return xml
+
+    def _clean_defined_names(xml: str) -> str:
+        """Удаляет битые именованные диапазоны (#REF!, #N/A, #NAME?, внешние [n])."""
+        def _fix(block: str) -> str:
+            def _drop(m):
+                tag = m.group()
+                name_m = _re2.search(r'name="([^"]*)"', tag)
+                name = name_m.group(1) if name_m else ""
+                body = _re2.sub(r"<[^>]+>", "", tag)
+                # Оставляем встроенные имена Excel (Print_Area, _FilterDatabase)
+                if name.startswith("_xlnm."):
+                    return tag
+                # Выкидываем битые и служебные (слайсеры/LAMBDA)
+                if any(bad in body for bad in ("#REF!", "#N/A", "#NAME?")):
+                    return ""
+                if _re2.search(r"\[\d+\]", body):      # ссылка на внешнюю книгу
+                    return ""
+                if name.startswith("_xlpm.") or name.startswith("Срез_"):
+                    return ""
+                return tag
+            inner = _re2.sub(
+                r"<definedName\b[^>]*>.*?</definedName>|<definedName\b[^>]*/>",
+                _drop, block, flags=_re2.DOTALL,
+            )
+            # Если внутри ничего не осталось — убираем контейнер целиком
+            if _re2.sub(r"</?definedNames[^>]*>", "", inner).strip() == "":
+                return ""
+            return inner
+
+        return _re2.sub(
+            r"<definedNames>.*?</definedNames>", lambda m: _fix(m.group()),
+            xml, flags=_re2.DOTALL,
+        )
+
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        in_buf, out_buf = _io.BytesIO(raw), _io.BytesIO()
+        with zipfile.ZipFile(in_buf, "r") as zin:
+            ct_xml = ""
+            with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    fn = item.filename
+                    if _is_dropped(fn):
+                        continue
+                    data = zin.read(fn)
+
+                    if fn == "[Content_Types].xml":
+                        ct_xml = data.decode("utf-8", errors="replace")
+                        continue  # перезаписываем в конце
+
+                    elif fn.startswith("xl/worksheets/") and fn.endswith(".xml"):
+                        xml = data.decode("utf-8", errors="replace")
+                        if "#REF!" in xml:
+                            xml = _re2.sub(
+                                r"<conditionalFormatting\b[^>]*>.*?</conditionalFormatting>",
+                                lambda m: "" if "#REF!" in m.group() else m.group(),
+                                xml, flags=_re2.DOTALL,
+                            )
+                        # Формы/ActiveX/легаси-рисунки (кнопки с макросами)
+                        xml = _re2.sub(
+                            r"<mc:AlternateContent\b.*?</mc:AlternateContent>",
+                            lambda m: "" if ("control" in m.group().lower()
+                                             or "oleObject" in m.group()) else m.group(),
+                            xml, flags=_re2.DOTALL,
+                        )
+                        xml = _re2.sub(r"<controls\b.*?</controls>", "", xml, flags=_re2.DOTALL)
+                        xml = _re2.sub(r"<controls\b[^>]*/>", "", xml)
+                        xml = _re2.sub(r"<oleObjects\b.*?</oleObjects>", "", xml, flags=_re2.DOTALL)
+                        xml = _re2.sub(r"<legacyDrawing\b[^>]*/>", "", xml)
+                        xml = _re2.sub(r"<legacyDrawingHF\b[^>]*/>", "", xml)
+                        xml = _strip_macro_bits(xml)
+                        data = xml.encode("utf-8")
+
+                    elif fn.startswith("xl/tables/") and fn.endswith(".xml"):
+                        xml = data.decode("utf-8", errors="replace")
+                        xml = _re2.sub(
+                            r"<calculatedColumnFormula[^<]*</calculatedColumnFormula>",
+                            "", xml,
+                        )
+                        _tref_m = _re2.search(r'<table\b[^>]+\bref="([^"]+)"', xml)
+                        if _tref_m:
+                            _tref = _tref_m.group(1)
+                            xml = _re2.sub(
+                                r'(<autoFilter\b[^>]+)\bref="[^"]+"',
+                                lambda m: m.group(1) + f'ref="{_tref}"',
+                                xml, count=1,
+                            )
+                        data = xml.encode("utf-8")
+
+                    elif fn == "xl/_rels/workbook.xml.rels":
+                        xml = data.decode("utf-8", errors="replace")
+                        xml = _re2.sub(
+                            r"<Relationship\b[^>]*(?:slicer|slicerCache|vbaProject|"
+                            r"externalLink|ctrlProp|activeX|vmlDrawing)[^>]*/>[\s]*",
+                            "", xml, flags=_re2.IGNORECASE,
+                        )
+                        data = xml.encode("utf-8")
+
+                    elif fn.endswith(".rels"):
+                        xml = data.decode("utf-8", errors="replace")
+                        xml = _re2.sub(
+                            r"<Relationship\b[^>]*(?:slicer|ctrlProp|activeX|"
+                            r"vmlDrawing|oleObject|vbaProject)[^>]*/>[\s]*",
+                            "", xml, flags=_re2.IGNORECASE,
+                        )
+                        data = xml.encode("utf-8")
+
+                    elif fn.startswith("xl/drawings/") and fn.endswith(".xml"):
+                        xml = data.decode("utf-8", errors="replace")
+                        xml = _strip_macro_bits(xml)
+                        data = xml.encode("utf-8")
+
+                    elif fn == "xl/workbook.xml":
+                        xml = data.decode("utf-8", errors="replace")
+                        xml = _re2.sub(
+                            r"<externalReferences\b[^>]*>.*?</externalReferences>",
+                            "", xml, flags=_re2.DOTALL,
+                        )
+                        xml = _clean_defined_names(xml)
+                        xml = _strip_macro_bits(xml)
+                        data = xml.encode("utf-8")
+
+                    zout.writestr(item, data)
+
+                if ct_xml:
+                    # Убираем Override для удалённых частей
+                    ct_xml = _re2.sub(
+                        r"<Override[^>]*(?:slicer|slicerCache|externalLink|"
+                        r"ctrlProp|activeX|vmlDrawing|vbaProject|macroEnabled)[^>]*/>[\s]*",
+                        "", ct_xml, flags=_re2.IGNORECASE,
+                    )
+                    # Убираем Default для vml и bin-VBA
+                    ct_xml = _re2.sub(
+                        r'<Default[^>]*Extension="vml"[^>]*/>[\s]*', "", ct_xml,
+                    )
+                    # Книга должна быть обычной (не macroEnabled)
+                    ct_xml = ct_xml.replace(
+                        "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet.main+xml",
+                    )
+                    zout.writestr("[Content_Types].xml", ct_xml.encode("utf-8"))
+        with open(path, "wb") as fh:
+            fh.write(out_buf.getvalue())
+        print(f"[clean] done: {path}")
+    except Exception as exc:
+        print(f"[clean] failed: {exc}")
+
 def generate_excel(
     items: List[Dict],
     output_path: str,
@@ -1138,8 +1380,11 @@ def generate_excel(
                          если передан — пропускаем _fill_bd_sheet и _fill_const_sheet.
     """
     out_path = output_path
-    if not out_path.lower().endswith(".xlsm"):
-        out_path = os.path.splitext(out_path)[0] + ".xlsm"
+    # Выходной формат — чистый xlsx без макросов
+    _base, _ext = os.path.splitext(out_path)
+    if _ext.lower() not in (".xlsx", ".xlsm"):
+        _base = out_path
+    out_path = _base + ".xlsx"
 
     # Определяем источник шаблона: серверный кэш или локальный файл
     if base_template_path and os.path.isfile(base_template_path):
@@ -1156,7 +1401,12 @@ def generate_excel(
         )
 
     shutil.copyfile(tpl, out_path)
-    wb = openpyxl.load_workbook(out_path, keep_vba=True, data_only=False)
+    wb = openpyxl.load_workbook(out_path, keep_vba=False, data_only=False)
+
+    # Удаляем все листы кроме WV 4.0 и КП (убираем БД/Const/лишние)
+    for _sn in list(wb.sheetnames):
+        if _sn not in ("WV 4.0", "КП"):
+            del wb[_sn]
 
     if "WV 4.0" not in wb.sheetnames:
         raise ValueError("В шаблоне отсутствует лист 'WV 4.0'")
@@ -1167,22 +1417,7 @@ def generate_excel(
     _extend_sheet_styles(ws, len(items), data_start=2)
     _extend_kp_styles(wb, len(items))
 
-    if not _skip_db_const:
-        # 1. Обновляем лист БД актуальными данными с сервера
-        if products:
-            try:
-                _fill_bd_sheet(wb, products)
-            except Exception as e:
-                print(f"[Excel/БД] {e}")
-
-        # 2. Обновляем лист Const
-        if constants:
-            try:
-                _fill_const_sheet(wb, constants)
-            except Exception as e:
-                print(f"[Excel/Const] {e}")
-    else:
-        print("[Excel] Using server-side base template — skipping БД/Const fill")
+    # БД и Const листы удалены — данные берутся из WV 4.0 и КП (заполнены явными значениями)
 
     # 3. Заполняем лист WV 4.0 (только вводные колонки)
     # Filter out section-header rows before writing to Excel — they have no
@@ -1190,6 +1425,11 @@ def generate_excel(
     excel_items = items  # headings included — written as section dividers
 
     _clear_input_rows(ws, start_row=2, end_row=max(465, 2 + len(excel_items)))
+    # Очищаем формульные и именные колонки WV 4.0 чтобы не было #REF! без листа БД
+    _wv_clear_end = max(466, 2 + len(excel_items))
+    for _r in range(2, _wv_clear_end + 1):
+        for _c in (3, 4, 6, 8, 9, 10, 11):   # C,D,F,H,I,J,K
+            ws.cell(row=_r, column=_c).value = None
 
     for i, item in enumerate(excel_items):
         row = 2 + i
@@ -1226,12 +1466,53 @@ def generate_excel(
             _a_cur  = float(_a_bc.get("currency_rate", 1.0) or 1.0)
             _a_mg   = float(_a_bc.get("margin",        1.0) or 1.0)
             _a_denom_k = _a_nds * _a_lo * _a_cur * _a_mg
-            _a_price = float(bm_a.get("kaznisa") or bm_a.get("rrts") or 0)
-            if _a_price and _a_denom_k:
+            # G выводим из вычисленной Цены КП — она уже учитывает выбранный
+            # тип расценки. kaznisa/rrts — только фолбэк.
+            _a_kp_pre = float(item.get("_computed_kp_price") or 0)
+            if _a_kp_pre and _a_denom_k:
+                _a_price = _a_kp_pre / _a_denom_k * _a_denom_k  # = _a_kp_pre
                 try:
-                    ws.cell(row=row, column=WV_CONST_PRC, value=_a_price / _a_denom_k)
+                    ws.cell(row=row, column=WV_CONST_PRC,
+                            value=_a_kp_pre / _a_denom_k)
                 except (TypeError, ValueError):
                     pass
+                _a_price = _a_kp_pre
+            else:
+                _a_price = float(bm_a.get("kaznisa") or bm_a.get("rrts") or 0)
+                if _a_price and _a_denom_k:
+                    try:
+                        ws.cell(row=row, column=WV_CONST_PRC,
+                                value=_a_price / _a_denom_k)
+                    except (TypeError, ValueError):
+                        pass
+            # Статические цены аналога
+            try:
+                _qa = float(qty_a or 1)
+            except (TypeError, ValueError):
+                _qa = 1.0
+            _a_denom_s = _a_nds * _a_lo * _a_cur
+            _a_g   = (_a_price / _a_denom_k) if (_a_price and _a_denom_k) else 0.0
+            _a_seb = (float(item.get("_computed_seb_price") or 0)
+                      or (_a_g * _a_denom_s if _a_g else 0.0))
+            _a_kp  = (float(item.get("_computed_kp_price") or 0)
+                      or (_a_g * _a_denom_k if _a_g else 0.0))
+            _a_seb_s = (float(item.get("_computed_seb_sum") or 0)
+                        or (_a_seb * _qa if _a_seb else 0.0))
+            _a_kp_s  = (float(item.get("_computed_kp_sum") or 0)
+                        or (_a_kp * _qa if _a_kp else 0.0))
+            _a_mult = bm_a.get("multiplicity") or None
+            if _a_mult:
+                ws.cell(row=row, column=WV_MULT, value=_a_mult)
+            for _col, _val in (
+                (WV_PRICE_SEB, _a_seb), (WV_SUM_SEB, _a_seb_s),
+                (WV_PRICE_KP,  _a_kp),  (WV_SUM_KP,  _a_kp_s),
+            ):
+                if _val:
+                    _c = ws.cell(row=row, column=_col, value=round(_val, 2))
+                    _c.number_format = "#,##0.00"
+            _a_kaz = bm_a.get("kaznisa_code") or item.get("kaznisa_code_raw") or ""
+            if _a_kaz:
+                ws.cell(row=row, column=WV_KAZNIISA, value=_a_kaz)
             for col in range(1, 15):
                 ws.cell(row=row, column=col).fill = _ANALOG_FILL
                 ws.cell(row=row, column=col).font = _ANALOG_FONT
@@ -1321,6 +1602,49 @@ def generate_excel(
         except (TypeError, ValueError):
             pass
 
+        # ── Статические цены F/H/I/J/K/L ────────────────────────────────────
+        # Лист БД удалён, формулы очищены — пишем вычисленные значения явно.
+        try:
+            _q = float(qty or 1)
+        except (TypeError, ValueError):
+            _q = 1.0
+        _g_cell = ws.cell(row=row, column=WV_CONST_PRC).value
+        try:
+            _g = float(_g_cell or 0)
+        except (TypeError, ValueError):
+            _g = 0.0
+
+        _seb_p = (float(item.get("_user_seb_price") or 0)
+                  or float(item.get("_computed_seb_price") or 0)
+                  or (_g * _wv_denom_s if _g else 0.0))
+        _seb_s = (float(item.get("_computed_seb_sum") or 0)
+                  or (_seb_p * _q if _seb_p else 0.0))
+        _kp_p  = (float(item.get("_computed_kp_price") or 0)
+                  or (_g * _wv_denom_k if _g else 0.0))
+        if item.get("_user_edited") and item.get("_user_price") is not None:
+            try:
+                _kp_p = float(item["_user_price"])
+            except (TypeError, ValueError):
+                pass
+        _kp_s  = (float(item.get("_computed_kp_sum") or 0)
+                  or (_kp_p * _q if _kp_p else 0.0))
+
+        _mult = bm.get("multiplicity") or None
+        if _mult:
+            ws.cell(row=row, column=WV_MULT, value=_mult)
+
+        for _col, _val in (
+            (WV_PRICE_SEB, _seb_p), (WV_SUM_SEB, _seb_s),
+            (WV_PRICE_KP,  _kp_p),  (WV_SUM_KP,  _kp_s),
+        ):
+            if _val:
+                _c = ws.cell(row=row, column=_col, value=round(_val, 2))
+                _c.number_format = "#,##0.00"
+
+        _kaz = bm.get("kaznisa_code") or item.get("kaznisa_code_raw") or ""
+        if _kaz:
+            ws.cell(row=row, column=WV_KAZNIISA, value=_kaz)
+
         comment  = item.get("comment")  or ""
         delivery = item.get("delivery") or ""
         if comment:
@@ -1328,9 +1652,7 @@ def generate_excel(
         if delivery:
             ws.cell(row=row, column=WV_DELIVERY, value=delivery)
 
-    # Расширяем формулы WV для строк за пределами шаблона (цены, кратность)
-    if len(excel_items) > 0:
-        _extend_wv_formulas(ws, 2 + len(excel_items) - 1)
+    # _extend_wv_formulas пропущен — лист БД отсутствует, данные статичные
 
     # 4. Заполняем шапку и данные листа КП
     try:
@@ -1348,8 +1670,7 @@ def generate_excel(
 
     # 5. Сохраняем файл
     wb.save(out_path)
-    _inject_x14_dv(out_path)   # восстанавливаем x14:DV в WV 4.0
-    _restore_missing_rels(tpl, out_path)  # восстанавливаем ctrlProp/drawing rels
+    _clean_xlsx_output(out_path)   # убираем слайсеры, #REF! CF, calc formulas
     return out_path
 
 def generate_excel_multi(
@@ -1371,15 +1692,16 @@ def generate_excel_multi(
     from openpyxl.styles import Border, Side
 
     out_path = output_path
-    if out_path.lower().endswith(".xlsx"):
-        out_path = out_path[:-5] + ".xlsm"
-    elif not out_path.lower().endswith(".xlsm"):
-        out_path = os.path.splitext(out_path)[0] + ".xlsm"
+    # Выходной формат — чистый xlsx без макросов
+    _mbase, _mext = os.path.splitext(out_path)
+    if _mext.lower() not in (".xlsx", ".xlsm"):
+        _mbase = out_path
+    out_path = _mbase + ".xlsx"
 
     tpl = _template_path()
 
     _shutil.copyfile(tpl, out_path)
-    wb = openpyxl.load_workbook(out_path, keep_vba=True, data_only=False)
+    wb = openpyxl.load_workbook(out_path, keep_vba=False, data_only=False)
     if hasattr(wb, "_external_links"):
         wb._external_links = []
 
@@ -1422,7 +1744,7 @@ def generate_excel_multi(
         "Кратность", "Константа цена",
         "Цена себес", "Сумма себес",
         "Цена КП", "Сумма КП",
-        "Код КазНИИСА",
+        "Код АГСК",
         "Комментарии", "Срок поставки",
     ]
     WV_ALNS   = [
@@ -1717,7 +2039,7 @@ def generate_excel_multi(
             kp_row += 1
 
     wb.save(out_path)
-    _restore_missing_rels(tpl, out_path)
+    _clean_xlsx_output(out_path)   # убираем макросы, слайсеры, битые имена
     print(f"[MultiExcel] {len(projects)} project(s) saved to {out_path}")
     return out_path
 

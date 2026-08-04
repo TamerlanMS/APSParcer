@@ -1215,10 +1215,22 @@ class PreviewPage(ctk.CTkFrame):
         # Пересчитываем ВСЕ позиции
         self._recalc_all()
 
+    @staticmethod
+    def _has_manual_price(item: dict) -> bool:
+        """True только если пользователь ЯВНО задал цену вручную.
+
+        Флаг _user_edited сам по себе недостаточен: он также ставится
+        аналог-строкам (защита от ИИ-переподбора), а их цены обязаны
+        пересчитываться при смене типа расценки.
+        """
+        return (item.get("_user_price")       is not None
+                or item.get("_user_seb_price")   is not None
+                or item.get("_user_const_price") is not None)
+
     def _recalc_all(self):
         """Пересчитывает цены для всех позиций (вызывается при смене расценки)."""
         for item in self.items:
-            if item.get("_user_edited"):
+            if self._has_manual_price(item):
                 continue
             iid = item.get("_iid")
             if not iid or not self.tree.exists(iid):
@@ -1618,7 +1630,7 @@ class PreviewPage(ctk.CTkFrame):
             bm = item.get("best_match") or {}
             if (bm.get("brand") or "").upper() != brand:
                 continue
-            if item.get("_user_edited"):
+            if self._has_manual_price(item):
                 continue
             iid = item.get("_iid")
             if not iid or not self.tree.exists(iid):
@@ -2429,8 +2441,8 @@ class PreviewPage(ctk.CTkFrame):
 
         path = filedialog.asksaveasfilename(
             title=t("preview_save"),
-            defaultextension=".xlsm",
-            filetypes=[("Excel с макросами", "*.xlsm")]
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")]
         )
         if not path:
             return

@@ -117,7 +117,7 @@ Public Sub RebuildKP()
 
         Dim dPriceKP As Double : dPriceKP = Val(CStr(wsWV.Cells(iRow, 10).Value))  ' J Цена КП
         Dim dSumKP   As Double : dSumKP   = Val(CStr(wsWV.Cells(iRow, 11).Value))  ' K Сумма КП
-        Dim sKazCode As String : sKazCode = CStr(wsWV.Cells(iRow, 12).Value)       ' L Код КазНИИСА
+        Dim sKazCode As String : sKazCode = CStr(wsWV.Cells(iRow, 12).Value)       ' L Код АГСК
         Dim sComment As String : sComment = CStr(wsWV.Cells(iRow, 13).Value)       ' M Комментарии
         Dim sDeliv   As String : sDeliv   = CStr(wsWV.Cells(iRow, 14).Value)       ' N Срок
         Dim sName    As String : sName    = CStr(wsWV.Cells(iRow,  3).Value)       ' C Наименование
@@ -160,7 +160,7 @@ Public Sub RebuildKP()
             If sDeliv   <> "" Then .Cells(kpRow,  9).Value = sDeliv               ' I Срок поставки
             If dPrKaz   > 0 Then .Cells(kpRow, 10).Value = dPrKaz                 ' J Цена КазНИИСА
             If dPrKaz   > 0 Then .Cells(kpRow, 11).Value = dPrKaz * dQty          ' K Сумма КазНИИСА
-            If sKazCode <> "" Then .Cells(kpRow, 12).Value = sKazCode             ' L Код КазНИИСА
+            If sKazCode <> "" Then .Cells(kpRow, 12).Value = sKazCode             ' L Код АГСК
             If dPrRRC   > 0 Then .Cells(kpRow, 13).Value = dPrRRC                 ' M РРЦ в тнг
             If dPrRRC   > 0 Then .Cells(kpRow, 14).Value = dPrRRC * dQty          ' N Сумма РРЦ
         End With
