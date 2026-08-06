@@ -25,6 +25,7 @@ C_AI_LOW   = "#F5F5F5"   # почти белый — ИИ-совпадение (
 C_MANAGER  = "#EDE7F6"   # сиреневый — подобрано из истории выборов менеджеров
 C_HEADING  = "#D6EAF8"   # голубой — строка-заголовок раздела (is_heading=True)
 C_ANALOG      = "#B2EBF2"   # циановый — строка аналога (is_analog_row=True)
+C_READY       = "#A9DFBF"   # насыщенный зелёный — есть и артикул, и код АГСК
 C_ORIG_ANALOG = "#ECEFF1"   # светло-серый — оригинал, замещённый аналогом
 
 
@@ -38,9 +39,9 @@ COLS = [
     ("unit",       "col_unit"),         # 4
     ("qty",        "col_qty"),          # 5  редактируется
     ("mult",       "col_mult"),         # 6 — кратность
-    ("const",      "col_const"),        # 7 — Константа цена, редактируется
-    ("seb",        "col_price_seb"),    # 8 — Цена себес
-    ("seb_sum",    "col_sum_seb"),      # 9 — Сумма себес
+    ("seb",        "col_price_seb"),    # 7 — Цена себес
+    ("seb_sum",    "col_sum_seb"),      # 8 — Сумма себес
+    ("const",      "col_const"),        # 9 — Предварительная цена, редактируется
     ("kp",         "col_price_kp"),     # 10 — Цена КП, редактируется
     ("kp_sum",     "col_sum_kp"),       # 11 — Сумма КП
     ("kaznisa",    "col_kaznisa_code"), # 12 — Код АГСК
@@ -50,8 +51,12 @@ COLS = [
     ("method",     "col_method"),       # 16 — Метод подбора
     ("analog_art", "col_analog"),        # 17 — Аналог из базы аналогов
 ]
-COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 90, 100, 90, 100, 110, 150, 110, 100, 130, 120]
-EDITABLE_COLS = {5, 6, 7, 8, 9, 10, 11, 13, 14}  # Кол-во, Кратн., Конст.цена, Себес, ΣСеб, КП, ΣКП, Коммент., Срок
+COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 100, 150, 90, 100, 110, 150, 110, 100, 130, 120]
+EDITABLE_COLS = {2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}  # Артикул, Кол-во, Кратн., цены, Код АГСК, Коммент., Срок
+C_ARTICLE  = 2                                   # индекс колонки «Артикул (БД)»
+C_KAZ_CODE = 12                                  # индекс колонки «Код АГСК»
+# Индексы колонок ценового блока
+C_SEB, C_SEB_SUM, C_PRELIM, C_KP, C_KP_SUM = 7, 8, 9, 10, 11
 
 
 # Соответствие rate-индекс (1..8) → ключ цены из БД
@@ -81,6 +86,30 @@ RATE_LABELS = [
     "Сумма ГП",        # 7
     "Проект",          # 8
 ]
+
+# Расценки, доступные пользователю в выпадающем списке.
+# «Цена АГСК» (2), «Цена ГП» (6) и «Сумма ГП» (7) скрыты — расчёт для них
+# остаётся в коде, чтобы сохранённые в БД значения продолжали работать.
+DEFAULT_RATE_IDX    = 1          # «Сумма АГСК» — расценка по умолчанию
+VISIBLE_RATE_IDX    = [1, 3, 4, 5, 8]
+VISIBLE_RATE_LABELS = [RATE_LABELS[i - 1] for i in VISIBLE_RATE_IDX]
+
+# Коэффициент предварительной цены по умолчанию (переопределяется настройкой с сервера)
+DEFAULT_PRELIM_COEFF = 2.5
+
+
+def _norm_rate(value) -> int:
+    """Приводит сохранённую расценку к используемой в интерфейсе.
+
+    Значения вне видимого списка (в т.ч. старое МРЦ=4 из дефолта БД и
+    скрытые «Цена АГСК»/«Цена ГП»/«Сумма ГП») заменяются на расценку
+    по умолчанию — «Сумма АГСК».
+    """
+    try:
+        idx = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_RATE_IDX
+    return idx if idx in VISIBLE_RATE_IDX else DEFAULT_RATE_IDX
 
 
 def _make_headers() -> List[str]:
@@ -608,6 +637,10 @@ class PreviewPage(ctk.CTkFrame):
         self.items   = []
         self.constants   = {}       # raw из API
         self.brand_consts = {}      # {brand: {margin, logistics, rate, currency_rate, nds, gp}}
+        self._prelim_coeff = DEFAULT_PRELIM_COEFF   # множитель Партнёр→предварительная цена
+        self._spec_mode   = False   # True — работаем со спецификацией (режим подбора)
+        self._spec_path   = ""      # путь исходного файла спецификации
+        self._spec_sheet  = ""      # лист со спецификацией
         self.managers    = []
         self._edit_iid   = None
         self._edit_entry = None
@@ -802,6 +835,7 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.tag_configure("heading",  background=C_HEADING,
                                 font=("Calibri", 10, "bold"))
         self.tree.tag_configure("analog",       background=C_ANALOG)
+        self.tree.tag_configure("ready",        background=C_READY)
         self.tree.tag_configure("orig_analog",  background=C_ORIG_ANALOG,
                                 font=("Calibri", 10, "italic"))
 
@@ -887,7 +921,7 @@ class PreviewPage(ctk.CTkFrame):
             ("preview_logistics",  "logistics",     1.03),
             ("preview_nds",        "nds",           1.16),
             ("preview_currency",   "currency_rate", 1.00),
-            ("preview_rate_type",  "rate",          3),   # default = РРЦ (index 3)
+            ("preview_rate_type",  "rate",          DEFAULT_RATE_IDX),  # «Сумма АГСК»
         ]
         for col_i, (key, var_key, default) in enumerate(const_items):
             lbl = ctk.CTkLabel(cf, text=t(key), font=FONT_SMALL,
@@ -895,9 +929,12 @@ class PreviewPage(ctk.CTkFrame):
             lbl.grid(row=1, column=2 + col_i * 2, padx=(8, 4), pady=(0, 10), sticky="w")
             if var_key == "rate":
                 # Выпадающий список вместо числового поля
-                self._rate_str_var = ctk.StringVar(value=RATE_LABELS[int(default) - 1])
+                _def_lbl = RATE_LABELS[int(default) - 1]
+                if _def_lbl not in VISIBLE_RATE_LABELS:
+                    _def_lbl = VISIBLE_RATE_LABELS[0]
+                self._rate_str_var = ctk.StringVar(value=_def_lbl)
                 rate_dd = ctk.CTkOptionMenu(
-                    cf, values=RATE_LABELS,
+                    cf, values=VISIBLE_RATE_LABELS,
                     variable=self._rate_str_var,
                     width=170, height=30,
                     command=self._on_rate_select,
@@ -913,6 +950,28 @@ class PreviewPage(ctk.CTkFrame):
                 entry = ctk.CTkEntry(cf, textvariable=var, width=70, height=30, font=FONT_SMALL)
                 entry.grid(row=1, column=3 + col_i * 2, padx=(0, 8), pady=(0, 10))
                 self.const_vars[var_key] = var
+
+        # ── Кнопки режима подбора по спецификации ───────────────────────────
+        # Живут в панели констант: в верхней панели они не помещались.
+        # Колонка-распорка прижимает их к правому краю.
+        cf.grid_columnconfigure(12, weight=1)
+
+        self.spec_save_btn = ctk.CTkButton(
+            cf, text="💾 Сохранить в спецификацию",
+            font=(*FONT_NORMAL[:2], "bold"),
+            fg_color="#1E8449", hover_color="#186A3B",
+            height=32, width=230, corner_radius=RADIUS_SM,
+            anchor="center",
+            command=self._save_to_spec,
+        )
+        self.spec_kp_btn = ctk.CTkButton(
+            cf, text="→ Перейти к КП",
+            font=(*FONT_NORMAL[:2], "bold"),
+            fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=32, width=230, corner_radius=RADIUS_SM,
+            anchor="center",
+            command=self._spec_to_kp,
+        )
 
         # Подсказка
         self.hint_lbl = ctk.CTkLabel(cf, text=t("preview_rate_hint"),
@@ -1057,6 +1116,7 @@ class PreviewPage(ctk.CTkFrame):
                     it["_computed_kp_sum"]   = kp_sum
                     it["_computed_seb_price"] = seb
                     it["_computed_seb_sum"]   = seb_sum
+                    it["_prelim_price"]       = self._prelim_price(it) or None
 
             _incl_hdg = self._hdg_var.get() if self._hdg_var else True
             gen_projects = [
@@ -1093,6 +1153,131 @@ class PreviewPage(ctk.CTkFrame):
             import traceback; traceback.print_exc()
             messagebox.showerror("Ошибка сохранения", str(e))
 
+    def load_spec_data(self, result: dict):
+        """Загружает результат разбора спецификации и включает режим подбора."""
+        self._spec_mode  = True
+        self._spec_path  = result.get("source_path", "") or ""
+        items = result.get("items", []) or []
+        self._spec_sheet = next((i.get("sheet") for i in items if i.get("sheet")), "")
+
+        self.load_data(result)
+
+        self._spec_mode = True          # load_data сбрасывает флаг — возвращаем
+        self._update_spec_mode_ui()
+
+    def _update_spec_mode_ui(self):
+        """Показывает кнопки подбора и прячет обычное сохранение (и наоборот)."""
+        try:
+            if self._spec_mode:
+                self.save_btn.grid_remove()
+                self.spec_save_btn.grid(row=1, column=13, padx=(8, 16),
+                                        pady=(0, 4), sticky="e")
+                self.spec_kp_btn.grid(row=2, column=13, padx=(8, 16),
+                                      pady=(0, 10), sticky="e")
+                self.spec_save_btn.configure(state="normal")
+                self.spec_kp_btn.configure(state="normal")
+            else:
+                self.spec_save_btn.grid_remove()
+                self.spec_kp_btn.grid_remove()
+                self.save_btn.grid(row=0, column=6, padx=(0, 4))
+        except Exception:
+            pass
+
+    def _spec_to_kp(self):
+        """Переход от подбора к составлению КП с тем же списком позиций."""
+        if not self.items:
+            return
+        n_found = sum(1 for i in self.items
+                      if not i.get("is_heading") and i.get("best_match"))
+        n_all = sum(1 for i in self.items if not i.get("is_heading"))
+        if n_found < n_all:
+            if not messagebox.askyesno(
+                "Перейти к КП",
+                f"Подобрано {n_found} из {n_all} позиций.\n"
+                f"Неподобранные не попадут в КП.\n\nПродолжить?",
+            ):
+                return
+
+        self._spec_mode = False
+        self._update_spec_mode_ui()
+        self.save_btn.configure(state="normal")
+        messagebox.showinfo(
+            "Режим КП",
+            "Список перенесён в режим составления КП.\n"
+            "Цены и расценки доступны, сохранение — кнопкой «Сохранить».",
+        )
+
+    def _save_to_spec(self):
+        """Записывает подбор обратно в исходный файл спецификации."""
+        if not self._spec_path or not os.path.isfile(self._spec_path):
+            path = filedialog.asksaveasfilename(
+                title="Сохранить спецификацию",
+                defaultextension=".xlsx",
+                filetypes=[("Excel", "*.xlsx")],
+            )
+            if not path:
+                return
+            self._spec_path = path
+
+        rows = [i for i in self.items
+                if i.get("row") and not i.get("is_heading") and i.get("best_match")]
+        if not rows:
+            messagebox.showinfo("", "Нет подобранных позиций для записи.")
+            return
+
+        self.spec_save_btn.configure(state="disabled", text="Сохранение...")
+
+        import threading
+
+        def _work():
+            try:
+                from services.spec_writer import write_selection_to_spec
+                n = write_selection_to_spec(
+                    self._spec_path, self.items, sheet_name=self._spec_sheet,
+                )
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.after(0, lambda: (
+                    messagebox.showerror("Ошибка сохранения", str(e)),
+                    self.spec_save_btn.configure(
+                        state="normal", text="💾 Сохранить в спецификацию"),
+                ))
+                return
+
+            # Подбор уходит в базу аналогов — для проектировщиков
+            saved = 0
+            for it in rows:
+                bm  = it.get("best_match") or {}
+                art = (it.get("article_raw") or "").strip()
+                an  = (bm.get("article") or "").strip()
+                if not art or not an or art == an:
+                    continue
+                try:
+                    self.api.save_analog_db(
+                        article=art,
+                        analog_article=an,
+                        segment=(bm.get("segment") or "ss"),
+                        analog_name=bm.get("name"),
+                        analog_brand=bm.get("brand"),
+                        source="spec",
+                    )
+                    saved += 1
+                except Exception:
+                    pass
+
+            self.after(0, lambda: (
+                self.spec_save_btn.configure(
+                    state="normal", text="💾 Сохранить в спецификацию"),
+                messagebox.showinfo(
+                    "Спецификация сохранена",
+                    f"Записано позиций: {n}\n"
+                    f"Сохранено в базу подбора: {saved}\n\n"
+                    f"Файл: {self._spec_path}",
+                ),
+            ))
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def load_data(self, result: dict):
         # Сбрасываем фильтр и поиск чтобы не было «призраков» из предыдущего файла
         self._filter_mode = "all"
@@ -1100,6 +1285,8 @@ class PreviewPage(ctk.CTkFrame):
         for k, btn in self.filter_btns.items():
             btn.configure(fg_color=NAVY_LIGHT if k == "all" else "#AEB6BF")
 
+        self._spec_mode = False
+        self._update_spec_mode_ui()
         self.items = result.get("items", [])
         # Фиксируем базовые значения и сбрасываем флаги
         for it in self.items:
@@ -1119,7 +1306,9 @@ class PreviewPage(ctk.CTkFrame):
                 self.brand_consts[(b.get("brand") or "").upper()] = {
                     "margin":        float(b.get("margin")        or 1.0),
                     "logistics":     float(b.get("logistics")     or 1.0),
-                    "rate":          int(b.get("rate")            or 1),
+                    # Расценка глобальная и всегда стартует с «Сумма АГСК»:
+                    # сохранённое в БД значение — это legacy-умолчание модели
+                    "rate":          DEFAULT_RATE_IDX,
                     "currency_rate": float(b.get("currency_rate") or 1.0),
                     "nds":           float(b.get("nds")           or 1.0),
                     "gp":            float(b.get("gp")            or 1.0),
@@ -1128,6 +1317,15 @@ class PreviewPage(ctk.CTkFrame):
             self.managers = self.constants.get("managers", [])
         except Exception as e:
             print(f"[Preview] get_constants: {e}")
+
+        # Коэффициент предварительной цены (глобальная настройка администратора)
+        try:
+            _st = self.api.get_app_settings() or {}
+            _c  = float(_st.get("prelim_price_coeff") or DEFAULT_PRELIM_COEFF)
+            self._prelim_coeff = _c if _c > 0 else DEFAULT_PRELIM_COEFF
+        except Exception as e:
+            print(f"[Preview] get_app_settings: {e}")
+            self._prelim_coeff = DEFAULT_PRELIM_COEFF
 
         # Заполняем dropdown брендов из присутствующих в результатах
         brands_in_data = sorted({
@@ -1184,11 +1382,16 @@ class PreviewPage(ctk.CTkFrame):
         for k in ("margin", "logistics", "nds", "currency_rate", "rate"):
             if k in self.const_vars and k in consts:
                 if k == "rate":
-                    rate_idx = int(consts[k] or 3)
+                    rate_idx = _norm_rate(consts[k])
                     self.const_vars[k].set(rate_idx)
                     # Синхронизируем надпись в выпадающем списке
                     if self._rate_str_var and 1 <= rate_idx <= len(RATE_LABELS):
-                        self._rate_str_var.set(RATE_LABELS[rate_idx - 1])
+                        _lbl = RATE_LABELS[rate_idx - 1]
+                        # Скрытая расценка (Цена АГСК / Цена ГП / Сумма ГП) —
+                        # показываем ближайшую видимую, расчёт не меняем
+                        if _lbl not in VISIBLE_RATE_LABELS:
+                            _lbl = RATE_LABELS[(1 if rate_idx == 2 else 3) - 1]
+                        self._rate_str_var.set(_lbl)
                 else:
                     self.const_vars[k].set(consts[k])
         self._suppress_recalc = False
@@ -1216,6 +1419,80 @@ class PreviewPage(ctk.CTkFrame):
         self._recalc_all()
 
     @staticmethod
+    def _is_ready_row(item: dict) -> bool:
+        """True — у позиции заполнены и артикул, и код АГСК.
+
+        Источник значения не важен: подобрано из базы или вписано вручную.
+        Такая строка готова к выгрузке и подсвечивается зелёным.
+        """
+        if item.get("is_heading"):
+            return False
+        bm = item.get("best_match") or {}
+        article = (bm.get("article") or item.get("article_raw") or "").strip()
+        code    = (bm.get("kaznisa_code")
+                   or item.get("kaznisa_code_raw") or "").strip()
+        return bool(article and code)
+
+    def _row_tag(self, item: dict) -> str:
+        """Тег подсветки строки с учётом «готовности» позиции."""
+        if item.get("is_heading"):
+            return "heading"
+        if item.get("is_analog_row"):
+            return "analog"
+        if item.get("has_analog_row"):
+            return "orig_analog"
+        if self._is_ready_row(item):
+            return "ready"
+        status = item.get("status", "not_found")
+        return {
+            "exact":          "exact",
+            "multiple":       "multiple",
+            "fuzzy":          "multiple",
+            "ai_match":       "ai",
+            "manager_match":  "manager",
+        }.get(status, "notfound")
+
+    def _prelim_price(self, item: dict) -> float:
+        """Предварительная цена позиции.
+
+        Правило:
+          • есть код АГСК И заполнена цена КазНИИСА → берём цену КазНИИСА;
+          • иначе (нет кода, либо код есть но цена пустая) →
+            Партнёр/проект/дистр. × коэффициент (настройка администратора).
+
+        Ручной ввод пользователя в колонке имеет наивысший приоритет.
+        Применяется при любом типе расценки.
+        """
+        if item.get("_user_const_price"):
+            try:
+                return float(item["_user_const_price"])
+            except (TypeError, ValueError):
+                return 0.0
+
+        bm = item.get("best_match") or {}
+        # Код берём ТОЛЬКО у товара из БД: код из PDF (kaznisa_code_raw)
+        # не подтверждает наличие позиции в прайсе КазНИИСА.
+        code = (bm.get("kaznisa_code") or "").strip()
+        try:
+            kaz = float(bm.get("kaznisa") or 0)
+        except (TypeError, ValueError):
+            kaz = 0.0
+        if code and kaz:
+            return kaz
+
+        try:
+            partner = float(bm.get("partner") or 0)
+        except (TypeError, ValueError):
+            partner = 0.0
+        if partner:
+            try:
+                coeff = float(self._prelim_coeff or DEFAULT_PRELIM_COEFF)
+            except (TypeError, ValueError):
+                coeff = DEFAULT_PRELIM_COEFF
+            return partner * coeff
+        return 0.0
+
+    @staticmethod
     def _has_manual_price(item: dict) -> bool:
         """True только если пользователь ЯВНО задал цену вручную.
 
@@ -1236,25 +1513,32 @@ class PreviewPage(ctk.CTkFrame):
             if not iid or not self.tree.exists(iid):
                 continue
             seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+            _pp = self._prelim_price(item)
+            item["_prelim_price"] = _pp or None
             vals = list(self.tree.item(iid, "values"))
-            vals[8]  = f"{seb:.2f}"     if seb     else ""
-            vals[9]  = f"{seb_sum:.2f}" if seb_sum else ""
-            vals[10] = f"{kp:.2f}"      if kp      else ""
-            vals[11] = f"{kp_sum:.2f}"  if kp_sum  else ""
+            vals[C_SEB]     = f"{seb:.2f}"     if seb     else ""
+            vals[C_SEB_SUM] = f"{seb_sum:.2f}" if seb_sum else ""
+            vals[C_KP]      = f"{kp:.2f}"      if kp      else ""
+            vals[C_KP_SUM]  = f"{kp_sum:.2f}"  if kp_sum  else ""
+            vals[C_PRELIM]  = f"{_pp:.2f}"     if _pp     else ""
             self.tree.item(iid, values=vals)
 
     # ── Расчёт цены ──────────────────────────────────────────────────────────
     def _compute_kp(self, item: dict) -> tuple:
         """
         Возвращает (price_seb, sum_seb, price_kp, sum_kp).
-        Формула из WV_template.xlsm:
+
+        Цена себес — всегда Проектная (Партнёр/проект/дистр.) из БД.
+        От выбранной расценки НЕ зависит и при её переключении не меняется.
+
+        Цена КП — по выбранной расценке:
             base = выбор по rate-индексу бренда из БД:
                    1=Сумма АГСК, 2=Цена АГСК, 3=РРЦ, 4=МРЦ,
                    5=Опт, 6=Цена ГП (РРЦ×ГП), 7=Сумма ГП, 8=Проект
-                   либо ручная константа из поля G
-            price_seb = base × курс × НДС × лог-ка
-            price_kp  = price_seb × маржа
-            суммы     = цена × Кол-во,  округление вверх.
+                   либо ручная предварительная цена
+            price_kp = base × курс × НДС × лог-ка × маржа
+                       (для АГСК курс/НДС/логистика не применяются)
+            суммы    = цена × Кол-во, округление вверх.
         """
         bm    = item.get("best_match") or {}
         brand = (bm.get("brand") or "").upper()
@@ -1267,7 +1551,7 @@ class PreviewPage(ctk.CTkFrame):
                     "logistics":     float(self.const_vars["logistics"].get()),
                     "nds":           float(self.const_vars["nds"].get()),
                     "currency_rate": float(self.const_vars["currency_rate"].get()),
-                    "rate":          int(float(self.const_vars["rate"].get() or 3)),
+                    "rate":          int(float(self.const_vars["rate"].get() or DEFAULT_RATE_IDX)),
                     "gp":            1.0,
                 }
             except (tk.TclError, ValueError):
@@ -1280,10 +1564,16 @@ class PreviewPage(ctk.CTkFrame):
         mg  = float(bc.get("margin",        1.0) or 1.0)
         qty = float(item.get("qty", 1) or 1)
 
+        # ── Цена себес: всегда Проектная из БД, от расценки не зависит ──
+        try:
+            _partner = float(bm.get("partner") or 0)
+        except (TypeError, ValueError):
+            _partner = 0.0
+        price_seb = math.ceil(_partner) if _partner else 0.0
+
         # ── Приоритет 1: пользователь задал Цена КП напрямую ────────────
         if item.get("_user_edited") and item.get("_user_price") is not None:
-            price_kp  = math.ceil(float(item["_user_price"]))
-            price_seb = math.ceil(price_kp / mg) if mg else price_kp
+            price_kp = math.ceil(float(item["_user_price"]))
             return price_seb, price_seb * qty, price_kp, price_kp * qty
 
         # ── Приоритет 2: пользователь задал Цена себес напрямую ─────────
@@ -1292,7 +1582,7 @@ class PreviewPage(ctk.CTkFrame):
             price_kp  = math.ceil(price_seb * mg)
             return price_seb, price_seb * qty, price_kp, price_kp * qty
 
-        # ── Приоритет 3: константа цена вместо базы из БД ───────────────
+        # ── База для Цены КП: ручная предварительная цена либо поле расценки ──
         if item.get("_user_const_price"):
             base = float(item["_user_const_price"])
         else:
@@ -1307,15 +1597,16 @@ class PreviewPage(ctk.CTkFrame):
 
         base = float(base or 0)
         if not base:
-            return 0.0, 0.0, 0.0, 0.0
+            # Себестоимость показываем даже если базы для КП нет
+            return price_seb, price_seb * qty, 0.0, 0.0
 
         if rate_type in AGSK_RATE_TYPES:
             # kaznisa / АГСК — цена уже в KZT из государственного прайса КазНИИСА.
             # Курс валюты, НДС и логистика НЕ применяются (они заложены в цене).
-            price_seb = math.ceil(base)
+            _kp_base = math.ceil(base)
         else:
-            price_seb = math.ceil(base * cur * nds * lo)
-        price_kp  = math.ceil(price_seb * mg)
+            _kp_base = math.ceil(base * cur * nds * lo)
+        price_kp = math.ceil(_kp_base * mg)
         return price_seb, price_seb * qty, price_kp, price_kp * qty
 
     # ── Заполнение таблицы ───────────────────────────────────────────────────
@@ -1393,11 +1684,14 @@ class PreviewPage(ctk.CTkFrame):
             seb, seb_sum, kp, kp_sum = self._compute_kp(item)
             def _f(v): return f"{v:.2f}" if v else ""
 
+            _a_prelim = self._prelim_price(item)
+            item["_prelim_price"] = _a_prelim or None
+
             _cb = ("☑" if id(item) in self._checked_items else "☐") if self._select_mode else ""
             pos_lbl = f"{_cb} ↳ Аналог" if _cb else "↳ Аналог"
             vals = (
-                pos_lbl, brand, article, name, unit, qty_raw, mult, "",
-                _f(seb), _f(seb_sum), _f(kp), _f(kp_sum),
+                pos_lbl, brand, article, name, unit, qty_raw, mult,
+                _f(seb), _f(seb_sum), _f(_a_prelim), _f(kp), _f(kp_sum),
                 kaznisa_code,
                 item.get("comment", "") or "",
                 item.get("delivery", "") or "",
@@ -1443,6 +1737,10 @@ class PreviewPage(ctk.CTkFrame):
         if item.get("_user_edited"):
             tag = "edited"
 
+        # Есть и артикул, и код АГСК — позиция готова, подсвечиваем зелёным
+        if self._is_ready_row(item):
+            tag = "ready"
+
         # Оригинал, замещённый аналогом — показываем серым, без цен
         if item.get("has_analog_row"):
             tag = "orig_analog"
@@ -1467,7 +1765,10 @@ class PreviewPage(ctk.CTkFrame):
             qty = qty_raw
         # Если товар найден — берём код из БД; если нет — показываем код из PDF
         kaznisa_code = bm.get("kaznisa_code") or item.get("kaznisa_code_raw", "") or ""
-        const_price  = item.get("_user_const_price") or ""
+        # Предварительная цена: КазНИИСА либо Партнёр × коэффициент
+        _prelim = self._prelim_price(item)
+        item["_prelim_price"] = _prelim or None
+        const_price = f"{_prelim:.2f}" if _prelim else ""
 
         def f(v):
             return f"{v:.2f}" if v else ""
@@ -1503,9 +1804,9 @@ class PreviewPage(ctk.CTkFrame):
             unit,
             qty,
             mult,
-            const_price,
             f(seb),
             f(seb_sum),
+            const_price,
             f(kp),
             f(kp_sum),
             kaznisa_code,
@@ -1620,7 +1921,7 @@ class PreviewPage(ctk.CTkFrame):
             bc["logistics"]     = float(self.const_vars["logistics"].get())
             bc["nds"]           = float(self.const_vars["nds"].get())
             bc["currency_rate"] = float(self.const_vars["currency_rate"].get())
-            bc["rate"]          = int(float(self.const_vars["rate"].get() or 3))
+            bc["rate"]          = int(float(self.const_vars["rate"].get() or DEFAULT_RATE_IDX))
         except (tk.TclError, ValueError):
             return
         self._recalc_for_brand(brand)
@@ -1636,11 +1937,14 @@ class PreviewPage(ctk.CTkFrame):
             if not iid or not self.tree.exists(iid):
                 continue
             seb, seb_sum, kp, kp_sum = self._compute_kp(item)
+            _pp = self._prelim_price(item)
+            item["_prelim_price"] = _pp or None
             vals = list(self.tree.item(iid, "values"))
-            vals[8]  = f"{seb:.2f}"      if seb     else ""
-            vals[9]  = f"{seb_sum:.2f}"  if seb_sum else ""
-            vals[10] = f"{kp:.2f}"       if kp      else ""
-            vals[11] = f"{kp_sum:.2f}"   if kp_sum  else ""
+            vals[C_SEB]     = f"{seb:.2f}"      if seb     else ""
+            vals[C_SEB_SUM] = f"{seb_sum:.2f}"  if seb_sum else ""
+            vals[C_KP]      = f"{kp:.2f}"       if kp      else ""
+            vals[C_KP_SUM]  = f"{kp_sum:.2f}"   if kp_sum  else ""
+            vals[C_PRELIM]  = f"{_pp:.2f}"      if _pp     else ""
             self.tree.item(iid, values=vals)
 
     # ── Фильтр и поиск ───────────────────────────────────────────────────────
@@ -1922,7 +2226,35 @@ class PreviewPage(ctk.CTkFrame):
         entry.focus_set()
         entry.bind("<Return>",   lambda e: self._commit_edit(entry))
         entry.bind("<Escape>",   lambda e: self._cancel_edit())
-        entry.bind("<FocusOut>", lambda e: self._commit_edit(entry))
+
+        # Меню буфера не должно завершать редактирование по FocusOut
+        self._edit_menu_open = False
+
+        def _on_focus_out(_e):
+            if getattr(self, "_edit_menu_open", False):
+                return
+            self._commit_edit(entry)
+
+        entry.bind("<FocusOut>", _on_focus_out)
+
+        _menu = tk.Menu(entry, tearoff=0)
+        _menu.add_command(label="Вставить",
+                          command=lambda: entry.event_generate("<<Paste>>"))
+        _menu.add_command(label="Копировать",
+                          command=lambda: entry.event_generate("<<Copy>>"))
+        _menu.add_command(label="Вырезать",
+                          command=lambda: entry.event_generate("<<Cut>>"))
+
+        def _popup(ev):
+            self._edit_menu_open = True
+            try:
+                _menu.tk_popup(ev.x_root, ev.y_root)
+            finally:
+                _menu.grab_release()
+                self.after(50, lambda: setattr(self, "_edit_menu_open", False))
+                entry.focus_set()
+
+        entry.bind("<Button-3>", _popup)
         self._edit_entry = entry
 
     def _commit_edit(self, entry):
@@ -1948,6 +2280,24 @@ class PreviewPage(ctk.CTkFrame):
                 pass
             vals[6] = bm.get("multiplicity") or ""
 
+        elif col_idx in (C_ARTICLE, C_KAZ_CODE):
+            # Артикул и код АГСК — текст. Пишем и в позицию, и в подобранный
+            # товар, чтобы значение ушло в обратную запись в спецификацию.
+            text = raw.strip()
+            if col_idx == C_ARTICLE:
+                item["article_raw"] = text
+                bm["article"] = text
+                item["_user_article"] = bool(text)
+            else:
+                item["kaznisa_code_raw"] = text
+                bm["kaznisa_code"] = text
+                item["_user_kaznisa_code"] = bool(text)
+            vals[col_idx] = text
+            # Пересчитываем подсветку: значение могло достроить позицию до «готовой»
+            self.tree.item(iid, values=vals, tags=(self._row_tag(item),))
+            self._cancel_edit()
+            return
+
         elif col_idx in (13, 14):
             key = "comment" if col_idx == 13 else "delivery"
             item[key] = raw
@@ -1967,36 +2317,39 @@ class PreviewPage(ctk.CTkFrame):
                 bm_unit = (item.get("best_match") or {}).get("unit", "")
                 if bm_unit:
                     item["unit"] = bm_unit
-            elif col_idx == 7:
+            elif col_idx == C_PRELIM:
+                # Предварительная цена — ручное переопределение
                 item["_user_const_price"] = new_val if new_val else None
                 item["_user_seb_price"]   = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
-            elif col_idx == 8:
+            elif col_idx == C_SEB:
                 item["_user_seb_price"]   = new_val if new_val else None
                 item["_user_const_price"] = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
-            elif col_idx == 9:
+            elif col_idx == C_SEB_SUM:
                 qty_v = float(item.get("qty", 1) or 1)
                 item["_user_seb_price"]   = (new_val / qty_v) if (new_val and qty_v) else None
                 item["_user_const_price"] = None
                 item["_user_edited"] = False
                 item["_user_price"]  = None
-            elif col_idx == 10:
+            elif col_idx == C_KP:
                 item["_user_edited"] = True
                 item["_user_price"]  = new_val
-            elif col_idx == 11:
+            elif col_idx == C_KP_SUM:
                 qty_v = float(item.get("qty", 1) or 1)
                 item["_user_edited"] = True
                 item["_user_price"]  = (new_val / qty_v) if (new_val and qty_v) else None
             seb, seb_sum, kp, kp_sum = self._compute_kp(item)
-            vals[5]  = item.get("qty", 1)
-            vals[7]  = item.get("_user_const_price") or ""
-            vals[8]  = f"{seb:.2f}"     if seb     else ""
-            vals[9]  = f"{seb_sum:.2f}" if seb_sum else ""
-            vals[10] = f"{kp:.2f}"      if kp      else ""
-            vals[11] = f"{kp_sum:.2f}"  if kp_sum  else ""
+            _pp = self._prelim_price(item)
+            item["_prelim_price"] = _pp or None
+            vals[5]         = item.get("qty", 1)
+            vals[C_SEB]     = f"{seb:.2f}"     if seb     else ""
+            vals[C_SEB_SUM] = f"{seb_sum:.2f}" if seb_sum else ""
+            vals[C_KP]      = f"{kp:.2f}"      if kp      else ""
+            vals[C_KP_SUM]  = f"{kp_sum:.2f}"  if kp_sum  else ""
+            vals[C_PRELIM]  = f"{_pp:.2f}"     if _pp     else ""
 
         is_edited = bool(item.get("_user_edited") or item.get("_user_const_price") or item.get("_user_seb_price"))
         if is_edited:
@@ -2453,6 +2806,7 @@ class PreviewPage(ctk.CTkFrame):
                 it["_computed_kp_sum"]   = kp_sum
                 it["_computed_seb_price"] = seb
                 it["_computed_seb_sum"]   = seb_sum
+                it["_prelim_price"]       = self._prelim_price(it) or None
 
             import tempfile
             base_tpl = ""

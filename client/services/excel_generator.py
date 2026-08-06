@@ -479,8 +479,8 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
             a_brand   = bm_a.get("brand", "")
             a_unit    = (bm_a.get("unit") if bm_a else item.get("unit", "шт.")) or ""
             a_qty     = float(item.get("qty", 1) or 1)
-            a_price   = float(item.get("_computed_kp_price") or 0)
-            a_sum     = float(item.get("_computed_kp_sum")   or 0)
+            a_price   = _prelim_of(item, bm_a) or float(item.get("_computed_kp_price") or 0)
+            a_sum     = (a_price * a_qty) if a_price else float(item.get("_computed_kp_sum") or 0)
             kp.cell(row=row, column=KP_BRAND,    value=a_brand or None)
             kp.cell(row=row, column=KP_ARTICLE,  value=a_article or None)
             kp.cell(row=row, column=KP_NAME,     value=a_name    or None)
@@ -519,8 +519,9 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
         comment  = item.get("comment",  "") or ""
         delivery = item.get("delivery", "") or ""
 
-        price_kp = float(item.get("_computed_kp_price") or 0)
-        sum_kp   = float(item.get("_computed_kp_sum")   or 0)
+        # В КП попадает предварительная цена; вычисленная Цена КП — запасной вариант
+        price_kp = _prelim_of(item, bm) or float(item.get("_computed_kp_price") or 0)
+        sum_kp   = price_kp * qty if price_kp else float(item.get("_computed_kp_sum") or 0)
 
         kp.cell(row=row, column=KP_BRAND,    value=brand    or None)
         kp.cell(row=row, column=KP_ARTICLE,  value=article  or None)
@@ -1169,6 +1170,44 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
         traceback.print_exc()
 
 
+def _prelim_of(item: dict, bm: dict = None, coeff: float = 2.5) -> float:
+    """Предварительная цена позиции для листа КП и колонки WV 4.0.
+
+    Приоритет:
+      1. _prelim_price   — посчитано в предпросмотре (учитывает настройку админа)
+      2. _user_const_price — ручной ввод пользователя
+      3. цена КазНИИСА, если есть код АГСК и сама цена
+      4. Партнёр/проект/дистр. × коэффициент
+    """
+    try:
+        v = float(item.get("_prelim_price") or 0)
+        if v:
+            return v
+    except (TypeError, ValueError):
+        pass
+    try:
+        v = float(item.get("_user_const_price") or 0)
+        if v:
+            return v
+    except (TypeError, ValueError):
+        pass
+
+    bm = bm if bm is not None else (item.get("best_match") or {})
+    # Только код товара из БД — код из PDF не является подтверждением
+    code = (bm.get("kaznisa_code") or "").strip()
+    try:
+        kaz = float(bm.get("kaznisa") or 0)
+    except (TypeError, ValueError):
+        kaz = 0.0
+    if code and kaz:
+        return kaz
+    try:
+        partner = float(bm.get("partner") or 0)
+    except (TypeError, ValueError):
+        partner = 0.0
+    return partner * coeff if partner else 0.0
+
+
 def _clean_xlsx_output(path: str) -> None:
     """Полная ZIP-очистка после openpyxl.save().
 
@@ -1413,6 +1452,17 @@ def generate_excel(
 
     ws = wb["WV 4.0"]
 
+    # Переименовываем заголовки под новую терминологию
+    try:
+        _h_g = ws.cell(row=1, column=WV_CONST_PRC)
+        if (_h_g.value or "").strip() in ("Константа цена", "Константа цены"):
+            _h_g.value = "Предварительная цена"
+        _h_l = ws.cell(row=1, column=WV_KAZNIISA)
+        if "КазНИИСА" in (_h_l.value or ""):
+            _h_l.value = "Код АГСК"
+    except Exception:
+        pass
+
     # Расширяем стили листов под фактическое количество позиций
     _extend_sheet_styles(ws, len(items), data_start=2)
     _extend_kp_styles(wb, len(items))
@@ -1468,34 +1518,22 @@ def generate_excel(
             _a_denom_k = _a_nds * _a_lo * _a_cur * _a_mg
             # G выводим из вычисленной Цены КП — она уже учитывает выбранный
             # тип расценки. kaznisa/rrts — только фолбэк.
-            _a_kp_pre = float(item.get("_computed_kp_price") or 0)
-            if _a_kp_pre and _a_denom_k:
-                _a_price = _a_kp_pre / _a_denom_k * _a_denom_k  # = _a_kp_pre
+            _a_prelim = _prelim_of(item, bm_a)
+            if _a_prelim:
                 try:
-                    ws.cell(row=row, column=WV_CONST_PRC,
-                            value=_a_kp_pre / _a_denom_k)
+                    _apc = ws.cell(row=row, column=WV_CONST_PRC,
+                                   value=round(_a_prelim, 2))
+                    _apc.number_format = "#,##0.00"
                 except (TypeError, ValueError):
                     pass
-                _a_price = _a_kp_pre
-            else:
-                _a_price = float(bm_a.get("kaznisa") or bm_a.get("rrts") or 0)
-                if _a_price and _a_denom_k:
-                    try:
-                        ws.cell(row=row, column=WV_CONST_PRC,
-                                value=_a_price / _a_denom_k)
-                    except (TypeError, ValueError):
-                        pass
+            _a_price = float(bm_a.get("kaznisa") or bm_a.get("rrts") or 0)
             # Статические цены аналога
             try:
                 _qa = float(qty_a or 1)
             except (TypeError, ValueError):
                 _qa = 1.0
-            _a_denom_s = _a_nds * _a_lo * _a_cur
-            _a_g   = (_a_price / _a_denom_k) if (_a_price and _a_denom_k) else 0.0
-            _a_seb = (float(item.get("_computed_seb_price") or 0)
-                      or (_a_g * _a_denom_s if _a_g else 0.0))
-            _a_kp  = (float(item.get("_computed_kp_price") or 0)
-                      or (_a_g * _a_denom_k if _a_g else 0.0))
+            _a_seb = float(item.get("_computed_seb_price") or 0)
+            _a_kp  = float(item.get("_computed_kp_price") or 0)
             _a_seb_s = (float(item.get("_computed_seb_sum") or 0)
                         or (_a_seb * _qa if _a_seb else 0.0))
             _a_kp_s  = (float(item.get("_computed_kp_sum") or 0)
@@ -1578,27 +1616,14 @@ def generate_excel(
         _wv_mg      = float(_wv_bc.get("margin",        1.0) or 1.0)
         _wv_denom_s = _wv_nds * _wv_lo * _wv_cur          # seb = G × denom_s
         _wv_denom_k = _wv_denom_s * _wv_mg                 # kp  = G × denom_k
+        # G — «Предварительная цена»: цена КазНИИСА при наличии кода АГСК,
+        # иначе Партнёр/проект/дистр. × коэффициент. Это готовая цена,
+        # а не база под формулы, поэтому H/J из неё больше не выводятся.
         try:
-            if item.get("_user_const_price") is not None:
-                # Константа задана напрямую — это уже и есть G
-                ws.cell(row=row, column=WV_CONST_PRC, value=float(item["_user_const_price"]))
-            elif item.get("_user_seb_price") is not None:
-                # Пользователь задал Цена себес: G = seb / denom_s
-                g = float(item["_user_seb_price"]) / _wv_denom_s if _wv_denom_s else float(item["_user_seb_price"])
-                ws.cell(row=row, column=WV_CONST_PRC, value=g)
-            elif item.get("_user_edited") and item.get("_user_price") is not None:
-                # Пользователь задал Цена КП: G = kp / denom_k
-                g = float(item["_user_price"]) / _wv_denom_k if _wv_denom_k else float(item["_user_price"])
-                ws.cell(row=row, column=WV_CONST_PRC, value=g)
-            else:
-                # Нередактированная позиция: используем Python-вычисленную Цена КП.
-                # G = kp / denom_k → формула WV 4.0 даст ROUNDUP(G×denom_k,0) = kp.
-
-                # Это устраняет расхождение маппинга rate→поле между Python и WV 4.0.
-                kp_price = float(item.get("_computed_kp_price") or 0)
-                if kp_price and _wv_denom_k:
-                    g = kp_price / _wv_denom_k
-                    ws.cell(row=row, column=WV_CONST_PRC, value=g)
+            _prelim = _prelim_of(item, bm)
+            if _prelim:
+                _pc = ws.cell(row=row, column=WV_CONST_PRC, value=round(_prelim, 2))
+                _pc.number_format = "#,##0.00"
         except (TypeError, ValueError):
             pass
 
@@ -1608,19 +1633,11 @@ def generate_excel(
             _q = float(qty or 1)
         except (TypeError, ValueError):
             _q = 1.0
-        _g_cell = ws.cell(row=row, column=WV_CONST_PRC).value
-        try:
-            _g = float(_g_cell or 0)
-        except (TypeError, ValueError):
-            _g = 0.0
-
         _seb_p = (float(item.get("_user_seb_price") or 0)
-                  or float(item.get("_computed_seb_price") or 0)
-                  or (_g * _wv_denom_s if _g else 0.0))
+                  or float(item.get("_computed_seb_price") or 0))
         _seb_s = (float(item.get("_computed_seb_sum") or 0)
                   or (_seb_p * _q if _seb_p else 0.0))
-        _kp_p  = (float(item.get("_computed_kp_price") or 0)
-                  or (_g * _wv_denom_k if _g else 0.0))
+        _kp_p  = float(item.get("_computed_kp_price") or 0)
         if item.get("_user_edited") and item.get("_user_price") is not None:
             try:
                 _kp_p = float(item["_user_price"])
@@ -1741,7 +1758,7 @@ def generate_excel_multi(
     WV_HEADERS = [
         "Бренд", "Артикул", "Наименование",
         "Ед. изм.", "Кол-во",
-        "Кратность", "Константа цена",
+        "Кратность", "Предварительная цена",
         "Цена себес", "Сумма себес",
         "Цена КП", "Сумма КП",
         "Код АГСК",

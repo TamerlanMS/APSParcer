@@ -142,7 +142,7 @@ class BrandConstant(Base):
     brand         = Column(String(100), unique=True, index=True)
     margin        = Column(Float, default=1.2)
     logistics     = Column(Float, default=1.03)
-    rate          = Column(Float, default=4.0)
+    rate          = Column(Float, default=1.0)   # 1 = «Сумма АГСК»
     currency_rate = Column(Float, default=1.0)
     nds           = Column(Float, default=1.16)
     gp            = Column(Float, default=0.8)
@@ -326,3 +326,32 @@ class AnalogDatabase(Base):
     created_at     = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at     = Column(DateTime(timezone=True), onupdate=func.now())
     is_active      = Column(Boolean, default=True, nullable=False)
+
+
+class AppSetting(Base):
+    """
+    Глобальные настройки приложения (key-value).
+    Редактируются администратором, читаются всеми клиентами.
+
+    Известные ключи:
+      prelim_price_coeff — множитель для «Предварительной цены» у позиций
+                           без кода АГСК или с пустой ценой КазНИИСА
+                           (Партнёр/проект/дистр. × коэффициент). По умолчанию 2.5.
+    """
+    __tablename__ = "app_settings"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    key         = Column(String(100), unique=True, nullable=False, index=True)
+    value       = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)
+    updated_by  = Column(String(100), nullable=True)
+    updated_at  = Column(DateTime(timezone=True), server_default=func.now(),
+                         onupdate=func.now())
+
+
+# Значения по умолчанию для app_settings
+DEFAULT_APP_SETTINGS = {
+    "prelim_price_coeff": ("2.5",
+                           "Множитель Партнёр/проект/дистр. для предварительной цены "
+                           "у позиций без цены КазНИИСА"),
+}

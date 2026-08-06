@@ -1,4 +1,8 @@
-"""Upload page -- multi-PDF upload with per-file progress."""
+"""Upload page -- загрузка PDF и Excel-спецификаций с прогрессом по файлам."""
+
+# Поддерживаемые исходники: PDF-спецификации и спецификации в Excel
+SUPPORTED_EXT = (".pdf", ".xlsx", ".xlsm")
+EXCEL_EXT     = (".xlsx", ".xlsm")
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, ttk
 import threading
@@ -153,12 +157,12 @@ class UploadPage(ctk.CTkFrame):
         pad = PAD_LG
 
         # Title
-        ctk.CTkLabel(tab, text="Мультизагрузка PDF",
+        ctk.CTkLabel(tab, text="Загрузка спецификаций",
                      font=FONT_TITLE, text_color=NAVY, anchor="w",
                      ).grid(row=0, column=0, sticky="w", padx=pad, pady=(pad, 2))
         ctk.CTkLabel(
             tab,
-            text=("Добавьте один или несколько PDF-файлов со спецификацией. "
+            text=("Добавьте PDF или Excel со спецификацией. "
                   "Файлы обрабатываются параллельно."),
             font=FONT_NORMAL, text_color=TEXT_SECONDARY, anchor="w", wraplength=700,
         ).grid(row=1, column=0, sticky="w", padx=pad, pady=(0, PAD_MD))
@@ -282,15 +286,28 @@ class UploadPage(ctk.CTkFrame):
         self._summary_lbl.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         # Submit button
+        _btn_row = ctk.CTkFrame(tab, fg_color="transparent")
+        _btn_row.grid(row=7, pady=(PAD_SM, pad))
+
         self.send_btn = ctk.CTkButton(
-            tab, text="Обработать",
+            _btn_row, text="Обработка КП",
             font=(*FONT_HEADING[:2], "bold"),
             fg_color=NAVY, hover_color=NAVY_DARK,
-            height=50, corner_radius=RADIUS_MD, width=320,
+            height=50, corner_radius=RADIUS_MD, width=260,
             state="disabled",
             command=self._send,
         )
-        self.send_btn.grid(row=7, pady=(PAD_SM, pad))
+        self.send_btn.grid(row=0, column=0, padx=(0, 12))
+
+        self.pick_btn = ctk.CTkButton(
+            _btn_row, text="Начать подбор",
+            font=(*FONT_HEADING[:2], "bold"),
+            fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=50, corner_radius=RADIUS_MD, width=260,
+            state="disabled",
+            command=self._start_selection,
+        )
+        self.pick_btn.grid(row=0, column=1)
 
     # ---------------------------------------------------------- history tab
 
@@ -398,16 +415,21 @@ class UploadPage(ctk.CTkFrame):
         raw = (event.data or "").strip()
         paths = _re.findall(r'\{([^}]+)\}|(\S+)', raw)
         paths = [a or b for a, b in paths]
-        pdf_paths = [p for p in paths if p.lower().endswith(".pdf")]
-        non_pdf   = [p for p in paths if not p.lower().endswith(".pdf")]
-        if non_pdf:
+        good = [p for p in paths if p.lower().endswith(SUPPORTED_EXT)]
+        bad  = [p for p in paths if not p.lower().endswith(SUPPORTED_EXT)]
+        if bad:
             messagebox.showwarning("", t("upload_wrong_type"))
-        if pdf_paths:
-            self._add_files(pdf_paths)
+        if good:
+            self._add_files(good)
 
     def _browse(self):
         paths = filedialog.askopenfilenames(
-            filetypes=[("PDF", "*.pdf"), ("All", "*.*")],
+            filetypes=[
+                ("Спецификации (PDF, Excel)", "*.pdf *.xlsx *.xlsm"),
+                ("PDF", "*.pdf"),
+                ("Excel", "*.xlsx *.xlsm"),
+                ("All", "*.*"),
+            ],
         )
         if paths:
             self._add_files(list(paths))
@@ -457,13 +479,15 @@ class UploadPage(ctk.CTkFrame):
             self._files_count_lbl.configure(text="Файлы не выбраны",
                                              text_color=TEXT_SECONDARY)
             self._clear_btn.grid_remove()
-            self.send_btn.configure(state="disabled", text="Обработать")
+            self.send_btn.configure(state="disabled", text="Обработка КП")
+            if hasattr(self, "pick_btn"):
+                self.pick_btn.configure(state="disabled", text="Начать подбор")
             self.drop_zone.configure(border_color="#AEB6BF", fg_color=BG_CARD)
-            self._drop_icon.configure(text="[PDF]", text_color="#AEB6BF")
-            self._drop_title.configure(text="Перетащите PDF-файлы сюда",
+            self._drop_icon.configure(text="[PDF/XLS]", text_color="#AEB6BF")
+            self._drop_title.configure(text="Перетащите файлы спецификации сюда",
                                         text_color=NAVY)
             self._drop_sub.configure(
-                text="Можно выбрать несколько файлов одновременно",
+                text="PDF или Excel (.xlsx, .xlsm) — можно выбрать несколько",
                 text_color=TEXT_SECONDARY,
             )
         else:
@@ -474,10 +498,19 @@ class UploadPage(ctk.CTkFrame):
             self._clear_btn.grid()
             self.send_btn.configure(
                 state="normal",
-                text=f"Обработать  ({n} {word})",
+                text=f"Обработка КП  ({n} {word})",
             )
+            # Подбор возможен только по спецификации в Excel
+            _n_spec = sum(1 for f in self._files
+                          if f["path"].lower().endswith(EXCEL_EXT))
+            if hasattr(self, "pick_btn"):
+                self.pick_btn.configure(
+                    state="normal" if _n_spec else "disabled",
+                    text="Начать подбор" if _n_spec <= 1
+                         else f"Начать подбор  (1 из {_n_spec})",
+                )
             self.drop_zone.configure(border_color="#27AE60", fg_color="#EAFAF1")
-            self._drop_icon.configure(text=f"{n} PDF", text_color="#27AE60")
+            self._drop_icon.configure(text=f"{n} файл(ов)", text_color="#27AE60")
             word2 = "выбран" if n == 1 else ("выбрано" if n < 5 else "выбрано")
             self._drop_title.configure(
                 text=f"{n} {word} {word2}", text_color="#27AE60",
@@ -571,6 +604,91 @@ class UploadPage(ctk.CTkFrame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _start_selection(self):
+        """«Начать подбор» — разбор Excel-спецификации с автоподбором."""
+        if self._processing or not self._files:
+            return
+
+        spec_files = [f for f in self._files
+                      if f["path"].lower().endswith(EXCEL_EXT)]
+        if not spec_files:
+            messagebox.showwarning(
+                "Нет спецификации",
+                "Режим подбора работает со спецификацией в Excel.\n"
+                "Добавьте файл .xlsx или .xlsm.",
+            )
+            return
+        if len(spec_files) > 1:
+            messagebox.showinfo(
+                "Несколько файлов",
+                "Подбор выполняется по одному файлу за раз.\n"
+                f"Будет обработан: {spec_files[0]['name']}",
+            )
+
+        segments = self._get_segments()
+        if not segments:
+            messagebox.showwarning(
+                "Сегмент не выбран",
+                "Выберите хотя бы один сегмент базы\n"
+                "(Слаботочные / Освещение / Силовые)\nперед подбором.",
+            )
+            return
+
+        spec = spec_files[0]
+        self._processing = True
+        self.send_btn.configure(state="disabled")
+        self.pick_btn.configure(state="disabled")
+        self.browse_btn.configure(state="disabled")
+
+        for w in self._prog_list.winfo_children():
+            w.destroy()
+        self._prog_rows.clear()
+        self._summary_lbl.configure(text="")
+        self._prog_section.grid()
+
+        row = _ProgressRow(self._prog_list, spec["name"])
+        row.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self._prog_rows[0] = row
+
+        def _progress_cb(pct, stage, msg):
+            self.after(0, lambda: self._on_progress(0, pct, stage, msg))
+
+        def _worker():
+            try:
+                result = self.api.parse_spec_stream(
+                    spec["path"],
+                    progress_cb=_progress_cb,
+                    segments=segments,
+                )
+                self.after(0, lambda: self._on_spec_done(result))
+            except Exception as e:
+                self.after(0, lambda: self._on_error(str(e)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_spec_done(self, result: dict):
+        """Спецификация разобрана — открываем предпросмотр в режиме подбора."""
+        self._processing = False
+        self.send_btn.configure(state="normal")
+        self.pick_btn.configure(state="normal")
+        self.browse_btn.configure(state="normal")
+
+        row = self._prog_rows.get(0)
+        if row:
+            row.mark_done(result.get("total", 0))
+
+        n = result.get("total", 0)
+        stats = result.get("stats", {}) or {}
+        self._summary_lbl.configure(
+            text=(f"Спецификация разобрана: {n} позиций  |  "
+                  f"найдено точно: {stats.get('exact', 0)}, "
+                  f"не найдено: {stats.get('not_found', 0)}")
+        )
+        try:
+            self.app.open_spec_selection(result)
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть подбор: {e}")
+
     def _on_progress(self, file_idx: int, pct: int, stage: str, msg: str):
         row = self._prog_rows.get(file_idx)
         if row:
@@ -587,6 +705,8 @@ class UploadPage(ctk.CTkFrame):
     def _on_all_done(self, results: list):
         self._processing = False
         self.send_btn.configure(state="normal")
+        if hasattr(self, "pick_btn"):
+            self.pick_btn.configure(state="normal")
         self.browse_btn.configure(state="normal")
 
         ok_results = [r for r in results if r]
@@ -609,6 +729,8 @@ class UploadPage(ctk.CTkFrame):
     def _on_error(self, error: str):
         self._processing = False
         self.send_btn.configure(state="normal")
+        if hasattr(self, "pick_btn"):
+            self.pick_btn.configure(state="normal")
         self.browse_btn.configure(state="normal")
         messagebox.showerror(t("upload_error_title"), t("upload_error_msg") + error)
 

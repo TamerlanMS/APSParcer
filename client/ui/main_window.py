@@ -590,6 +590,21 @@ class MainApp(ctk.CTk):
         )
 
 
+    def open_spec_selection(self, result: dict):
+        """Открывает предпросмотр в режиме подбора по спецификации Excel."""
+        if hasattr(self, "_tabs_visible") and self._tabs_visible:
+            self.hide_project_tabs()
+        self.preview_page.load_spec_data(result)
+        self._switch_tab(1)
+        stats = result.get("stats", {}) or {}
+        total = result.get("total", 0)
+        self.statusbar.configure(
+            text=(f"  Подбор по спецификации: {total} позиций  |  "
+                  f"найдено точно: {stats.get('exact', 0)}, "
+                  f"требует проверки: {stats.get('multiple', 0) + stats.get('fuzzy', 0)}, "
+                  f"не найдено: {stats.get('not_found', 0)}")
+        )
+
     def on_result_ready(self, result: dict):
         if hasattr(self, "_tabs_visible") and self._tabs_visible:
             self.hide_project_tabs()

@@ -95,14 +95,17 @@ class DatabasePage(ctk.CTkFrame):
             self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._vec_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._stats_frame.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._settings_frame.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._seg_info_lbl.grid_remove()
             self._refresh_stats()
             self._refresh_budget()
+            self._load_settings()
         else:
             # Менеджер: только импорт в свой сегмент, векторизация скрыта
             self._seg_frame.grid_remove()
             self._vec_frame.grid_remove()
             self._stats_frame.grid_remove()
+            self._settings_frame.grid_remove()
             seg_code = getattr(self.app.config, "user_segment", "ss")
             seg_map  = {"ss": "Слаботочные системы", "os": "Осветительные системы",
                         "sil": "Силовые системы"}
@@ -122,10 +125,12 @@ class DatabasePage(ctk.CTkFrame):
             self._seg_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._vec_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
             self._stats_frame.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 8))
+            self._settings_frame.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 8))
         else:
             self._seg_frame.grid_remove()
             self._vec_frame.grid_remove()
             self._stats_frame.grid_remove()
+            self._settings_frame.grid_remove()
 
     def _build(self):
         pad = PAD_MD
@@ -186,7 +191,19 @@ class DatabasePage(ctk.CTkFrame):
         self._refresh_count()
 
     def _build_import_tab(self):
-        tab = self.tabview.tab(t("db_tab_import"))
+        _tab_root = self.tabview.tab(t("db_tab_import"))
+        _tab_root.grid_rowconfigure(0, weight=1)
+        _tab_root.grid_columnconfigure(0, weight=1)
+
+        # Содержимое не помещается по высоте на небольших экранах — иначе grid
+        # ужимает последний блок до нулевой высоты. Кладём всё в скролл-контейнер.
+        self._import_scroll = ctk.CTkScrollableFrame(
+            _tab_root, fg_color="transparent", corner_radius=0,
+        )
+        self._import_scroll.grid(row=0, column=0, sticky="nsew")
+        self._import_scroll.grid_columnconfigure(0, weight=1)
+
+        tab = self._import_scroll
         tab.grid_columnconfigure(0, weight=1)
 
         self.db_desc = ctk.CTkLabel(
@@ -383,6 +400,53 @@ class DatabasePage(ctk.CTkFrame):
         )
         self._do_clear_btn.grid(row=1, column=2, padx=(0, 8), pady=(4, 10))
 
+        # ── Настройки ценообразования (только администратор) ─────────────
+        self._settings_frame = ctk.CTkFrame(tab, fg_color=BG_CARD,
+                                            corner_radius=RADIUS_MD)
+        self._settings_frame.grid(row=6, column=0, sticky="ew",
+                                  padx=16, pady=(0, 8))
+        self._settings_frame.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            self._settings_frame, text="⚙  Ценообразование",
+            font=FONT_NORMAL, text_color=NAVY,
+        ).grid(row=0, column=0, columnspan=4, sticky="w",
+               padx=12, pady=(10, 2))
+
+        ctk.CTkLabel(
+            self._settings_frame,
+            text=("Применяется к позициям без кода АГСК или с пустой ценой КазНИИСА:\n"
+                  "Предварительная цена = Проектная (Партнёр/проект/дистр.) × коэффициент"),
+            font=FONT_SMALL, text_color=TEXT_SECONDARY, justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 8))
+
+        ctk.CTkLabel(
+            self._settings_frame, text="Коэффициент:",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+        ).grid(row=2, column=0, padx=(12, 8), pady=(0, 10), sticky="w")
+
+        self._coeff_var = ctk.StringVar(value="2.5")
+        self._coeff_entry = ctk.CTkEntry(
+            self._settings_frame, textvariable=self._coeff_var,
+            width=100, height=28, font=FONT_SMALL, corner_radius=RADIUS_SM,
+        )
+        self._coeff_entry.grid(row=2, column=1, padx=(0, 8), pady=(0, 10), sticky="w")
+
+        self._coeff_save_btn = ctk.CTkButton(
+            self._settings_frame, text="Сохранить",
+            font=FONT_SMALL, fg_color=NAVY_LIGHT, hover_color=NAVY,
+            height=28, width=110, corner_radius=RADIUS_SM,
+            command=self._save_settings,
+        )
+        self._coeff_save_btn.grid(row=2, column=2, padx=(0, 8), pady=(0, 10))
+
+        self._settings_status = ctk.CTkLabel(
+            self._settings_frame, text="", font=FONT_SMALL,
+            text_color=TEXT_SECONDARY, anchor="w",
+        )
+        self._settings_status.grid(row=2, column=3, padx=(0, 12),
+                                   pady=(0, 10), sticky="w")
+
         # Привязываем Configure чтобы CTkTabview не «поднимал» скрытые фреймы при
         # перемещении или изменении размера окна
         tab.bind("<Configure>", self._enforce_role_layout, add="+")
@@ -467,6 +531,63 @@ class DatabasePage(ctk.CTkFrame):
         self._prev_brand_stats: dict = {}
         self._brand_sort_col   = "total"
         self._brand_sort_asc   = False
+
+    def _load_settings(self):
+        """Читает текущие настройки с сервера в фоне."""
+        def _work():
+            try:
+                data = self.api.get_app_settings() or {}
+                coeff = float(data.get("prelim_price_coeff") or 2.5)
+            except Exception as e:
+                self.after(0, lambda: self._settings_status.configure(
+                    text=f"Не удалось загрузить настройки: {e}"))
+                return
+            def _apply():
+                self._coeff_var.set(f"{coeff:g}")
+                self._settings_status.configure(text="")
+            self.after(0, _apply)
+
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _save_settings(self):
+        """Сохраняет коэффициент на сервере."""
+        raw = (self._coeff_var.get() or "").strip().replace(",", ".")
+        try:
+            coeff = float(raw)
+        except ValueError:
+            self._settings_status.configure(
+                text="Коэффициент должен быть числом", text_color="#C0392B")
+            return
+        if coeff <= 0:
+            self._settings_status.configure(
+                text="Коэффициент должен быть больше нуля", text_color="#C0392B")
+            return
+
+        self._coeff_save_btn.configure(state="disabled")
+        self._settings_status.configure(text="Сохранение...",
+                                        text_color=TEXT_SECONDARY)
+
+        def _work():
+            try:
+                self.api.update_app_settings(prelim_price_coeff=coeff)
+            except Exception as e:
+                self.after(0, lambda: (
+                    self._settings_status.configure(
+                        text=f"Ошибка сохранения: {e}", text_color="#C0392B"),
+                    self._coeff_save_btn.configure(state="normal"),
+                ))
+                return
+            self.after(0, lambda: (
+                self._settings_status.configure(
+                    text=f"Сохранено: коэффициент {coeff:g}. "
+                         f"Изменения применятся при следующей загрузке файла.",
+                    text_color=NAVY_LIGHT),
+                self._coeff_save_btn.configure(state="normal"),
+            ))
+
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
 
     def _build_logs_tab(self):
         tab = self.tabview.tab(t("db_tab_logs"))

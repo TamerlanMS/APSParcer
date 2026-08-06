@@ -177,7 +177,7 @@ STRINGS = {
         "status_ai_match": "🤖 ИИ-подбор",
 
         "col_mult":          "Кратность",
-        "col_const":         "Константа цена",
+        "col_const":         "Предварительная цена",
         "col_price_seb":     "Цена себес",
         "col_sum_seb":       "Сумма себес",
         "col_kaznisa_code":  "Код АГСК",
@@ -527,7 +527,7 @@ STRINGS = {
         "status_ai_match": "🤖 ЖИ-іріктеу",
 
         "col_mult":          "Еселік",
-        "col_const":         "Бекітілген баға",
+        "col_const":         "Алдын ала баға",
         "col_price_seb":     "Өзіндік құн",
         "col_sum_seb":       "Өзіндік құн сомасы",
         "col_kaznisa_code":  "АГСК коды",

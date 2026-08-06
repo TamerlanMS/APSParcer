@@ -9,7 +9,10 @@ from app.core.database import get_db
 from app.core.security import verify_api_key, verify_any_auth, get_current_user_optional
 from app.core.audit import write_audit
 from app.core.config import settings
-from app.models.models import Product, BrandConstant, CurrencyRate, ImportLog, Manager
+from app.models.models import (
+    Product, BrandConstant, CurrencyRate, ImportLog, Manager,
+    AppSetting, DEFAULT_APP_SETTINGS,
+)
 from app.services.db_importer import (
     import_products_from_excel, import_constants_from_excel,
     clear_segment_products, get_segment_stats,
@@ -660,6 +663,78 @@ async def brands_stats(
         brands[brand]["total"] += cnt
 
     return sorted(brands.values(), key=lambda x: x["total"], reverse=True)
+
+
+# ─── App Settings ──────────────────────────────────────────────────────────────
+
+class AppSettingsUpdate(BaseModel):
+    prelim_price_coeff: Optional[float] = None
+
+
+async def _get_setting(db: AsyncSession, key: str, default: str = "") -> str:
+    """Читает значение настройки; если записи нет — возвращает default."""
+    res = await db.execute(select(AppSetting).where(AppSetting.key == key))
+    row = res.scalar_one_or_none()
+    if row is None or row.value is None:
+        return default
+    return row.value
+
+
+@router.get("/settings")
+async def get_app_settings(
+    db: AsyncSession = Depends(get_db),
+    _auth: str = Depends(verify_any_auth),
+):
+    """Глобальные настройки приложения. Доступно всем авторизованным."""
+    raw = await _get_setting(
+        db, "prelim_price_coeff",
+        DEFAULT_APP_SETTINGS["prelim_price_coeff"][0],
+    )
+    try:
+        coeff = float(raw)
+    except (TypeError, ValueError):
+        coeff = float(DEFAULT_APP_SETTINGS["prelim_price_coeff"][0])
+    if coeff <= 0:
+        coeff = float(DEFAULT_APP_SETTINGS["prelim_price_coeff"][0])
+    return {"prelim_price_coeff": coeff}
+
+
+@router.put("/settings")
+async def update_app_settings(
+    body: AppSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Изменение глобальных настроек — только admin/superadmin."""
+    if not _is_admin_user(current_user):
+        raise HTTPException(403, "Требуются права администратора")
+
+    updated = {}
+    if body.prelim_price_coeff is not None:
+        coeff = float(body.prelim_price_coeff)
+        if coeff <= 0:
+            raise HTTPException(400, "Коэффициент должен быть больше нуля")
+
+        res = await db.execute(
+            select(AppSetting).where(AppSetting.key == "prelim_price_coeff")
+        )
+        row = res.scalar_one_or_none()
+        username = getattr(current_user, "username", None)
+        if row is None:
+            row = AppSetting(
+                key="prelim_price_coeff",
+                description=DEFAULT_APP_SETTINGS["prelim_price_coeff"][1],
+            )
+            db.add(row)
+        row.value      = str(coeff)
+        row.updated_by = username
+        updated["prelim_price_coeff"] = coeff
+
+        await db.commit()
+        logger.info("app_settings updated by %s: %s", username, updated)
+
+    return {"updated": updated}
 
 
 # ─── Import Logs ───────────────────────────────────────────────────────────────

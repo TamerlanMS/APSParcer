@@ -145,6 +145,64 @@ class ApiService:
 
     # ── PDF ───────────────────────────────────────────────────────────────────
 
+    def parse_spec_stream(self, spec_path: str,
+                          progress_cb: Optional[Callable] = None,
+                          sheet: Optional[str] = None,
+                          segments: Optional[list] = None) -> dict:
+        """POST файла спецификации в /spec/parse-stream, чтение SSE, возврат результата.
+
+        spec_path — путь к .xlsx/.xlsm у менеджера; он же передаётся серверу как
+        source_path, чтобы клиент потом записал подбор обратно в тот же файл.
+        progress_cb(pct, stage, msg) вызывается на каждое событие.
+        """
+        fname = os.path.basename(spec_path)
+        if progress_cb:
+            progress_cb(3, "upload", "Отправка спецификации на сервер...")
+
+        seg_str = ",".join(segments) if segments else "ss"
+        params = {"segments": seg_str, "source_path": spec_path}
+        if sheet:
+            params["sheet"] = sheet
+
+        _mime = ("application/vnd.openxmlformats-officedocument"
+                 ".spreadsheetml.sheet")
+        with open(spec_path, "rb") as f:
+            files = {"file": (fname, f, _mime)}
+            with requests.post(
+                f"{self._base}/api/v1/spec/parse-stream",
+                files=files,
+                headers=self._h,
+                params=params,
+                stream=True,
+                timeout=1800,
+            ) as r:
+                r.raise_for_status()
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode("utf-8", errors="replace")
+                    if not raw_line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(raw_line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if "error" in event:
+                        raise RuntimeError(event["error"])
+                    if "done" in event:
+                        result = event["result"]
+                        # Путь исходника нужен клиенту для обратной записи
+                        result.setdefault("source_path", spec_path)
+                        return result
+                    if progress_cb and "pct" in event:
+                        progress_cb(
+                            int(event["pct"]),
+                            event.get("stage", ""),
+                            event.get("msg", ""),
+                        )
+        raise RuntimeError("Сервер закрыл соединение без результата")
+
     def parse_pdf_stream(self, pdf_path: str,
                          progress_cb: Optional[Callable] = None,
                          ai_mode: bool = False,
@@ -506,6 +564,42 @@ class ApiService:
             timeout=15,
         )
         r.raise_for_status()
+        return r.json()
+
+    def get_app_settings(self) -> dict:
+        """GET /database/settings — глобальные настройки приложения.
+
+        Возвращает {"prelim_price_coeff": float}. При любой ошибке отдаёт
+        значение по умолчанию, чтобы клиент продолжал работать офлайн.
+        """
+        try:
+            r = requests.get(
+                f"{self._base}/api/v1/database/settings",
+                headers=self._h,
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json() or {}
+        except Exception:
+            return {"prelim_price_coeff": 2.5}
+        try:
+            coeff = float(data.get("prelim_price_coeff") or 2.5)
+        except (TypeError, ValueError):
+            coeff = 2.5
+        return {"prelim_price_coeff": coeff if coeff > 0 else 2.5}
+
+    def update_app_settings(self, prelim_price_coeff: float = None) -> dict:
+        """PUT /database/settings — изменение настроек (только администратор)."""
+        payload = {}
+        if prelim_price_coeff is not None:
+            payload["prelim_price_coeff"] = float(prelim_price_coeff)
+        r = requests.put(
+            f"{self._base}/api/v1/database/settings",
+            headers=self._h,
+            json=payload,
+            timeout=15,
+        )
+        self._raise_for_status(r)
         return r.json()
 
     def get_db_stats(self) -> dict:
