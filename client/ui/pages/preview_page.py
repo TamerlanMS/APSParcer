@@ -1201,6 +1201,10 @@ class PreviewPage(ctk.CTkFrame):
         self._spec_mode = False
         self._update_spec_mode_ui()
         self.save_btn.configure(state="normal")
+        # Перерисовываем: цвета строк теперь отражают результат поиска по базе,
+        # а не готовность к выгрузке в спецификацию
+        self._populate()
+        self._update_stats()
         messagebox.showinfo(
             "Режим КП",
             "Список перенесён в режим составления КП.\n"
@@ -1418,13 +1422,19 @@ class PreviewPage(ctk.CTkFrame):
         # Пересчитываем ВСЕ позиции
         self._recalc_all()
 
-    @staticmethod
-    def _is_ready_row(item: dict) -> bool:
-        """True — у позиции заполнены и артикул, и код АГСК.
+    def _is_ready_row(self, item: dict) -> bool:
+        """True — позиция готова к выгрузке в спецификацию.
 
-        Источник значения не важен: подобрано из базы или вписано вручную.
-        Такая строка готова к выгрузке и подсвечивается зелёным.
+        Готовность = заполнены и артикул, и код АГСК; источник значения
+        не важен (подобрано из базы или вписано вручную).
+
+        Работает ТОЛЬКО в режиме подбора. При составлении КП цвет строки
+        отражает результат поиска по базе: ненайденная позиция остаётся
+        красной, даже если артикул и код проставлены вручную — цену по ней
+        всё равно не рассчитать.
         """
+        if not getattr(self, "_spec_mode", False):
+            return False
         if item.get("is_heading"):
             return False
         bm = item.get("best_match") or {}
@@ -1441,6 +1451,7 @@ class PreviewPage(ctk.CTkFrame):
             return "analog"
         if item.get("has_analog_row"):
             return "orig_analog"
+        # Зелёный «готово» — только в режиме подбора (см. _is_ready_row)
         if self._is_ready_row(item):
             return "ready"
         status = item.get("status", "not_found")

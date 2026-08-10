@@ -92,17 +92,61 @@ def _clean_name_for_match(name_raw: str) -> str:
     return _SUBITEM_PREFIX_RE.sub("", name_raw.strip())
 
 
+class ProductRow:
+    """Лёгкая замена ORM-объекта Product для индекса подбора.
+
+    Хранит только поля, которые реально нужны матчеру и product_to_dict.
+    В отличие от ORM-инстанса не тянет за собой состояние SQLAlchemy и не
+    удерживается identity map сессии — на 160К товаров это разница в разы.
+    """
+
+    __slots__ = ("id", "article", "name", "unit", "brand", "segment",
+                 "kaznisa", "rrts", "mrc", "opt", "partner",
+                 "multiplicity", "kaznisa_code")
+
+    def __init__(self, id, article, name, unit, brand, segment,
+                 kaznisa, rrts, mrc, opt, partner, multiplicity, kaznisa_code):
+        self.id           = id
+        self.article      = article
+        self.name         = name
+        self.unit         = unit
+        self.brand        = brand
+        self.segment      = segment
+        self.kaznisa      = kaznisa
+        self.rrts         = rrts
+        self.mrc          = mrc
+        self.opt          = opt
+        self.partner      = partner
+        self.multiplicity = multiplicity
+        self.kaznisa_code = kaznisa_code
+
+
+# Колонки, которых достаточно матчеру и product_to_dict
+_PRODUCT_COLS = (
+    Product.id, Product.article, Product.name, Product.unit,
+    Product.brand, Product.segment, Product.kaznisa, Product.rrts,
+    Product.mrc, Product.opt, Product.partner, Product.multiplicity,
+    Product.kaznisa_code,
+)
+
+
 async def get_products_for_segments(
     db: AsyncSession,
     segments: List[str],
-) -> List[Product]:
-    """Загружает только товары нужных сегментов из БД."""
-    q = select(Product).where(Product.is_active == True)
+) -> List[ProductRow]:
+    """Загружает товары нужных сегментов — только необходимые колонки.
+
+    Возвращает ProductRow, а не ORM-объекты: полные инстансы Product для всех
+    сегментов не помещаются в память контейнера и роняют воркер.
+    """
+    q = select(*_PRODUCT_COLS).where(Product.is_active == True)
     if segments:
         from sqlalchemy import or_
         q = q.where(or_(*(Product.segment == s for s in segments)))
     result = await db.execute(q)
-    return result.scalars().all()
+    # Выборка колонок возвращает обычные кортежи — ORM-инстансы не создаются
+    # и в identity map сессии ничего не оседает.
+    return [ProductRow(*r) for r in result.all()]
 
 
 async def get_product_index(
@@ -128,6 +172,18 @@ async def get_product_index(
             return idx
 
     logger.info("product cache: MISS key=%s — loading from DB", cache_key)
+
+    # Освобождаем индексы других наборов сегментов ДО построения нового:
+    # два полных индекса одновременно не помещаются в память.
+    if _seg_cache:
+        dropped = [k for k in _seg_cache if k != cache_key]
+        for k in dropped:
+            _seg_cache.pop(k, None)
+        if dropped:
+            logger.info("product cache: освобождены индексы %s", dropped)
+        import gc
+        gc.collect()
+
     products = await get_products_for_segments(db, segs)
     idx = _ProductIndex(products)
     _seg_cache[cache_key] = (idx, now)
