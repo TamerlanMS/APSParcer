@@ -566,6 +566,53 @@ class ApiService:
         r.raise_for_status()
         return r.json()
 
+    def compare_pricelist(self, pdf_path: str,
+                          segments: Optional[list] = None,
+                          threshold: float = 5.0,
+                          progress_cb: Optional[Callable] = None) -> dict:
+        """POST прейскуранта в /database/pricelist/compare, чтение SSE.
+
+        Возвращает {"rows": [...], "stats": {...}}.
+        Разбор большого PDF занимает несколько минут, поэтому таймаут большой,
+        а прогресс приходит событиями.
+        """
+        fname = os.path.basename(pdf_path)
+        if progress_cb:
+            progress_cb(1, "upload", "Отправка прейскуранта на сервер...")
+
+        seg_str = ",".join(segments) if segments else "ss"
+        with open(pdf_path, "rb") as f:
+            files = {"file": (fname, f, "application/pdf")}
+            with requests.post(
+                f"{self._base}/api/v1/database/pricelist/compare",
+                files=files,
+                headers=self._h,
+                params={"segments": seg_str, "threshold": float(threshold)},
+                stream=True,
+                timeout=3600,
+            ) as r:
+                r.raise_for_status()
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode("utf-8", errors="replace")
+                    if not raw_line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(raw_line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if "error" in event:
+                        raise RuntimeError(event["error"])
+                    if "done" in event:
+                        return event["result"]
+                    if progress_cb and "pct" in event:
+                        progress_cb(int(event["pct"]),
+                                    event.get("stage", ""),
+                                    event.get("msg", ""))
+        raise RuntimeError("Сервер закрыл соединение без результата")
+
     def get_app_settings(self) -> dict:
         """GET /database/settings — глобальные настройки приложения.
 

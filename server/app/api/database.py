@@ -1,8 +1,11 @@
 import logging
 import asyncio
+import json
 import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.core.database import get_db
@@ -663,6 +666,134 @@ async def brands_stats(
         brands[brand]["total"] += cnt
 
     return sorted(brands.values(), key=lambda x: x["total"], reverse=True)
+
+
+# ─── Сверка с прейскурантом АГСК ───────────────────────────────────────────────
+
+MAX_PRICELIST_SIZE = 120 * 1024 * 1024        # 120 МБ
+_PRICELIST_EXECUTOR = ThreadPoolExecutor(max_workers=2,
+                                         thread_name_prefix="pricelist")
+
+
+@router.post("/pricelist/compare")
+async def pricelist_compare(
+    request: Request,
+    file: UploadFile = File(...),
+    segments: Optional[str] = Query("ss", description="Сегменты: ss / os / sil / all"),
+    threshold: float = Query(5.0, description="Порог отклонения, %"),
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Сверяет цены КазНИИСА в базе со сметными ценами прейскуранта.
+
+    Сопоставление строго по коду АГСК. Прогресс отдаётся событиями SSE,
+    последнее событие содержит строки сверки и сводку.
+    """
+    fname = file.filename or "pricelist.pdf"
+    if not fname.lower().endswith(".pdf"):
+        raise HTTPException(400, "Прейскурант должен быть в формате PDF")
+
+    content = await file.read()
+    if len(content) > MAX_PRICELIST_SIZE:
+        raise HTTPException(413, "Файл слишком большой (максимум 120 МБ)")
+
+    ip   = request.client.host if request.client else None
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    all_segs = ["ss", "os", "sil"]
+    if not segments or segments.strip().lower() == "all":
+        seg_list = all_segs
+    else:
+        seg_list = [s.strip().lower() for s in segments.split(",")
+                    if s.strip().lower() in all_segs] or ["ss"]
+
+    def _progress(pct: int, msg: str, stage: str = "parse") -> None:
+        payload = json.dumps({"pct": pct, "stage": stage, "msg": msg},
+                             ensure_ascii=False)
+        loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+    async def _process() -> None:
+        tmp_path = ""
+        try:
+            _progress(2, "Файл получен, открываем прейскурант...", "upload")
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+            os.close(tmp_fd)
+            with open(tmp_path, "wb") as fh:
+                fh.write(content)
+
+            from app.services.pricelist_parser import (
+                parse_pricelist_pdf, compare_with_products,
+            )
+            from app.services.matcher import get_products_for_segments
+
+            # Разбор PDF — блокирующий, уводим в поток.
+            # Прогресс парсера занимает шкалу 0-85%.
+            def _parse():
+                return parse_pricelist_pdf(
+                    tmp_path,
+                    progress_cb=lambda p, m: _progress(int(p * 0.85), m),
+                )
+
+            pricelist = await loop.run_in_executor(_PRICELIST_EXECUTOR, _parse)
+            if not pricelist:
+                await queue.put(json.dumps(
+                    {"error": "В файле не найдено ни одного кода АГСК с ценой. "
+                              "Проверьте, что это прейскурант КазНИИСА."},
+                    ensure_ascii=False))
+                return
+
+            _progress(88, f"Загрузка товаров сегментов: {', '.join(seg_list)}...",
+                      "load")
+            products = await get_products_for_segments(db, seg_list)
+
+            _progress(94, f"Сверка {len(products)} товаров...", "compare")
+            result = compare_with_products(pricelist, products,
+                                           threshold_pct=float(threshold))
+            result["stats"]["segments"] = seg_list
+            result["stats"]["filename"] = fname
+
+            await write_audit(db, current_user, "pricelist_compare",
+                              resource=fname,
+                              details=(f"codes={len(pricelist)}, "
+                                       f"matched={result['stats']['matched']}, "
+                                       f"over={result['stats']['over_threshold']}"),
+                              ip=ip)
+
+            _progress(99, "Готово", "done")
+            await queue.put(json.dumps({"done": True, "result": result},
+                                       ensure_ascii=False))
+
+        except Exception as exc:
+            logger.exception("pricelist compare failed: %s", exc)
+            await write_audit(db, current_user, "pricelist_compare",
+                              resource=fname, details=str(exc),
+                              ip=ip, status="error")
+            await queue.put(json.dumps({"error": f"Ошибка: {exc}"},
+                                       ensure_ascii=False))
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    asyncio.create_task(_process())
+
+    async def _events():
+        while True:
+            data = await queue.get()
+            yield "data: " + data + "\n\n"
+            parsed = json.loads(data)
+            if "done" in parsed or "error" in parsed:
+                break
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ─── App Settings ──────────────────────────────────────────────────────────────

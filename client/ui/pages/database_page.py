@@ -168,10 +168,12 @@ class DatabasePage(ctk.CTkFrame):
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=pad, pady=(0, pad))
         self.tabview.add(t("db_tab_import"))
         self.tabview.add("Бренды")
+        self.tabview.add("Прейскурант")
         self.tabview.add(t("db_tab_logs"))
 
         self._build_import_tab()
         self._build_brands_tab()
+        self._build_pricelist_tab()
         self._build_logs_tab()
 
         # Автозагрузка логов при переключении на вкладку «История»
@@ -587,6 +589,350 @@ class DatabasePage(ctk.CTkFrame):
             ))
 
         import threading
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _build_pricelist_tab(self):
+        """Сверка цен базы со сметными ценами прейскуранта АГСК."""
+        tab = self.tabview.tab("Прейскурант")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            tab,
+            text=("Сверка цен КазНИИСА из базы со сметными ценами прейскуранта.\n"
+                  "Сопоставление строго по коду АГСК; сметная цена — верхнее "
+                  "число в ячейке прейскуранта."),
+            font=FONT_NORMAL, text_color=TEXT_SECONDARY,
+            wraplength=760, anchor="w", justify="left",
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+
+        # ── Зона перетаскивания файла ────────────────────────────────────────
+        self._pl_path = ""
+        self._pl_drop = ctk.CTkFrame(
+            tab, fg_color=BG_CARD, corner_radius=RADIUS_LG,
+            border_width=2, border_color="#AEB6BF",
+        )
+        self._pl_drop.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+
+        self._pl_drop_lbl = ctk.CTkLabel(
+            self._pl_drop,
+            text="📄  Перетащите сюда прейскурант (PDF)\n\nили нажмите для выбора файла",
+            font=FONT_NORMAL, text_color=TEXT_SECONDARY, wraplength=560,
+        )
+        self._pl_drop_lbl.pack(pady=(24, 6))
+
+        self._pl_file_lbl = ctk.CTkLabel(
+            self._pl_drop, text="", font=FONT_SMALL, text_color=NAVY_LIGHT,
+        )
+        self._pl_file_lbl.pack(pady=(0, 20))
+
+        for _w in (self._pl_drop, self._pl_drop_lbl, self._pl_file_lbl):
+            _w.bind("<Button-1>", lambda e: self._pl_browse())
+            try:
+                _w.drop_target_register(DND_FILES)
+                _w.dnd_bind("<<Drop>>", self._pl_on_drop)
+            except Exception as e:
+                print(f"[DnD/Прейскурант] {_w}: {e}")
+
+        # Кнопка выбора живёт в блоке параметров ниже
+        self._pl_browse_btn = None
+
+        # ── Параметры сверки ─────────────────────────────────────────────────
+        opts = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
+        opts.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        opts.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(opts, text="Сегмент базы:", font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY
+                     ).grid(row=0, column=0, padx=(12, 8), pady=(10, 6), sticky="w")
+
+        _pl_labels = [t("seg_ss"), t("seg_os"), t("seg_sil"), "Все"]
+        self._pl_seg_var = ctk.StringVar(value=_pl_labels[0])
+        self._pl_seg_btn = ctk.CTkSegmentedButton(
+            opts, values=_pl_labels, variable=self._pl_seg_var,
+            font=FONT_SMALL,
+            selected_color="#2C3E50", selected_hover_color="#1A252F",
+            unselected_color="#5D6D7E", unselected_hover_color="#4A5568",
+            text_color="white", dynamic_resizing=False, height=32,
+        )
+        self._pl_seg_btn.grid(row=0, column=1, padx=(0, 8), pady=(10, 6), sticky="ew")
+        self._pl_seg_labels = _pl_labels
+        self._pl_seg_codes  = ["ss", "os", "sil", "all"]
+
+        ctk.CTkLabel(opts, text="Порог отклонения, %:", font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY
+                     ).grid(row=1, column=0, padx=(12, 8), pady=(0, 10), sticky="w")
+
+        self._pl_threshold_var = ctk.StringVar(value="5")
+        ctk.CTkEntry(opts, textvariable=self._pl_threshold_var, width=80,
+                     height=28, font=FONT_SMALL, corner_radius=RADIUS_SM
+                     ).grid(row=1, column=1, pady=(0, 10), sticky="w")
+
+        self._pl_run_btn = ctk.CTkButton(
+            opts, text="Сверить цены", font=(*FONT_NORMAL[:2], "bold"),
+            fg_color=NAVY, hover_color=NAVY_DARK,
+            height=36, width=170, corner_radius=RADIUS_SM,
+            state="disabled", command=self._pl_run,
+        )
+        self._pl_run_btn.grid(row=0, column=2, rowspan=2, padx=12, pady=10)
+
+        # ── Результаты ───────────────────────────────────────────────────────
+        res = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
+        res.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
+        res.grid_columnconfigure(0, weight=1)
+        res.grid_rowconfigure(1, weight=1)
+
+        self._pl_summary = ctk.CTkLabel(
+            res, text="Выберите прейскурант и запустите сверку.",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY, anchor="w",
+            justify="left",
+        )
+        self._pl_summary.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+
+        cols = ("code", "article", "name", "unit_db", "unit_pl",
+                "price_db", "price_pl", "diff", "pct")
+        heads = ("Код АГСК", "Артикул", "Наименование", "Ед. база",
+                 "Ед. прейск.", "Цена базы", "Прейскурант", "Разница", "%")
+        widths = (140, 120, 300, 80, 90, 120, 120, 110, 70)
+
+        self._pl_tree = ttk.Treeview(res, columns=cols, show="headings",
+                                     style="APS.Treeview", height=12)
+        for c, h, w in zip(cols, heads, widths):
+            self._pl_tree.heading(c, text=h)
+            self._pl_tree.column(c, width=w, stretch=(c == "name"), anchor="w")
+        self._pl_tree.tag_configure("over",  background="#F8CBAD")
+        self._pl_tree.tag_configure("units", background="#FFF2CC")
+
+        vsb = ttk.Scrollbar(res, orient="vertical", command=self._pl_tree.yview)
+        self._pl_tree.configure(yscrollcommand=vsb.set)
+        self._pl_tree.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 10))
+        vsb.grid(row=1, column=1, sticky="ns", padx=(0, 12), pady=(0, 10))
+
+        self._pl_save_btn = ctk.CTkButton(
+            res, text="💾 Сохранить отчёт как...", font=FONT_SMALL,
+            fg_color="#1E8449", hover_color="#186A3B",
+            height=32, width=230, corner_radius=RADIUS_SM,
+            state="disabled", command=self._pl_save_report,
+        )
+        self._pl_save_btn.grid(row=2, column=0, columnspan=2, sticky="e",
+                               padx=12, pady=(0, 12))
+
+        self._pl_result = None
+
+    def _pl_browse(self):
+        path = filedialog.askopenfilename(
+            title="Выберите прейскурант",
+            filetypes=[("PDF", "*.pdf"), ("Все файлы", "*.*")],
+        )
+        if path:
+            self._pl_set_file(path)
+
+    def _pl_on_drop(self, event):
+        """Файл перетащен в зону — принимаем только PDF."""
+        raw = (event.data or "").strip()
+        if raw.startswith("{"):
+            end = raw.find("}")
+            path = raw[1:end] if end > 0 else raw.strip("{}")
+        else:
+            path = raw.split()[0] if raw else ""
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            messagebox.showwarning("", "Прейскурант должен быть в формате PDF.")
+            return
+        self._pl_set_file(path)
+
+    def _pl_set_file(self, path: str):
+        self._pl_path = path
+        self._pl_file_lbl.configure(text=f"✅  {os.path.basename(path)}")
+        self._pl_drop.configure(border_color=NAVY_LIGHT, fg_color=BLUE_PALE)
+        self._pl_drop_lbl.configure(
+            text="📄  Файл выбран — нажмите «Сверить цены»\n\n"
+                 "или перетащите другой файл",
+        )
+        self._pl_run_btn.configure(state="normal")
+
+    def _pl_segments(self):
+        try:
+            idx = self._pl_seg_labels.index(self._pl_seg_var.get())
+        except ValueError:
+            idx = 0
+        code = self._pl_seg_codes[idx]
+        return ["ss", "os", "sil"] if code == "all" else [code]
+
+    def _pl_run(self):
+        if not self._pl_path:
+            return
+        try:
+            threshold = float((self._pl_threshold_var.get() or "5").replace(",", "."))
+        except ValueError:
+            messagebox.showwarning("", "Порог отклонения должен быть числом.")
+            return
+        if threshold <= 0:
+            messagebox.showwarning("", "Порог должен быть больше нуля.")
+            return
+
+        segs = self._pl_segments()
+        self._pl_run_btn.configure(state="disabled", text="Сверка...")
+        self._pl_save_btn.configure(state="disabled")
+        self._pl_tree.delete(*self._pl_tree.get_children())
+        self.progress.grid()
+        self.progress.set(0)
+        self._pl_summary.configure(
+            text="Разбор прейскуранта. На большом файле это занимает несколько минут...")
+
+        def _prog(pct, stage, msg):
+            self.after(0, lambda: (
+                self.progress.set(max(0, min(pct, 100)) / 100),
+                self.status_lbl.configure(text=msg),
+            ))
+
+        def _work():
+            try:
+                result = self.api.compare_pricelist(
+                    self._pl_path, segments=segs, threshold=threshold,
+                    progress_cb=_prog,
+                )
+            except Exception as e:
+                self.after(0, lambda: self._pl_done(None, str(e)))
+                return
+            self.after(0, lambda: self._pl_done(result, None))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _pl_done(self, result, error):
+        self.progress.grid_remove()
+        self.status_lbl.configure(text="")
+        self._pl_run_btn.configure(state="normal", text="Сверить цены")
+
+        if error:
+            self._pl_summary.configure(text=f"Ошибка: {error}")
+            messagebox.showerror("Сверка прейскуранта", error)
+            return
+
+        self._pl_result = result
+        rows  = result.get("rows", []) or []
+        st    = result.get("stats", {}) or {}
+        thr   = st.get("threshold_pct", 5)
+
+        self._pl_summary.configure(
+            text=(
+                f"Кодов в прейскуранте: {st.get('pricelist_codes', 0):,}   |   "
+                f"товаров в сегменте: {st.get('products_total', 0):,}   |   "
+                f"сопоставлено: {st.get('matched', 0):,}\n"
+                f"Отклонение больше {thr:g}%: {st.get('over_threshold', 0):,} "
+                f"(выше прейскуранта {st.get('over_higher', 0):,}, "
+                f"ниже {st.get('over_lower', 0):,})   |   "
+                f"в пределах порога: {st.get('within', 0):,}\n"
+                f"Из расхождений с разными единицами измерения: "
+                f"{st.get('unit_mismatch', 0):,} — отклонение мнимое, "
+                f"сравнивать нельзя (жёлтые строки)."
+            ).replace(",", " ")
+        )
+
+        # В таблицу — первые 500 строк, полный список уходит в отчёт
+        for r in rows[:500]:
+            tag = "over" if r.get("over") else ("units" if not r.get("same_unit") else "")
+            self._pl_tree.insert("", "end", tags=(tag,), values=(
+                r["code"], r.get("article", ""), (r.get("name_db", "") or "")[:70],
+                r.get("unit_db", ""), r.get("unit_pl", ""),
+                f"{r['price_db']:,.2f}".replace(",", " "),
+                f"{r['price_pl']:,.2f}".replace(",", " "),
+                f"{r['diff_abs']:,.2f}".replace(",", " "),
+                f"{r['diff_pct']:.1f}",
+            ))
+        if len(rows) > 500:
+            self._pl_tree.insert("", "end", values=(
+                "...", "", f"показаны первые 500 из {len(rows)}; "
+                           f"полный список — в отчёте Excel",
+                "", "", "", "", "", ""))
+
+        self._pl_save_btn.configure(state="normal" if rows else "disabled")
+
+        # Отчёт создаётся сразу рядом с прейскурантом
+        if rows:
+            self._pl_autosave_report()
+
+    def _pl_autosave_report(self):
+        """Формирует отчёт рядом с исходным прейскурантом сразу после сверки."""
+        if not self._pl_result or not self._pl_path:
+            return
+        base = os.path.splitext(os.path.basename(self._pl_path))[0]
+        out  = os.path.join(os.path.dirname(self._pl_path) or ".",
+                            f"Сверка цен АГСК — {base}.xlsx")
+
+        def _work():
+            try:
+                from services.pricelist_report import build_report
+                build_report(out, self._pl_result.get("rows", []),
+                             self._pl_result.get("stats", {}))
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.after(0, lambda: self._pl_summary.configure(
+                    text=self._pl_summary.cget("text")
+                         + f"\n\nОтчёт создать не удалось: {e}"))
+                return
+
+            def _ok():
+                self._pl_summary.configure(
+                    text=self._pl_summary.cget("text")
+                         + f"\n\nОтчёт сохранён: {out}")
+                if messagebox.askyesno(
+                    "Отчёт готов",
+                    f"Отчёт сохранён рядом с прейскурантом:\n{out}\n\nОткрыть?",
+                ):
+                    self._pl_open_file(out)
+            self.after(0, _ok)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    @staticmethod
+    def _pl_open_file(path: str):
+        """Открывает файл средствами системы."""
+        import subprocess, sys as _sys
+        try:
+            if _sys.platform.startswith("win"):
+                os.startfile(path)          # noqa: S606
+            elif _sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            messagebox.showwarning("", f"Не удалось открыть файл: {e}")
+
+    def _pl_save_report(self):
+        if not self._pl_result:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Сохранить отчёт сверки",
+            defaultextension=".xlsx",
+            initialfile="Сверка цен АГСК.xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+        )
+        if not path:
+            return
+
+        self._pl_save_btn.configure(state="disabled", text="Сохранение...")
+
+        def _work():
+            try:
+                from services.pricelist_report import build_report
+                build_report(path, self._pl_result.get("rows", []),
+                             self._pl_result.get("stats", {}))
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self.after(0, lambda: (
+                    messagebox.showerror("Ошибка сохранения", str(e)),
+                    self._pl_save_btn.configure(
+                        state="normal", text="💾 Сохранить отчёт как..."),
+                ))
+                return
+            self.after(0, lambda: (
+                self._pl_save_btn.configure(
+                    state="normal", text="💾 Сохранить отчёт как..."),
+                messagebox.showinfo("Отчёт сохранён", f"Файл: {path}"),
+            ))
+
         threading.Thread(target=_work, daemon=True).start()
 
     def _build_logs_tab(self):
