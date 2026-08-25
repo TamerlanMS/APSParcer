@@ -39,6 +39,7 @@ SEGMENT_NAMESPACE = {
     "ss":  "products_ss",   # Monday
     "os":  "products_os",   # Tuesday
     "sil": "products_sil",  # Friday
+    "gen": "products_gen",  # Общая база АГСК
 }
 SEGMENT_WEEKDAY = {
     "ss":  0,   # Monday

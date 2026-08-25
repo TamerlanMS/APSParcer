@@ -35,6 +35,16 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-admin}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-change_me_on_first_login}
+      OPENAI_API_KEY:   ${OPENAI_API_KEY:-}
+      PINECONE_API_KEY: ${PINECONE_API_KEY:-}
+      PINECONE_HOST:    ${PINECONE_HOST:-}
+      # Поставщики аналогов
+      DKC_API_KEY:   ${DKC_API_KEY:-}
+      EKF_USERNAME:  ${EKF_USERNAME:-}
+      EKF_PASSWORD:  ${EKF_PASSWORD:-}
+      EKF_COOKIE:    ${EKF_COOKIE:-}
+      EKF_API_KEY:   ${EKF_API_KEY:-}
+      IEK_COOKIE:    ${IEK_COOKIE:-}
     ports:
       - "80:8000"
     volumes:

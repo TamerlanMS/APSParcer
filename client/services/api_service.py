@@ -15,10 +15,20 @@ class ApiService:
         self.config = config
 
     def _raise_for_status(self, r) -> None:
-        """Like r.raise_for_status() but converts 403 → SessionExpiredError."""
-        if r.status_code == 403:
+        """Как r.raise_for_status(), но 401/403 → SessionExpiredError.
+
+        401 — токен истёк или сессия отозвана, 403 — не хватает прав.
+        Для пользователя это один и тот же выход: войти заново.
+        """
+        if r.status_code in (401, 403):
+            detail = ""
+            try:
+                detail = (r.json() or {}).get("detail", "")
+            except ValueError:
+                pass
             raise SessionExpiredError(
-                "Сессия истекла или недостаточно прав. Войдите в систему заново."
+                detail or "Сессия истекла или недостаточно прав. "
+                          "Войдите в систему заново."
             )
         r.raise_for_status()
 
@@ -144,6 +154,29 @@ class ApiService:
         r.raise_for_status()
 
     # ── PDF ───────────────────────────────────────────────────────────────────
+
+    def parse_estimate(self, estimate_path: str, items: Optional[list] = None) -> dict:
+        """POST сметы в /estimate/parse.
+
+        items — позиции предпросмотра; сервер вернёт их же с проставленным
+        полем estimate_price. Учитываются только листы с метками Q9, G9, РС.
+        """
+        fname = os.path.basename(estimate_path)
+        _mime = ("application/vnd.openxmlformats-officedocument"
+                 ".spreadsheetml.sheet")
+        payload = json.dumps(items or [], ensure_ascii=False)
+
+        with open(estimate_path, "rb") as f:
+            files = {"file": (fname, f, _mime)}
+            r = requests.post(
+                f"{self._base}/api/v1/estimate/parse",
+                files=files,
+                data={"items": payload},
+                headers=self._h,
+                timeout=600,
+            )
+        self._raise_for_status(r)
+        return r.json()
 
     def parse_spec_stream(self, spec_path: str,
                           progress_cb: Optional[Callable] = None,
@@ -490,7 +523,7 @@ class ApiService:
                 params={"password": password, "segment": segment},
                 timeout=180,
             )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def import_constants(self, file_path: str, password: str) -> dict:
@@ -509,7 +542,7 @@ class ApiService:
                 params={"password": password},
                 timeout=180,
             )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def pinecone_status(self) -> dict:
@@ -565,6 +598,70 @@ class ApiService:
         )
         r.raise_for_status()
         return r.json()
+
+    def parse_pricelist(self, pdf_path: str,
+                        progress_cb: Optional[Callable] = None) -> dict:
+        """POST /database/pricelist/parse — разбор прейскуранта без сверки с БД.
+
+        Возвращает {"entries": {код: {...}}, "count": N, "filename": ...}.
+        Сверка с эксель-базой делается на клиенте: файл базы лежит у
+        менеджера на диске и правится на месте.
+        """
+        fname = os.path.basename(pdf_path)
+        if progress_cb:
+            progress_cb(1, "upload", "Отправка прейскуранта на сервер...")
+
+        with open(pdf_path, "rb") as f:
+            files = {"file": (fname, f, "application/pdf")}
+            with requests.post(
+                f"{self._base}/api/v1/database/pricelist/parse",
+                files=files,
+                headers=self._h,
+                stream=True,
+                timeout=3600,
+            ) as r:
+                self._raise_for_status(r)
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    if isinstance(raw_line, bytes):
+                        raw_line = raw_line.decode("utf-8", errors="replace")
+                    if not raw_line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(raw_line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if "error" in event:
+                        raise RuntimeError(event["error"])
+                    if "done" in event:
+                        return event["result"]
+                    if progress_cb and "pct" in event:
+                        progress_cb(int(event["pct"]),
+                                    event.get("stage", ""),
+                                    event.get("msg", ""))
+        raise RuntimeError("Сервер закрыл соединение без результата")
+
+    def pricelist_to_general(self, items: list) -> dict:
+        """POST /database/pricelist/to-general — загрузка позиций в общую базу.
+
+        Отправляется частями: список может содержать десятки тысяч кодов,
+        а один огромный JSON упирается в лимиты прокси.
+        """
+        added = updated = 0
+        CHUNK = 2000
+        for i in range(0, len(items), CHUNK):
+            r = requests.post(
+                f"{self._base}/api/v1/database/pricelist/to-general",
+                json={"items": items[i:i + CHUNK]},
+                headers=self._h,
+                timeout=300,
+            )
+            self._raise_for_status(r)
+            data = r.json()
+            added   += data.get("added", 0)
+            updated += data.get("updated", 0)
+        return {"status": "ok", "added": added, "updated": updated}
 
     def compare_pricelist(self, pdf_path: str,
                           segments: Optional[list] = None,

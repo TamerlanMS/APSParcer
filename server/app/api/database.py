@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from app.core.database import get_db
 from app.core.security import verify_api_key, verify_any_auth, get_current_user_optional
 from app.core.audit import write_audit
@@ -60,6 +60,26 @@ class AdminRequest(BaseModel):
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def require_import_auth(current_user, password: str):
+    """Пропускает импорт при действующей сессии либо по паролю админа.
+
+    Клиент пароль не запрашивает и присылает пустую строку, поэтому без
+    сессии нужно сообщать именно об этом: токен живёт 12 часов, сессия
+    может быть отозвана, пользователь — деактивирован. Раньше в таких
+    случаях выдавалось «Неверный пароль администратора», что уводило
+    от настоящей причины.
+    """
+    if current_user is not None:
+        return
+    if password:
+        check_admin(password)
+        return
+    raise HTTPException(
+        401,
+        "Сессия истекла или была завершена. Выйдите и войдите в систему заново.",
+    )
+
 
 def check_admin(password: str):
     try:
@@ -197,9 +217,8 @@ async def import_products(
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
 ):
-    # Пароль нужен только если нет JWT-сессии (клиент без авторизации)
-    if current_user is None:
-        check_admin(password)
+    # Действующая сессия либо пароль админа (совместимость со старым клиентом)
+    require_import_auth(current_user, password)
     _check_excel_file(file)
 
     # Определяем сегмент для импорта
@@ -258,9 +277,8 @@ async def import_constants(
     _key: str = Depends(verify_api_key),
     current_user=Depends(get_current_user_optional),
 ):
-    # Пароль нужен только если нет JWT-сессии (клиент без авторизации)
-    if current_user is None:
-        check_admin(password)
+    # Действующая сессия либо пароль админа (совместимость со старым клиентом)
+    require_import_auth(current_user, password)
     _check_excel_file(file)
     content = await file.read()
     ip = request.client.host if request.client else None
@@ -428,7 +446,7 @@ async def clear_segment(
     """
     if not _is_admin_user(current_user):
         raise HTTPException(403, "Требуются права администратора")
-    valid = ("ss", "os", "sil")
+    valid = ("ss", "os", "sil", "gen")
     if segment not in valid:
         raise HTTPException(400, f"Недопустимый сегмент. Доступны: {', '.join(valid)}")
 
@@ -516,7 +534,7 @@ async def search_products(
     stmt = select(Product).where(Product.is_active == True, where_clause)
 
     # Фильтр по сегменту
-    if seg and seg in ("ss", "os", "sil"):
+    if seg and seg in ("ss", "os", "sil", "gen"):
         stmt = stmt.where(Product.segment == seg)
 
     if order_extra:
@@ -651,7 +669,7 @@ async def brands_stats(
         .group_by(Product.brand, Product.segment)
         .order_by(Product.brand)
     )
-    if segment and segment in ("ss", "os", "sil"):
+    if segment and segment in ("ss", "os", "sil", "gen"):
         stmt = stmt.where(Product.segment == segment)
 
     result = await db.execute(stmt)
@@ -660,8 +678,9 @@ async def brands_stats(
     brands: dict = {}
     for brand, seg, cnt in rows:
         if brand not in brands:
-            brands[brand] = {"brand": brand, "ss": 0, "os": 0, "sil": 0, "total": 0}
-        if seg in ("ss", "os", "sil"):
+            brands[brand] = {"brand": brand, "ss": 0, "os": 0,
+                             "sil": 0, "gen": 0, "total": 0}
+        if seg in ("ss", "os", "sil", "gen"):
             brands[brand][seg] = cnt
         brands[brand]["total"] += cnt
 
@@ -702,7 +721,7 @@ async def pricelist_compare(
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
-    all_segs = ["ss", "os", "sil"]
+    all_segs = ["ss", "os", "sil", "gen"]
     if not segments or segments.strip().lower() == "all":
         seg_list = all_segs
     else:
@@ -794,6 +813,171 @@ async def pricelist_compare(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/pricelist/parse")
+async def pricelist_parse(
+    request: Request,
+    file: UploadFile = File(...),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Разбирает прейскурант и отдаёт позиции клиенту.
+
+    Отличие от /pricelist/compare: база из БД не читается — сверка идёт с
+    эксель-файлом на стороне клиента. Прогресс тот же, событиями SSE.
+    """
+    fname = file.filename or "pricelist.pdf"
+    if not fname.lower().endswith(".pdf"):
+        raise HTTPException(400, "Прейскурант должен быть в формате PDF")
+
+    content = await file.read()
+    if len(content) > MAX_PRICELIST_SIZE:
+        raise HTTPException(413, "Файл слишком большой (максимум 120 МБ)")
+
+    loop  = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _progress(pct: int, msg: str, stage: str = "parse") -> None:
+        queue.put_nowait(json.dumps({"pct": pct, "stage": stage, "msg": msg},
+                                    ensure_ascii=False))
+
+    def _progress_ts(pct: int, msg: str) -> None:
+        loop.call_soon_threadsafe(_progress, pct, msg)
+
+    async def _process() -> None:
+        tmp_path = ""
+        try:
+            _progress(2, "Файл получен, открываем прейскурант...", "upload")
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+            os.close(tmp_fd)
+            with open(tmp_path, "wb") as fh:
+                fh.write(content)
+
+            from app.services.pricelist_parser import parse_pricelist_pdf
+
+            def _parse():
+                return parse_pricelist_pdf(
+                    tmp_path,
+                    progress_cb=lambda p, m: _progress_ts(int(p * 0.97), m),
+                )
+
+            entries = await loop.run_in_executor(_PRICELIST_EXECUTOR, _parse)
+            if not entries:
+                await queue.put(json.dumps(
+                    {"error": "В файле не найдено ни одного кода АГСК с ценой. "
+                              "Проверьте, что это прейскурант КазНИИСА."},
+                    ensure_ascii=False))
+                return
+
+            _progress(99, f"Разобрано позиций: {len(entries):,}", "done")
+            await queue.put(json.dumps(
+                {"done": True,
+                 "result": {"entries": entries, "count": len(entries),
+                            "filename": fname}},
+                ensure_ascii=False))
+        except Exception as exc:
+            logger.exception("pricelist parse failed: %s", exc)
+            await queue.put(json.dumps({"error": f"Ошибка: {exc}"},
+                                       ensure_ascii=False))
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    asyncio.create_task(_process())
+
+    async def _events():
+        while True:
+            data = await queue.get()
+            yield "data: " + data + "\n\n"
+            parsed = json.loads(data)
+            if "done" in parsed or "error" in parsed:
+                break
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class GeneralItem(BaseModel):
+    """Позиция прейскуранта, не найденная ни в одной сегментной базе."""
+    kaznisa_code: str
+    name:         str = ""
+    unit:         str = "шт."
+    kaznisa:      Optional[float] = None
+
+
+class GeneralUpload(BaseModel):
+    items: List[GeneralItem]
+
+
+@router.post("/pricelist/to-general")
+async def pricelist_to_general(
+    request: Request,
+    payload: GeneralUpload,
+    db: AsyncSession = Depends(get_db),
+    _key: str = Depends(verify_api_key),
+    current_user=Depends(get_current_user_optional),
+):
+    """Кладёт несовпавшие позиции прейскуранта в общую базу (сегмент gen).
+
+    Артикул остаётся пустым — у прейскуранта его нет. Уникальность держится
+    на коде АГСК, поэтому повторный прогон обновляет цену существующей
+    записи вместо создания дубля.
+    """
+    require_import_auth(current_user, "")
+
+    items = [i for i in payload.items if (i.kaznisa_code or "").strip()]
+    if not items:
+        return {"status": "ok", "added": 0, "updated": 0}
+
+    codes = {i.kaznisa_code.strip() for i in items}
+    existing = await db.execute(
+        select(Product.kaznisa_code, Product.id)
+        .where(Product.segment == "gen", Product.kaznisa_code.in_(codes))
+    )
+    by_code = {row[0]: row[1] for row in existing.fetchall() if row[0]}
+
+    added = updated = 0
+    seen: set = set()
+    for it in items:
+        code = it.kaznisa_code.strip()
+        if code in seen:                 # дубль внутри одной выгрузки
+            continue
+        seen.add(code)
+        data = dict(
+            name=(it.name or "").strip() or None,
+            unit=(it.unit or "шт.").strip(),
+            kaznisa=it.kaznisa,
+            kaznisa_code=code,
+            segment="gen",
+            is_active=True,
+        )
+        if code in by_code:
+            await db.execute(
+                update(Product).where(Product.id == by_code[code]).values(**data)
+            )
+            updated += 1
+        else:
+            db.add(Product(article=None, **data))
+            added += 1
+
+    await db.commit()
+
+    ip = request.client.host if request.client else None
+    await write_audit(db, current_user, "pricelist_to_general",
+                      resource="Общая база (АГСК)",
+                      details=f"added={added}, updated={updated}", ip=ip)
+
+    invalidate_product_cache()
+    logger.info("pricelist_to_general: added=%d updated=%d by %s",
+                added, updated, getattr(current_user, "username", "?"))
+    return {"status": "ok", "added": added, "updated": updated}
 
 
 # ─── App Settings ──────────────────────────────────────────────────────────────

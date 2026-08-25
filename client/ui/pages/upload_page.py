@@ -167,36 +167,102 @@ class UploadPage(ctk.CTkFrame):
             font=FONT_NORMAL, text_color=TEXT_SECONDARY, anchor="w", wraplength=700,
         ).grid(row=1, column=0, sticky="w", padx=pad, pady=(0, PAD_MD))
 
-        # Drop zone
+        # ── Две зоны перетаскивания: спецификация и смета ────────────────
+        zones = ctk.CTkFrame(tab, fg_color="transparent")
+        zones.grid(row=2, column=0, sticky="ew", padx=pad, pady=(0, 6))
+        # Спецификация занимает ~70% ширины, смета ~30%.
+        # uniform не задаём: он выравнивает колонки по одной ширине.
+        zones.grid_columnconfigure(0, weight=7)
+        zones.grid_columnconfigure(1, weight=3)
+
+        # Слева — спецификация
         self.drop_zone = ctk.CTkFrame(
-            tab, fg_color=BG_CARD, corner_radius=RADIUS_LG,
+            zones, fg_color=BG_CARD, corner_radius=RADIUS_LG,
             border_width=2, border_color="#AEB6BF",
         )
-        self.drop_zone.grid(row=2, column=0, sticky="ew", padx=pad, pady=(0, 6))
+        self.drop_zone.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.drop_zone.grid_columnconfigure(0, weight=1)
 
-        self._drop_icon  = ctk.CTkLabel(self.drop_zone, text="[PDF]",
-                                         font=("Calibri", 28, "bold"), text_color="#AEB6BF")
-        self._drop_icon.grid(row=0, pady=(20, 4))
+        self._drop_icon  = ctk.CTkLabel(self.drop_zone, text="[PDF/XLS]",
+                                         font=("Calibri", 24, "bold"),
+                                         text_color="#AEB6BF")
+        self._drop_icon.grid(row=0, pady=(18, 4))
         self._drop_title = ctk.CTkLabel(self.drop_zone,
-                                         text="Перетащите PDF-файлы сюда",
+                                         text="Спецификация",
                                          font=FONT_HEADING, text_color=NAVY)
         self._drop_title.grid(row=1)
-        self._drop_sub   = ctk.CTkLabel(self.drop_zone,
-                                         text="Можно выбрать несколько файлов одновременно",
-                                         font=FONT_SMALL, text_color=TEXT_SECONDARY)
-        self._drop_sub.grid(row=2, pady=(2, 20))
-        self._bind_dnd()
+        self._drop_sub   = ctk.CTkLabel(
+            self.drop_zone,
+            text="Перетащите PDF или Excel — можно несколько",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY, wraplength=320,
+        )
+        self._drop_sub.grid(row=2, pady=(2, 8))
 
-        # Browse button
         self.browse_btn = ctk.CTkButton(
-            tab, text="Добавить файлы",
+            self.drop_zone, text="Выбрать файлы",
             font=(*FONT_NORMAL[:2], "bold"),
             fg_color=NAVY_LIGHT, hover_color=NAVY,
-            height=40, corner_radius=RADIUS_MD, width=200,
+            height=36, corner_radius=RADIUS_MD, width=190,
             command=self._browse,
         )
-        self.browse_btn.grid(row=3, pady=(0, PAD_SM))
+        self.browse_btn.grid(row=3, pady=(0, 6))
+
+        self.zone_clear_btn = ctk.CTkButton(
+            self.drop_zone, text="✕ Очистить список", font=FONT_SMALL,
+            fg_color="#95A5A6", hover_color="#7F8C8D",
+            height=26, width=160, corner_radius=RADIUS_SM,
+            command=self._clear_all,
+        )
+        self._bind_dnd()
+
+        # Справа — сметный лист
+        self._estimate_path = ""
+        self.est_zone = ctk.CTkFrame(
+            zones, fg_color=BG_CARD, corner_radius=RADIUS_LG,
+            border_width=2, border_color="#AEB6BF",
+        )
+        self.est_zone.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self.est_zone.grid_columnconfigure(0, weight=1)
+
+        self._est_icon = ctk.CTkLabel(self.est_zone, text="[XLS]",
+                                       font=("Calibri", 24, "bold"),
+                                       text_color="#AEB6BF")
+        self._est_icon.grid(row=0, pady=(18, 4))
+        # wraplength под узкую колонку: длинное имя файла не должно её растягивать
+        self._est_title = ctk.CTkLabel(self.est_zone, text="Сметный лист",
+                                        font=FONT_HEADING, text_color=NAVY,
+                                        wraplength=210)
+        self._est_title.grid(row=1, padx=8)
+        self._est_sub = ctk.CTkLabel(
+            self.est_zone,
+            text="Перетащите смету генподрядчика — необязательно",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY, wraplength=210,
+        )
+        self._est_sub.grid(row=2, pady=(2, 8))
+
+        self._est_browse_btn = ctk.CTkButton(
+            self.est_zone, text="Выбрать файл",
+            font=(*FONT_NORMAL[:2], "bold"),
+            fg_color="#7D6608", hover_color="#5B4A06",
+            height=36, corner_radius=RADIUS_MD, width=170,
+            command=self._pick_estimate,
+        )
+        self._est_browse_btn.grid(row=3, pady=(0, 18))
+
+        self._est_clear_btn = ctk.CTkButton(
+            self.est_zone, text="✕ Убрать смету", font=FONT_SMALL,
+            fg_color="#95A5A6", hover_color="#7F8C8D",
+            height=26, width=140, corner_radius=RADIUS_SM,
+            command=self._clear_estimate,
+        )
+
+        for _w in (self.est_zone, self._est_icon, self._est_title, self._est_sub):
+            _w.bind("<Button-1>", lambda e: self._pick_estimate())
+            try:
+                _w.drop_target_register(DND_FILES)
+                _w.dnd_bind("<<Drop>>", self._on_estimate_drop)
+            except Exception as e:
+                print(f"[DnD/Смета] {_w}: {e}")
 
         # File list section
         list_outer = ctk.CTkFrame(tab, fg_color="transparent")
@@ -479,15 +545,15 @@ class UploadPage(ctk.CTkFrame):
             self._files_count_lbl.configure(text="Файлы не выбраны",
                                              text_color=TEXT_SECONDARY)
             self._clear_btn.grid_remove()
+            self.zone_clear_btn.grid_remove()
             self.send_btn.configure(state="disabled", text="Обработка КП")
             if hasattr(self, "pick_btn"):
                 self.pick_btn.configure(state="disabled", text="Начать подбор")
             self.drop_zone.configure(border_color="#AEB6BF", fg_color=BG_CARD)
             self._drop_icon.configure(text="[PDF/XLS]", text_color="#AEB6BF")
-            self._drop_title.configure(text="Перетащите файлы спецификации сюда",
-                                        text_color=NAVY)
+            self._drop_title.configure(text="Спецификация", text_color=NAVY)
             self._drop_sub.configure(
-                text="PDF или Excel (.xlsx, .xlsm) — можно выбрать несколько",
+                text="Перетащите PDF или Excel — можно несколько",
                 text_color=TEXT_SECONDARY,
             )
         else:
@@ -496,6 +562,7 @@ class UploadPage(ctk.CTkFrame):
                 text=f"Выбрано: {n} {word}", text_color=NAVY,
             )
             self._clear_btn.grid()
+            self.zone_clear_btn.grid(row=4, pady=(0, 16))
             self.send_btn.configure(
                 state="normal",
                 text=f"Обработка КП  ({n} {word})",
@@ -516,7 +583,7 @@ class UploadPage(ctk.CTkFrame):
                 text=f"{n} {word} {word2}", text_color="#27AE60",
             )
             self._drop_sub.configure(
-                text="Перетащите ещё файлы или нажмите «Добавить файлы»",
+                text="Перетащите ещё файлы или нажмите «Выбрать файлы»",
                 text_color=TEXT_SECONDARY,
             )
 
@@ -566,6 +633,7 @@ class UploadPage(ctk.CTkFrame):
         self._processing = True
         self.send_btn.configure(state="disabled")
         self.browse_btn.configure(state="disabled")
+        self._est_browse_btn.configure(state="disabled")
 
         # Build progress UI
         for w in self._prog_list.winfo_children():
@@ -604,6 +672,50 @@ class UploadPage(ctk.CTkFrame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _on_estimate_drop(self, event):
+        """Файл брошен в зону сметы — принимаем только Excel."""
+        raw = (event.data or "").strip()
+        if raw.startswith("{"):
+            end = raw.find("}")
+            path = raw[1:end] if end > 0 else raw.strip("{}")
+        else:
+            path = raw.split()[0] if raw else ""
+        if not path:
+            return
+        if not path.lower().endswith((".xlsx", ".xlsm", ".xls")):
+            messagebox.showwarning(
+                "", "Сметный лист должен быть в формате Excel (.xlsx, .xlsm, .xls).")
+            return
+        self._set_estimate(path)
+
+    def _set_estimate(self, path: str):
+        self._estimate_path = path
+        self._est_icon.configure(text="✅", text_color="#27AE60")
+        self._est_title.configure(text=os.path.basename(path), text_color=NAVY)
+        self._est_sub.configure(text="Смета прикреплена — применится после обработки",
+                                text_color="#27AE60")
+        self.est_zone.configure(border_color="#27AE60", fg_color="#EAFAF1")
+        self._est_clear_btn.grid(row=4, pady=(0, 14))
+
+    def _pick_estimate(self):
+        """Выбор сметного листа, который применится после обработки."""
+        path = filedialog.askopenfilename(
+            title="Выберите сметный лист",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("Все файлы", "*.*")],
+        )
+        if path:
+            self._set_estimate(path)
+
+    def _clear_estimate(self):
+        self._estimate_path = ""
+        self._est_icon.configure(text="[XLS]", text_color="#AEB6BF")
+        self._est_title.configure(text="Сметный лист", text_color=NAVY)
+        self._est_sub.configure(
+            text="Перетащите смету генподрядчика — необязательно",
+            text_color=TEXT_SECONDARY)
+        self.est_zone.configure(border_color="#AEB6BF", fg_color=BG_CARD)
+        self._est_clear_btn.grid_remove()
+
     def _start_selection(self):
         """«Начать подбор» — разбор Excel-спецификации с автоподбором."""
         if self._processing or not self._files:
@@ -639,6 +751,7 @@ class UploadPage(ctk.CTkFrame):
         self.send_btn.configure(state="disabled")
         self.pick_btn.configure(state="disabled")
         self.browse_btn.configure(state="disabled")
+        self._est_browse_btn.configure(state="disabled")
 
         for w in self._prog_list.winfo_children():
             w.destroy()
@@ -672,6 +785,7 @@ class UploadPage(ctk.CTkFrame):
         self.send_btn.configure(state="normal")
         self.pick_btn.configure(state="normal")
         self.browse_btn.configure(state="normal")
+        self._est_browse_btn.configure(state="normal")
 
         row = self._prog_rows.get(0)
         if row:
@@ -685,6 +799,7 @@ class UploadPage(ctk.CTkFrame):
                   f"не найдено: {stats.get('not_found', 0)}")
         )
         try:
+            result["estimate_path"] = self._estimate_path
             self.app.open_spec_selection(result)
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось открыть подбор: {e}")
@@ -708,6 +823,7 @@ class UploadPage(ctk.CTkFrame):
         if hasattr(self, "pick_btn"):
             self.pick_btn.configure(state="normal")
         self.browse_btn.configure(state="normal")
+        self._est_browse_btn.configure(state="normal")
 
         ok_results = [r for r in results if r]
         total_items = sum(r.get("total", 0) for r in ok_results)
@@ -723,6 +839,9 @@ class UploadPage(ctk.CTkFrame):
             messagebox.showerror("Ошибка", "Ни один файл не был успешно обработан.")
             return
 
+        if self._estimate_path and ok_results:
+            ok_results[0]["estimate_path"] = self._estimate_path
+
         self.app.on_multi_result_ready(ok_results)
         self.after(1500, self._load_history)
 
@@ -732,16 +851,23 @@ class UploadPage(ctk.CTkFrame):
         if hasattr(self, "pick_btn"):
             self.pick_btn.configure(state="normal")
         self.browse_btn.configure(state="normal")
+        self._est_browse_btn.configure(state="normal")
         messagebox.showerror(t("upload_error_title"), t("upload_error_msg") + error)
 
     # ---------------------------------------------------------- reset / lang
 
     def reset(self):
+        """Полный сброс страницы: файлы, смета, прогресс."""
         self._files.clear()
         self._processing = False
         self._rebuild_file_list()
         self._prog_section.grid_remove()
         self._summary_lbl.configure(text="")
+        for w in self._prog_list.winfo_children():
+            w.destroy()
+        self._prog_rows.clear()
+        if hasattr(self, "_est_browse_btn"):
+            self._clear_estimate()
 
     def refresh_lang(self):
         self.hist_title_lbl.configure(text=t("upload_tab_history"))

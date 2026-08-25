@@ -26,6 +26,14 @@ C_MANAGER  = "#EDE7F6"   # сиреневый — подобрано из ист
 C_HEADING  = "#D6EAF8"   # голубой — строка-заголовок раздела (is_heading=True)
 C_ANALOG      = "#B2EBF2"   # циановый — строка аналога (is_analog_row=True)
 C_READY       = "#A9DFBF"   # насыщенный зелёный — есть и артикул, и код АГСК
+C_EST_BELOW   = "#A9DFBF"   # наша цена ниже сметной — хорошо
+C_EST_ABOVE   = "#F5B7B1"   # наша цена выше сметной — плохо
+C_ANOMALY_FG  = "#B03A2E"   # текст строки с несопоставимыми ценами
+
+# Во сколько раз цена может законно отличаться от себестоимости.
+# Реальная наценка — 1.2–3×; всё выше означает разные единицы измерения
+# либо ошибку импорта прайса, а не бизнес-решение.
+ANOMALY_RATIO = 20.0
 C_ORIG_ANALOG = "#ECEFF1"   # светло-серый — оригинал, замещённый аналогом
 
 
@@ -44,17 +52,21 @@ COLS = [
     ("const",      "col_const"),        # 9 — Предварительная цена, редактируется
     ("kp",         "col_price_kp"),     # 10 — Цена КП, редактируется
     ("kp_sum",     "col_sum_kp"),       # 11 — Сумма КП
-    ("kaznisa",    "col_kaznisa_code"), # 12 — Код АГСК
+    ("est_price",  "col_est_price"),    # 12 — Сметная цена, редактируется
+    ("est_sum",    "col_est_sum"),      # 13 — Сметная сумма
+    ("kaznisa",    "col_kaznisa_code"), # 14 — Код АГСК
     ("comment",    "col_comment"),      # 13 — Комментарии (редактируется)
     ("delivery",   "col_delivery"),     # 14 — Срок поставки (редактируется)
     ("status",     "col_status"),       # 15 — Статус
     ("method",     "col_method"),       # 16 — Метод подбора
     ("analog_art", "col_analog"),        # 17 — Аналог из базы аналогов
 ]
-COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 100, 150, 90, 100, 110, 150, 110, 100, 130, 120]
-EDITABLE_COLS = {2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}  # Артикул, Кол-во, Кратн., цены, Код АГСК, Коммент., Срок
-C_ARTICLE  = 2                                   # индекс колонки «Артикул (БД)»
-C_KAZ_CODE = 12                                  # индекс колонки «Код АГСК»
+COL_WIDTHS    = [40, 90, 170, 230, 50, 60, 60, 90, 100, 150, 90, 100, 120, 120, 110, 150, 110, 100, 130, 120]
+EDITABLE_COLS = {2, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16}  # Артикул, Кол-во, Кратн., цены, Сметная цена, Код АГСК, Коммент., Срок
+C_ARTICLE   = 2                                  # индекс колонки «Артикул (БД)»
+C_EST_PRICE = 12                                 # «Сметная цена» — можно вписать вручную
+C_EST_SUM   = 13                                 # «Сметная сумма» — считается
+C_KAZ_CODE  = 14                                 # индекс колонки «Код АГСК»
 # Индексы колонок ценового блока
 C_SEB, C_SEB_SUM, C_PRELIM, C_KP, C_KP_SUM = 7, 8, 9, 10, 11
 
@@ -638,6 +650,8 @@ class PreviewPage(ctk.CTkFrame):
         self.constants   = {}       # raw из API
         self.brand_consts = {}      # {brand: {margin, logistics, rate, currency_rate, nds, gp}}
         self._prelim_coeff = DEFAULT_PRELIM_COEFF   # множитель Партнёр→предварительная цена
+        self._estimate_path = ""    # путь прикреплённой сметы
+        self._estimate_stats = {}   # статистика разбора и сопоставления
         self._spec_mode   = False   # True — работаем со спецификацией (режим подбора)
         self._spec_path   = ""      # путь исходного файла спецификации
         self._spec_sheet  = ""      # лист со спецификацией
@@ -707,13 +721,13 @@ class PreviewPage(ctk.CTkFrame):
         )
         self.reset_btn.grid(row=0, column=4, padx=(8, 4))
 
-        self.ai_btn = ctk.CTkButton(
-            top, text=t("preview_ai_rematch_btn"), font=FONT_SMALL,
+        self.est_btn = ctk.CTkButton(
+            top, text="📋 Сметные цены", font=FONT_SMALL,
             fg_color="#17A589", hover_color="#148F77", text_color="white",
             height=36, width=150, corner_radius=RADIUS_SM,
-            command=self._rematch_ai_all,
+            command=self._apply_estimate_prices,
         )
-        self.ai_btn.grid(row=0, column=5, padx=(0, 4))
+        self.est_btn.grid(row=0, column=5, padx=(0, 4))
 
         self.save_btn = ctk.CTkButton(
             top, text=t("preview_save"),
@@ -836,6 +850,10 @@ class PreviewPage(ctk.CTkFrame):
                                 font=("Calibri", 10, "bold"))
         self.tree.tag_configure("analog",       background=C_ANALOG)
         self.tree.tag_configure("ready",        background=C_READY)
+        self.tree.tag_configure("est_below",    background=C_EST_BELOW)
+        self.tree.tag_configure("est_above",    background=C_EST_ABOVE)
+        # Только цвет текста: фон остаётся от основного тега строки
+        self.tree.tag_configure("anomaly",      foreground=C_ANOMALY_FG)
         self.tree.tag_configure("orig_analog",  background=C_ORIG_ANALOG,
                                 font=("Calibri", 10, "italic"))
 
@@ -865,11 +883,6 @@ class PreviewPage(ctk.CTkFrame):
         )
         self._ctx_menu.add_separator()
         self._ctx_menu.add_command(
-            label=t("ctx_ai_rematch"),
-            command=self._rematch_ai_selected,
-        )
-        self._ctx_menu.add_separator()
-        self._ctx_menu.add_command(
             label=t("preview_btn_confirm_tip"),
             command=self._confirm_selected_row,
         )
@@ -895,10 +908,37 @@ class PreviewPage(ctk.CTkFrame):
         self.tree.bind("<Button-3>", self._show_ctx_menu)
         self.tree.bind("<Delete>",   lambda e: self._delete_selected())
 
+        # ── Итог сравнения со сметой (появляется вместе со сметными ценами) ──
+        self.est_bar = ctk.CTkFrame(self, fg_color="#FDF6E3",
+                                    corner_radius=RADIUS_MD,
+                                    border_width=2, border_color="#7D6608")
+        self.est_bar.grid(row=3, column=0, sticky="ew", padx=pad, pady=(0, 6))
+        self.est_bar.grid_columnconfigure(1, weight=1)
+        self.est_bar.grid_remove()
+
+        self.est_verdict_lbl = ctk.CTkLabel(
+            self.est_bar, text="", font=(*FONT_HEADING[:2], "bold"),
+            text_color=NAVY, width=210, anchor="w",
+        )
+        self.est_verdict_lbl.grid(row=0, column=0, rowspan=2,
+                                  padx=(16, 12), pady=10, sticky="w")
+
+        self.est_main_lbl = ctk.CTkLabel(
+            self.est_bar, text="", font=(*FONT_NORMAL[:2], "bold"),
+            text_color=NAVY, anchor="w", justify="left",
+        )
+        self.est_main_lbl.grid(row=0, column=1, sticky="w", pady=(10, 0))
+
+        self.est_detail_lbl = ctk.CTkLabel(
+            self.est_bar, text="", font=FONT_SMALL,
+            text_color=TEXT_SECONDARY, anchor="w", justify="left",
+        )
+        self.est_detail_lbl.grid(row=1, column=1, sticky="w", pady=(2, 10))
+
         # Панель «Константы по бренду»
         cf = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=RADIUS_MD,
                           border_width=1, border_color="#E0E0E0")
-        cf.grid(row=3, column=0, sticky="ew", padx=pad, pady=(0, pad))
+        cf.grid(row=4, column=0, sticky="ew", padx=pad, pady=(0, pad))
 
         self.const_title = ctk.CTkLabel(cf, text=t("preview_constants_brand"),
                                          font=(*FONT_NORMAL[:2], "bold"),
@@ -973,6 +1013,16 @@ class PreviewPage(ctk.CTkFrame):
             command=self._spec_to_kp,
         )
 
+        self.attach_est_btn = ctk.CTkButton(
+            cf, text="📎 Прикрепить сметный лист",
+            font=FONT_SMALL,
+            fg_color="#7D6608", hover_color="#5B4A06",
+            height=32, width=230, corner_radius=RADIUS_SM,
+            command=self._attach_estimate,
+        )
+        self.attach_est_btn.grid(row=3, column=13, padx=(8, 16),
+                                 pady=(0, 10), sticky="e")
+
         # Подсказка
         self.hint_lbl = ctk.CTkLabel(cf, text=t("preview_rate_hint"),
                                       font=FONT_SMALL, text_color=TEXT_SECONDARY)
@@ -997,8 +1047,21 @@ class PreviewPage(ctk.CTkFrame):
         self.save_btn.configure(state="disabled")
         self.stat_lbl.configure(text="")
         self._no_data_lbl.lift()
+        # Сметный лист тоже сбрасываем — он относился к прошлому проекту
+        self._estimate_path  = ""
+        self._estimate_stats = {}
+        if hasattr(self, "est_bar"):
+            self.est_bar.grid_remove()
+
         if hasattr(self.app, "hide_project_tabs"):
             self.app.hide_project_tabs()
+
+        # Возвращаемся на загрузку с чистым списком файлов
+        try:
+            self.app.upload_page.reset()
+        except Exception as e:
+            print(f"[Сброс] upload_page.reset: {e}")
+
         self.app._switch_tab(0)
 
     # ── Данные ───────────────────────────────────────────────────────────────
@@ -1087,6 +1150,7 @@ class PreviewPage(ctk.CTkFrame):
         self._update_stats()
         self.save_btn.configure(state="normal")
         self._no_data_lbl.lower()
+
         self.after(200, self._refresh_analog_col)
 
         # Sync active tab style in nav
@@ -1351,6 +1415,11 @@ class PreviewPage(ctk.CTkFrame):
         self._update_stats()
         self.save_btn.configure(state="normal")
         self._no_data_lbl.lower()
+
+        # Смета, прикреплённая на странице загрузки, применяется сама
+        _est = (result or {}).get("estimate_path") or ""
+        if _est and os.path.isfile(_est):
+            self.after(400, lambda p=_est: self._attach_estimate(p))
         self.after(200, self._refresh_analog_col)
 
         # Diagnostic: check if matched products have price data in DB
@@ -1443,6 +1512,37 @@ class PreviewPage(ctk.CTkFrame):
                    or item.get("kaznisa_code_raw") or "").strip()
         return bool(article and code)
 
+    def _price_anomaly(self, item: dict) -> str:
+        """Причина, по которой ценам позиции нельзя доверять, либо "".
+
+        Проверяются три несоответствия порядка величин: цена против
+        себестоимости, сметная цена против нашей и продажа ниже закупки.
+        """
+        if item.get("is_heading") or item.get("has_analog_row"):
+            return ""
+
+        seb, _ss, kp, _ks = self._compute_kp(item)
+        est = self._estimate_price(item)
+
+        if seb and kp:
+            if kp / seb > ANOMALY_RATIO:
+                return f"цена в {kp / seb:.0f}× выше себестоимости"
+            if kp < seb:
+                return "цена КП ниже себестоимости"
+
+        if est and kp:
+            ratio = max(est, kp) / min(est, kp)
+            if ratio > ANOMALY_RATIO:
+                return f"смета и КП расходятся в {ratio:.0f}× — разные единицы?"
+
+        if est and seb and max(est, seb) / min(est, seb) > ANOMALY_RATIO:
+            return "смета и себестоимость несопоставимы"
+
+        return ""
+
+    def _anomaly_count(self) -> int:
+        return sum(1 for it in self.items if self._price_anomaly(it))
+
     def _row_tag(self, item: dict) -> str:
         """Тег подсветки строки с учётом «готовности» позиции."""
         if item.get("is_heading"):
@@ -1451,6 +1551,11 @@ class PreviewPage(ctk.CTkFrame):
             return "analog"
         if item.get("has_analog_row"):
             return "orig_analog"
+        _v = self._estimate_verdict(item)
+        if _v == "below":
+            return "est_below"
+        if _v == "above":
+            return "est_above"
         # Зелёный «готово» — только в режиме подбора (см. _is_ready_row)
         if self._is_ready_row(item):
             return "ready"
@@ -1462,6 +1567,156 @@ class PreviewPage(ctk.CTkFrame):
             "ai_match":       "ai",
             "manager_match":  "manager",
         }.get(status, "notfound")
+
+    @staticmethod
+    def _estimate_price(item: dict) -> float:
+        """Сметная цена позиции: из сметы либо вписанная вручную."""
+        try:
+            return float(item.get("estimate_price") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _estimate_sum(self, item: dict) -> float:
+        """Сметная сумма = сметная цена × наше количество."""
+        price = self._estimate_price(item)
+        if not price:
+            return 0.0
+        try:
+            qty = float(item.get("qty", 1) or 1)
+        except (TypeError, ValueError):
+            qty = 1.0
+        return price * qty
+
+    def _estimate_verdict(self, item: dict) -> str:
+        """Сравнение нашей цены КП со сметной.
+
+        'below' — наша ниже сметной (зелёная), 'above' — выше (красная),
+        '' — сравнивать не с чем.
+        """
+        est = self._estimate_price(item)
+        if not est:
+            return ""
+        _s, _ss, kp, _ks = self._compute_kp(item)
+        if not kp:
+            return ""
+        if kp > est:
+            return "above"
+        if kp < est:
+            return "below"
+        return ""
+
+    def _estimate_totals(self) -> dict:
+        """Считает итоги продажи по сметным ценам.
+
+        Берутся только позиции, у которых есть сметная цена.
+        gain / loss  — разница со своей ценой КП (упущенная или добавленная выгода);
+        below_cost   — позиции, где сметная цена ниже себестоимости: реальный убыток.
+        """
+        n = gain_n = loss_n = below_n = profit_n = 0
+        sum_kp = sum_est = sum_seb = 0.0
+        gain = loss = below_sum = profit_sum = 0.0
+
+        for it in self.items:
+            if it.get("is_heading") or it.get("has_analog_row"):
+                continue
+            est = self._estimate_price(it)
+            if not est:
+                continue
+            try:
+                qty = float(it.get("qty", 1) or 1)
+            except (TypeError, ValueError):
+                qty = 1.0
+
+            seb, _ss, kp, _ks = self._compute_kp(it)
+            n += 1
+            sum_est += est * qty
+            sum_kp  += kp * qty
+            sum_seb += seb * qty
+
+            if kp:
+                if est > kp:
+                    gain_n += 1
+                    gain += (est - kp) * qty
+                elif est < kp:
+                    loss_n += 1
+                    loss += (kp - est) * qty
+
+            if seb:
+                if est > seb:
+                    # Продажа по смете покрывает себестоимость — позиция прибыльная
+                    profit_n += 1
+                    profit_sum += (est - seb) * qty
+                elif est < seb:
+                    below_n += 1
+                    below_sum += (seb - est) * qty
+
+        return {
+            "n": n, "sum_kp": sum_kp, "sum_est": sum_est, "sum_seb": sum_seb,
+            "delta": sum_est - sum_kp,
+            "delta_pct": ((sum_est - sum_kp) / sum_kp * 100) if sum_kp else 0.0,
+            "gain": gain, "gain_n": gain_n,
+            "loss": loss, "loss_n": loss_n,
+            "profit_n": profit_n, "profit_sum": profit_sum,
+            "below_sum": below_sum, "below_n": below_n,
+            "margin": sum_est - sum_seb,
+            "margin_pct": ((sum_est - sum_seb) / sum_est * 100) if sum_est else 0.0,
+        }
+
+    def _update_estimate_summary(self):
+        """Перерисовывает полосу итогов под таблицей."""
+        if not hasattr(self, "est_bar"):
+            return
+        t = self._estimate_totals()
+        if not t["n"]:
+            self.est_bar.grid_remove()
+            return
+        self.est_bar.grid()
+
+        def m(v):
+            return f"{v:,.0f}".replace(",", " ")
+
+        # Вердикт: убыток важнее упущенной выгоды
+        if t["below_n"]:
+            verdict, color = "НИЖЕ СЕБЕСТОИМОСТИ", "#C0392B"
+            border = "#C0392B"
+        elif t["margin"] <= 0:
+            verdict, color = "В МИНУСЕ", "#C0392B"
+            border = "#C0392B"
+        elif t["delta"] >= 0:
+            verdict, color = "В ПЛЮСЕ", "#1E8449"
+            border = "#1E8449"
+        else:
+            verdict, color = "ПРИБЫЛЬ ЕСТЬ", "#B9770E"
+            border = "#7D6608"
+
+        self.est_verdict_lbl.configure(text=verdict, text_color=color)
+        self.est_bar.configure(border_color=border)
+
+        sign = "+" if t["delta"] >= 0 else "−"
+        self.est_main_lbl.configure(
+            text=(f"Продажа по сметным ценам ({t['n']} поз.):   "
+                  f"наша сумма КП {m(t['sum_kp'])} ₸   →   "
+                  f"по смете {m(t['sum_est'])} ₸   |   "
+                  f"разница {sign}{m(abs(t['delta']))} ₸ "
+                  f"({t['delta_pct']:+.1f} %)"),
+            text_color=color,
+        )
+
+        parts = [
+            f"Выигрываем на {t['profit_n']} поз. "
+            f"(смета выше себестоимости): +{m(t['profit_sum'])} ₸",
+            f"недополучаем против КП на {t['loss_n']} поз.: −{m(t['loss'])} ₸",
+            f"прибыль над себестоимостью: {m(t['margin'])} ₸ "
+            f"({t['margin_pct']:.1f} %)",
+        ]
+        if t["below_n"]:
+            parts.append(
+                f"⚠ ниже себестоимости {t['below_n']} поз. на {m(t['below_sum'])} ₸"
+            )
+        self.est_detail_lbl.configure(
+            text="   ·   ".join(parts),
+            text_color="#C0392B" if t["below_n"] else TEXT_SECONDARY,
+        )
 
     def _prelim_price(self, item: dict) -> float:
         """Предварительная цена позиции.
@@ -1532,7 +1787,11 @@ class PreviewPage(ctk.CTkFrame):
             vals[C_KP]      = f"{kp:.2f}"      if kp      else ""
             vals[C_KP_SUM]  = f"{kp_sum:.2f}"  if kp_sum  else ""
             vals[C_PRELIM]  = f"{_pp:.2f}"     if _pp     else ""
+            _es = self._estimate_sum(item)
+            vals[C_EST_SUM] = f"{_es:.2f}" if _es else ""
             self.tree.item(iid, values=vals)
+
+        self._update_estimate_summary()
 
     # ── Расчёт цены ──────────────────────────────────────────────────────────
     def _compute_kp(self, item: dict) -> tuple:
@@ -1703,6 +1962,7 @@ class PreviewPage(ctk.CTkFrame):
             vals = (
                 pos_lbl, brand, article, name, unit, qty_raw, mult,
                 _f(seb), _f(seb_sum), _f(_a_prelim), _f(kp), _f(kp_sum),
+                _f(self._estimate_price(item)), _f(self._estimate_sum(item)),
                 kaznisa_code,
                 item.get("comment", "") or "",
                 item.get("delivery", "") or "",
@@ -1801,12 +2061,18 @@ class PreviewPage(ctk.CTkFrame):
         if item.get("has_analog_row"):
             method_lbl = "↓ аналог подобран"
 
+        _anomaly = self._price_anomaly(item)
+        if _anomaly:
+            method_lbl = f"{method_lbl} | ⚠ {_anomaly}" if method_lbl else f"⚠ {_anomaly}"
+
         _pos_raw = item.get("pos", "")
         if self._select_mode:
             _cb = "☑" if id(item) in self._checked_items else "☐"
             _pos_display = f"{_cb} {_pos_raw}" if _pos_raw else _cb
         else:
             _pos_display = _pos_raw
+        if _anomaly:
+            _pos_display = f"⚠ {_pos_display}".strip()
         vals = (
             _pos_display,
             brand,
@@ -1820,6 +2086,8 @@ class PreviewPage(ctk.CTkFrame):
             const_price,
             f(kp),
             f(kp_sum),
+            f(self._estimate_price(item)),
+            f(self._estimate_sum(item)),
             kaznisa_code,
             item.get("comment", "") or "",
             item.get("delivery", "") or "",
@@ -1827,7 +2095,15 @@ class PreviewPage(ctk.CTkFrame):
             method_lbl,
             item.get("_analog_art", ""),
         )
-        iid = self.tree.insert("", position, values=vals, tags=(tag,))
+        # Сравнение со сметой важнее прочей окраски строки
+        _verdict = self._estimate_verdict(item)
+        if _verdict == "below":
+            tag = "est_below"
+        elif _verdict == "above":
+            tag = "est_above"
+
+        _tags = (tag, "anomaly") if _anomaly else (tag,)
+        iid = self.tree.insert("", position, values=vals, tags=_tags)
         item["_iid"] = iid
         return iid
 
@@ -1916,7 +2192,11 @@ class PreviewPage(ctk.CTkFrame):
             stat_text += t("preview_stat_corrected", count=corrected)
         if no_price:
             stat_text += t("preview_stat_no_price", count=no_price)
+        _anom = self._anomaly_count()
+        if _anom:
+            stat_text += f"   ⚠ требуют проверки цен: {_anom}"
         self.stat_lbl.configure(text=stat_text)
+        self._update_estimate_summary()
 
     # ── Реакция на изменение констант ────────────────────────────────────────
     def _on_const_change(self, *_):
@@ -1956,7 +2236,10 @@ class PreviewPage(ctk.CTkFrame):
             vals[C_KP]      = f"{kp:.2f}"       if kp      else ""
             vals[C_KP_SUM]  = f"{kp_sum:.2f}"   if kp_sum  else ""
             vals[C_PRELIM]  = f"{_pp:.2f}"      if _pp     else ""
+            _es = self._estimate_sum(item)
+            vals[C_EST_SUM] = f"{_es:.2f}" if _es else ""
             self.tree.item(iid, values=vals)
+        self._update_estimate_summary()
 
     # ── Фильтр и поиск ───────────────────────────────────────────────────────
     def _set_filter(self, mode: str):
@@ -2291,6 +2574,25 @@ class PreviewPage(ctk.CTkFrame):
                 pass
             vals[6] = bm.get("multiplicity") or ""
 
+        elif col_idx == C_EST_PRICE:
+            # Сметную цену можно вписать вручную, если подобрать не удалось
+            try:
+                val = float((raw or "0").replace(",", ".").replace(" ", ""))
+            except ValueError:
+                self._cancel_edit()
+                return
+            item["estimate_price"] = val if val > 0 else None
+            if val > 0:
+                item["estimate_match"] = "manual"
+            else:
+                item.pop("estimate_match", None)
+            vals[C_EST_PRICE] = f"{val:.2f}" if val else ""
+            _es = self._estimate_sum(item)
+            vals[C_EST_SUM] = f"{_es:.2f}" if _es else ""
+            self.tree.item(iid, values=vals, tags=(self._row_tag(item),))
+            self._cancel_edit()
+            return
+
         elif col_idx in (C_ARTICLE, C_KAZ_CODE):
             # Артикул и код АГСК — текст. Пишем и в позицию, и в подобранный
             # товар, чтобы значение ушло в обратную запись в спецификацию.
@@ -2361,6 +2663,9 @@ class PreviewPage(ctk.CTkFrame):
             vals[C_KP]      = f"{kp:.2f}"      if kp      else ""
             vals[C_KP_SUM]  = f"{kp_sum:.2f}"  if kp_sum  else ""
             vals[C_PRELIM]  = f"{_pp:.2f}"     if _pp     else ""
+            # Кол-во могло измениться — сметная сумма пересчитывается от него
+            _es = self._estimate_sum(item)
+            vals[C_EST_SUM] = f"{_es:.2f}" if _es else ""
 
         is_edited = bool(item.get("_user_edited") or item.get("_user_const_price") or item.get("_user_seb_price"))
         if is_edited:
@@ -2369,6 +2674,7 @@ class PreviewPage(ctk.CTkFrame):
             cur_tags = self.tree.item(iid, "tags")
             self.tree.item(iid, values=vals, tags=cur_tags)
         self._cancel_edit()
+        self._update_estimate_summary()
 
     def _cancel_edit(self, event=None):
         if self._edit_entry:
@@ -2414,6 +2720,149 @@ class PreviewPage(ctk.CTkFrame):
         self.clipboard_append(f"{art}\t{code}")
 
     # ── ИИ-переподбор ────────────────────────────────────────────────────────
+    def _attach_estimate(self, path: str = ""):
+        """Прикрепляет смету генподрядчика и проставляет сметные цены."""
+        if not self.items:
+            messagebox.showinfo("", "Сначала загрузите спецификацию.")
+            return
+
+        if not path:
+            path = filedialog.askopenfilename(
+                title="Выберите сметный лист",
+                filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("Все файлы", "*.*")],
+            )
+        if not path:
+            return
+
+        self.attach_est_btn.configure(state="disabled", text="Разбор сметы...")
+
+        import threading
+
+        def _work():
+            try:
+                # Отправляем только то, что нужно для сопоставления
+                payload = [
+                    {
+                        "is_heading":       it.get("is_heading", False),
+                        "article_raw":      it.get("article_raw", ""),
+                        "kaznisa_code_raw": it.get("kaznisa_code_raw", ""),
+                        "name_raw":         it.get("name_raw", ""),
+                        "best_match":       it.get("best_match") or {},
+                    }
+                    for it in self.items
+                ]
+                res = self.api.parse_estimate(path, payload)
+            except Exception as e:
+                self.after(0, lambda: (
+                    messagebox.showerror("Смета", str(e)),
+                    self.attach_est_btn.configure(
+                        state="normal", text="📎 Прикрепить сметный лист"),
+                ))
+                return
+            self.after(0, lambda: self._on_estimate_ready(path, res))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_estimate_ready(self, path: str, res: dict):
+        """Переносит сметные цены в позиции и перерисовывает таблицу."""
+        self.attach_est_btn.configure(
+            state="normal", text="📎 Прикрепить сметный лист")
+
+        returned = res.get("items") or []
+        n = 0
+        for it, got in zip(self.items, returned):
+            price = got.get("estimate_price")
+            if price:
+                it["estimate_price"] = price
+                it["estimate_match"] = got.get("estimate_match", "")
+                it["estimate_name"]  = got.get("estimate_name", "")
+                n += 1
+
+        self._estimate_path  = path
+        self._estimate_stats = {**(res.get("stats") or {}),
+                                **(res.get("match") or {})}
+
+        self._populate()
+        self._update_stats()
+
+        st = res.get("match") or {}
+        ps = res.get("stats") or {}
+
+        # Сколько наших позиций вообще пригодны для связывания
+        own_codes = sum(
+            1 for it in self.items
+            if not it.get("is_heading")
+            and ((it.get("best_match") or {}).get("kaznisa_code")
+                 or it.get("kaznisa_code_raw"))
+        )
+
+        head = (f"Файл: {os.path.basename(path)}\n"
+                f"Листов обработано: {ps.get('sheets_used', 0)}, "
+                f"позиций в смете: {ps.get('items', 0)} "
+                f"(с кодом АГСК: {ps.get('with_code', 0)})\n\n")
+
+        if n == 0:
+            messagebox.showwarning(
+                "Сметные цены не проставлены",
+                head +
+                "Ни одна позиция не совпала со сметой.\n\n"
+                "Вероятные причины:\n"
+                f"  • смета относится к другому проекту — коды АГСК "
+                f"не пересекаются;\n"
+                f"  • в спецификации мало кодов АГСК "
+                f"(сейчас с кодом: {own_codes} из "
+                f"{sum(1 for i in self.items if not i.get('is_heading'))});\n"
+                "  • в смете нужные листы не помечены Q9, G9 или РС.\n\n"
+                "Сметные цены можно вписать вручную в колонке «Сметная цена».",
+            )
+            return
+
+        messagebox.showinfo(
+            "Смета прикреплена",
+            head +
+            f"Проставлено цен: {n}\n"
+            f"   по коду АГСК: {st.get('by_code', 0)}\n"
+            f"   по артикулу: {st.get('by_article', 0)}\n"
+            f"   по наименованию: {st.get('by_name', 0)}\n"
+            f"Без сметной цены: {st.get('unmatched', 0)} — "
+            f"их можно заполнить вручную в колонке «Сметная цена».",
+        )
+
+    def _apply_estimate_prices(self):
+        """Кнопка «Сметные цены»: переносит сметные цены в Цену КП."""
+        rows = [it for it in self.items
+                if not it.get("is_heading") and self._estimate_price(it)]
+        if not rows:
+            messagebox.showinfo(
+                "Сметные цены",
+                "Нет позиций со сметной ценой.\n"
+                "Прикрепите сметный лист или заполните цены вручную.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Сметные цены",
+            f"Заменить цену КП на сметную для {len(rows)} позиций?\n\n"
+            f"Итоговая сумма КП пересчитается по сметным ценам "
+            f"и в этом виде попадёт в лист КП.",
+        ):
+            return
+
+        for it in rows:
+            price = self._estimate_price(it)
+            it["_user_edited"] = True
+            it["_user_price"]  = price
+
+        self._populate()
+        self._update_stats()
+
+        total = sum(self._estimate_sum(it) for it in rows)
+        messagebox.showinfo(
+            "Сметные цены применены",
+            f"Обновлено позиций: {len(rows)}\n"
+            f"Сумма по сметным ценам: {total:,.2f} тг".replace(",", " "),
+        )
+
     def _rematch_ai_all(self):
         targets = [
             item for item in self.items
@@ -2435,7 +2884,6 @@ class PreviewPage(ctk.CTkFrame):
         self._run_rematch([item])
 
     def _run_rematch(self, targets: list):
-        self.ai_btn.configure(state="disabled", text="⏳ ИИ...")
         payload = [
             {
                 "name_raw":    it.get("name_raw", ""),
@@ -2466,10 +2914,8 @@ class PreviewPage(ctk.CTkFrame):
                     item[key] = new_data[key]
             self._redraw_row(item)
         self._update_stats()
-        self.ai_btn.configure(state="normal", text=t("preview_ai_rematch_btn"))
 
     def _rematch_error(self, error: str):
-        self.ai_btn.configure(state="normal", text=t("preview_ai_rematch_btn"))
         messagebox.showerror("ИИ-переподбор", f"Ошибка:\n{error}")
 
     def _reset_item_selected(self):
@@ -2767,6 +3213,68 @@ class PreviewPage(ctk.CTkFrame):
         self._update_stats()
 
     # ── Сохранение ───────────────────────────────────────────────────────────
+    def _export_price(self, item: dict) -> float:
+        """Цена, которая реально попадёт в лист КП.
+
+        Повторяет правило excel_generator._prelim_of: берётся предварительная
+        цена, а вычисленная «Цена КП» служит запасным вариантом.
+        """
+        prelim = self._prelim_price(item)
+        if prelim:
+            return prelim
+        _s, _ss, kp, _ks = self._compute_kp(item)
+        return kp
+
+    def _confirm_export_prices(self) -> bool:
+        """Показывает расхождение экранных цен с выгрузкой. False — отмена."""
+        screen_sum = export_sum = 0.0
+        diff_rows = []
+        for it in self.items:
+            if it.get("is_heading") or it.get("has_analog_row"):
+                continue
+            try:
+                qty = float(it.get("qty", 1) or 1)
+            except (TypeError, ValueError):
+                qty = 1.0
+            _s, _ss, kp, _ks = self._compute_kp(it)
+            exp = self._export_price(it)
+            screen_sum += kp * qty
+            export_sum += exp * qty
+            if kp and exp and abs(exp - kp) > 0.01:
+                diff_rows.append((abs(exp - kp) * qty, it, kp, exp))
+
+        delta = export_sum - screen_sum
+        if not diff_rows or abs(delta) < 1.0:
+            return True
+
+        diff_rows.sort(key=lambda r: -r[0])
+
+        def m(v):
+            return f"{v:,.0f}".replace(",", " ")
+
+        lines = []
+        for _d, it, kp, exp in diff_rows[:6]:
+            bm  = it.get("best_match") or {}
+            nm  = (bm.get("name") or it.get("name_raw") or "")[:42]
+            arrow = "↑" if exp > kp else "↓"
+            lines.append(f"  • Поз.{it.get('pos', '?')}  {nm}\n"
+                         f"        на экране {m(kp)} → в КП {m(exp)}  {arrow}")
+        tail = f"\n  ... и ещё {len(diff_rows) - 6}" if len(diff_rows) > 6 else ""
+        pct = (delta / screen_sum * 100) if screen_sum else 0.0
+
+        msg = (
+            "В лист КП записывается «Предварительная цена», а в таблице\n"
+            "показана «Цена КП» — это разные значения.\n\n"
+            f"Сумма КП на экране:   {m(screen_sum)} ₸\n"
+            f"Сумма КП в документе: {m(export_sum)} ₸\n"
+            f"Расхождение:          {m(delta)} ₸ ({pct:+.1f} %)\n\n"
+            f"Расходятся {len(diff_rows)} поз., крупнейшие:\n\n"
+            + "\n".join(lines) + tail
+            + "\n\nСохранить с ценами из документа?"
+        )
+        return messagebox.askyesno("Цены в КП отличаются от экранных",
+                                   msg, icon="warning")
+
     def _save(self):
         if not self.items:
             return
@@ -2802,6 +3310,10 @@ class PreviewPage(ctk.CTkFrame):
             if not messagebox.askyesno("Несовпадение единиц", msg, icon="warning"):
                 return
         # ─────────────────────────────────────────────────────────────────────
+
+        # ── Сумма на экране против суммы, которая уйдёт в лист КП ────────────
+        if not self._confirm_export_prices():
+            return
 
         path = filedialog.asksaveasfilename(
             title=t("preview_save"),

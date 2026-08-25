@@ -606,25 +606,41 @@ class DatabasePage(ctk.CTkFrame):
             wraplength=760, anchor="w", justify="left",
         ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
 
-        # ── Зона перетаскивания файла ────────────────────────────────────────
-        self._pl_path = ""
+        # ── Две зоны: прейскурант и эксель-база ──────────────────────────────
+        self._pl_path   = ""
+        self._pl_base_path = ""
+
+        zones = ctk.CTkFrame(tab, fg_color="transparent")
+        zones.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+        zones.grid_columnconfigure(0, weight=1, uniform="plz")
+        zones.grid_columnconfigure(1, weight=1, uniform="plz")
+
+        # Прейскурант (PDF)
         self._pl_drop = ctk.CTkFrame(
-            tab, fg_color=BG_CARD, corner_radius=RADIUS_LG,
+            zones, fg_color=BG_CARD, corner_radius=RADIUS_LG,
             border_width=2, border_color="#AEB6BF",
         )
-        self._pl_drop.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._pl_drop.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
+        ctk.CTkLabel(self._pl_drop, text="ПРЕЙСКУРАНТ",
+                     font=(*FONT_SMALL[:2], "bold"),
+                     text_color=NAVY).pack(pady=(12, 0))
         self._pl_drop_lbl = ctk.CTkLabel(
             self._pl_drop,
-            text="📄  Перетащите сюда прейскурант (PDF)\n\nили нажмите для выбора файла",
-            font=FONT_NORMAL, text_color=TEXT_SECONDARY, wraplength=560,
+            text="📄  Перетащите прейскурант (PDF)\n\nили нажмите для выбора",
+            font=FONT_NORMAL, text_color=TEXT_SECONDARY, wraplength=340,
         )
-        self._pl_drop_lbl.pack(pady=(24, 6))
-
+        self._pl_drop_lbl.pack(pady=(10, 6))
         self._pl_file_lbl = ctk.CTkLabel(
             self._pl_drop, text="", font=FONT_SMALL, text_color=NAVY_LIGHT,
+            wraplength=340,
         )
-        self._pl_file_lbl.pack(pady=(0, 20))
+        self._pl_file_lbl.pack(pady=(0, 6))
+        ctk.CTkButton(
+            self._pl_drop, text="Выбрать файл", font=FONT_SMALL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY, height=28, width=140,
+            corner_radius=RADIUS_SM, command=self._pl_browse,
+        ).pack(pady=(0, 14))
 
         for _w in (self._pl_drop, self._pl_drop_lbl, self._pl_file_lbl):
             _w.bind("<Button-1>", lambda e: self._pl_browse())
@@ -634,7 +650,50 @@ class DatabasePage(ctk.CTkFrame):
             except Exception as e:
                 print(f"[DnD/Прейскурант] {_w}: {e}")
 
-        # Кнопка выбора живёт в блоке параметров ниже
+        # Эксель-база сегмента
+        self._pl_base_drop = ctk.CTkFrame(
+            zones, fg_color=BG_CARD, corner_radius=RADIUS_LG,
+            border_width=2, border_color="#AEB6BF",
+        )
+        self._pl_base_drop.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        ctk.CTkLabel(self._pl_base_drop, text="БАЗА СЕГМЕНТА",
+                     font=(*FONT_SMALL[:2], "bold"),
+                     text_color=NAVY).pack(pady=(12, 0))
+        self._pl_base_lbl = ctk.CTkLabel(
+            self._pl_base_drop,
+            text="📊  Перетащите эксель-базу (.xlsx / .xlsm)\n\n"
+                 "необязательно — без неё сверка идёт с БД",
+            font=FONT_NORMAL, text_color=TEXT_SECONDARY, wraplength=340,
+        )
+        self._pl_base_lbl.pack(pady=(10, 6))
+        self._pl_base_file_lbl = ctk.CTkLabel(
+            self._pl_base_drop, text="", font=FONT_SMALL,
+            text_color=NAVY_LIGHT, wraplength=340,
+        )
+        self._pl_base_file_lbl.pack(pady=(0, 6))
+
+        _bb = ctk.CTkFrame(self._pl_base_drop, fg_color="transparent")
+        _bb.pack(pady=(0, 14))
+        ctk.CTkButton(
+            _bb, text="Выбрать файл", font=FONT_SMALL,
+            fg_color=NAVY_LIGHT, hover_color=NAVY, height=28, width=140,
+            corner_radius=RADIUS_SM, command=self._pl_base_browse,
+        ).pack(side="left", padx=(0, 6))
+        self._pl_base_clear_btn = ctk.CTkButton(
+            _bb, text="✕", font=FONT_SMALL,
+            fg_color="#95A5A6", hover_color="#7F8C8D", height=28, width=34,
+            corner_radius=RADIUS_SM, command=self._pl_base_clear,
+        )
+
+        for _w in (self._pl_base_drop, self._pl_base_lbl, self._pl_base_file_lbl):
+            _w.bind("<Button-1>", lambda e: self._pl_base_browse())
+            try:
+                _w.drop_target_register(DND_FILES)
+                _w.dnd_bind("<<Drop>>", self._pl_base_on_drop)
+            except Exception as e:
+                print(f"[DnD/База] {_w}: {e}")
+
         self._pl_browse_btn = None
 
         # ── Параметры сверки ─────────────────────────────────────────────────
@@ -676,37 +735,51 @@ class DatabasePage(ctk.CTkFrame):
         )
         self._pl_run_btn.grid(row=0, column=2, rowspan=2, padx=12, pady=10)
 
+        # Режимы сверки с приложенной эксель-базой
+        _sync = ctk.CTkFrame(opts, fg_color="transparent")
+        _sync.grid(row=2, column=0, columnspan=3, sticky="ew",
+                   padx=12, pady=(0, 10))
+
+        self._pl_cmp_btn = ctk.CTkButton(
+            _sync, text="📋 Только сравнить", font=FONT_SMALL,
+            fg_color="#5D6D7E", hover_color="#4A5568",
+            height=32, width=200, corner_radius=RADIUS_SM,
+            state="disabled", command=lambda: self._pl_sync_run(False),
+        )
+        self._pl_cmp_btn.pack(side="left", padx=(0, 8))
+
+        self._pl_apply_btn = ctk.CTkButton(
+            _sync, text="✔ Применить и загрузить", font=(*FONT_SMALL[:2], "bold"),
+            fg_color="#1E8449", hover_color="#186A3B",
+            height=32, width=230, corner_radius=RADIUS_SM,
+            state="disabled", command=lambda: self._pl_sync_run(True),
+        )
+        self._pl_apply_btn.pack(side="left")
+
+        ctk.CTkLabel(
+            _sync,
+            text="  Цены обновляются в приложенном файле (сметная × 1.16 → "
+                 "колонка «КазНИИСА»),\n  несовпавшие позиции прейскуранта "
+                 "идут в общую базу.",
+            font=FONT_SMALL, text_color=TEXT_SECONDARY,
+            anchor="w", justify="left",
+        ).pack(side="left", padx=(10, 0))
+
         # ── Результаты ───────────────────────────────────────────────────────
         res = ctk.CTkFrame(tab, fg_color=BG_CARD, corner_radius=RADIUS_MD)
         res.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
         res.grid_columnconfigure(0, weight=1)
-        res.grid_rowconfigure(1, weight=1)
+        res.grid_rowconfigure(0, weight=1)
 
+        # Построчный разбор живёт в отчёте Excel — здесь только итог
         self._pl_summary = ctk.CTkLabel(
-            res, text="Выберите прейскурант и запустите сверку.",
-            font=FONT_SMALL, text_color=TEXT_SECONDARY, anchor="w",
-            justify="left",
+            res, text="Выберите прейскурант и запустите сверку.\n\n"
+                      "Построчный разбор сохраняется в отчёт Excel.",
+            font=FONT_NORMAL, text_color=TEXT_SECONDARY, anchor="nw",
+            justify="left", wraplength=1000,
         )
-        self._pl_summary.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
-
-        cols = ("code", "article", "name", "unit_db", "unit_pl",
-                "price_db", "price_pl", "diff", "pct")
-        heads = ("Код АГСК", "Артикул", "Наименование", "Ед. база",
-                 "Ед. прейск.", "Цена базы", "Прейскурант", "Разница", "%")
-        widths = (140, 120, 300, 80, 90, 120, 120, 110, 70)
-
-        self._pl_tree = ttk.Treeview(res, columns=cols, show="headings",
-                                     style="APS.Treeview", height=12)
-        for c, h, w in zip(cols, heads, widths):
-            self._pl_tree.heading(c, text=h)
-            self._pl_tree.column(c, width=w, stretch=(c == "name"), anchor="w")
-        self._pl_tree.tag_configure("over",  background="#F8CBAD")
-        self._pl_tree.tag_configure("units", background="#FFF2CC")
-
-        vsb = ttk.Scrollbar(res, orient="vertical", command=self._pl_tree.yview)
-        self._pl_tree.configure(yscrollcommand=vsb.set)
-        self._pl_tree.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 10))
-        vsb.grid(row=1, column=1, sticky="ns", padx=(0, 12), pady=(0, 10))
+        self._pl_summary.grid(row=0, column=0, sticky="nsew",
+                              padx=16, pady=(14, 8))
 
         self._pl_save_btn = ctk.CTkButton(
             res, text="💾 Сохранить отчёт как...", font=FONT_SMALL,
@@ -751,6 +824,265 @@ class DatabasePage(ctk.CTkFrame):
                  "или перетащите другой файл",
         )
         self._pl_run_btn.configure(state="normal")
+        self._pl_sync_buttons()
+
+    def _pl_base_browse(self):
+        p = filedialog.askopenfilename(
+            title="Выберите эксель-базу сегмента",
+            filetypes=[("Excel", "*.xlsx *.xlsm"), ("Все файлы", "*.*")],
+        )
+        if p:
+            self._pl_set_base(p)
+
+    def _pl_base_on_drop(self, event):
+        raw = (event.data or "").strip()
+        if raw.startswith("{"):
+            end = raw.find("}")
+            p = raw[1:end] if end > 0 else raw.strip("{}")
+        else:
+            p = raw.split()[0] if raw else ""
+        if not p:
+            return
+        if not p.lower().endswith((".xlsx", ".xlsm")):
+            messagebox.showwarning("", "База должна быть в формате .xlsx или .xlsm.")
+            return
+        self._pl_set_base(p)
+
+    def _pl_set_base(self, path: str):
+        self._pl_base_path = path
+        self._pl_base_file_lbl.configure(text=f"✅  {os.path.basename(path)}")
+        self._pl_base_drop.configure(border_color="#1E8449", fg_color="#EAF7EF")
+        self._pl_base_lbl.configure(
+            text="📊  База выбрана\n\nвыберите режим сверки ниже")
+        self._pl_base_clear_btn.pack(side="left")
+        self._pl_sync_buttons()
+
+    def _pl_base_clear(self):
+        self._pl_base_path = ""
+        self._pl_base_file_lbl.configure(text="")
+        self._pl_base_drop.configure(border_color="#AEB6BF", fg_color=BG_CARD)
+        self._pl_base_lbl.configure(
+            text="📊  Перетащите эксель-базу (.xlsx / .xlsm)\n\n"
+                 "необязательно — без неё сверка идёт с БД")
+        self._pl_base_clear_btn.pack_forget()
+        self._pl_sync_buttons()
+
+    def _pl_sync_buttons(self):
+        """Режимы сверки доступны только когда выбраны оба файла."""
+        state = "normal" if (self._pl_path and self._pl_base_path) else "disabled"
+        for b in (self._pl_cmp_btn, self._pl_apply_btn):
+            b.configure(state=state)
+
+    def _pl_sync_run(self, apply_changes: bool):
+        """Сверка приложенной эксель-базы с прейскурантом.
+
+        apply_changes=False — только отчёт, ни файл, ни база не меняются.
+        """
+        if not (self._pl_path and self._pl_base_path):
+            return
+        if not os.path.isfile(self._pl_base_path):
+            messagebox.showerror("", "Файл базы не найден.")
+            return
+
+        for b in (self._pl_cmp_btn, self._pl_apply_btn, self._pl_run_btn):
+            b.configure(state="disabled")
+        self.progress.grid()
+        self.progress.set(0)
+        self._pl_summary.configure(
+            text="Разбор прейскуранта. На большом файле это занимает "
+                 "несколько минут...",
+            text_color=TEXT_SECONDARY)
+
+        def _progress(pct, stage, msg):
+            self.after(0, lambda: (self.progress.set(max(0.0, min(1.0, pct / 100))),
+                                   self._pl_summary.configure(text=msg)))
+
+        def _worker():
+            try:
+                from services.pricelist_sync import (
+                    read_base_rows, match_base_to_pricelist,
+                )
+
+                parsed  = self.api.parse_pricelist(self._pl_path, _progress)
+                entries = parsed.get("entries") or {}
+                if not entries:
+                    raise RuntimeError("Прейскурант не содержит позиций с ценами.")
+
+                self.after(0, lambda: self._pl_summary.configure(
+                    text=f"Разобрано позиций: {len(entries):,}. Чтение базы..."))
+                base_rows, sheet = read_base_rows(self._pl_base_path)
+                if not base_rows:
+                    raise RuntimeError(
+                        "В файле базы не найдено строк. Ожидается лист «БД» "
+                        "с колонками: № | Артикул | Наименование | Ед. | КазНИИСА ...")
+
+                result = match_base_to_pricelist(
+                    base_rows, entries,
+                    progress_cb=lambda p, m: _progress(p, "match", m),
+                )
+                result["_sheet"] = sheet
+            except Exception as e:
+                self.after(0, lambda err=e: self._pl_sync_failed(err))
+                return
+            self.after(0, lambda: self._pl_sync_ready(result, apply_changes))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _pl_sync_failed(self, exc: Exception):
+        self.progress.grid_remove()
+        self._pl_run_btn.configure(state="normal")
+        self._pl_sync_buttons()
+        self._pl_summary.configure(text=f"❌  {exc}", text_color="#E74C3C")
+        self._handle_api_error(exc, "сверка с прейскурантом")
+
+    def _pl_sync_ready(self, result: dict, apply_changes: bool):
+        """Сопоставление готово: показываем итоги и, если нужно, применяем."""
+        st = result["stats"]
+        self.progress.set(1.0)
+
+        # Насколько сильно меняются цены — единственная цифра, ради которой
+        # стоило бы листать таблицу; показываем её сразу
+        big = sum(1 for m in result["changed"]
+                  if (m.get("diff_pct") or 0) and abs(m["diff_pct"]) > 100)
+
+        self._pl_summary.configure(
+            text=(f"Строк в базе: {st['base_rows']:,}   |   "
+                  f"кодов в прейскуранте: {st['pricelist_codes']:,}   |   "
+                  f"сопоставлено: {st['matched']:,} "
+                  f"(код {st['by_code']:,}, артикул {st['by_article']:,})\n"
+                  f"Цена изменится у {st['changed']:,} поз.   |   "
+                  f"не опознано в базе: {st['unmatched_base']:,}   |   "
+                  f"в общую базу: {st['to_general']:,}"
+                  + (f"\n\n⚠  У {big:,} поз. цена меняется больше чем в 2 раза — "
+                     f"проверьте их в отчёте перед применением."
+                     if big else "")
+                  + "\n\nПострочный разбор — в отчёте Excel."),
+            text_color=NAVY)
+
+        self._pl_sync_result   = result
+        self._pl_sync_applied  = apply_changes
+        self._pl_result = None          # отчёт старого режима больше не актуален
+        self._pl_save_btn.configure(state="normal")
+
+        if not apply_changes:
+            self.progress.grid_remove()
+            self._pl_run_btn.configure(state="normal")
+            self._pl_sync_buttons()
+            self._pl_summary.configure(
+                text="📋  ТОЛЬКО СРАВНЕНИЕ — файл базы не изменён, "
+                     "в базу ничего не загружено\n"
+                     + self._pl_summary.cget("text"),
+                text_color=NAVY)
+            self._pl_sync_report(result, applied=False, backup="", loaded=False)
+            return
+
+        ok = messagebox.askyesno(
+            "Применить изменения",
+            f"Будет изменено цен: {st['changed']:,}\n"
+            f"Загружено в общую базу: {st['to_general']:,}\n\n"
+            f"Файл: {os.path.basename(self._pl_base_path)}\n"
+            f"Перед изменением рядом будет создана копия с текущей датой.\n\n"
+            f"Продолжить?",
+            icon="warning", parent=self,
+        )
+        if not ok:
+            self.progress.grid_remove()
+            self._pl_run_btn.configure(state="normal")
+            self._pl_sync_buttons()
+            self._pl_summary.configure(
+                text=self._pl_summary.cget("text") + "\n\nИзменения не применялись.",
+                text_color=TEXT_SECONDARY)
+            return
+
+        self.progress.set(0)
+        self._pl_summary.configure(text="Создание копии и запись цен...",
+                                   text_color=TEXT_SECONDARY)
+
+        def _worker():
+            backup = ""
+            loaded = False
+            try:
+                from services.pricelist_sync import (
+                    make_dated_backup, write_prices_to_base,
+                )
+                backup = make_dated_backup(self._pl_base_path)
+                written = write_prices_to_base(
+                    self._pl_base_path, result["changed"], result.get("_sheet", ""))
+
+                gen = [{"kaznisa_code": e["code"],
+                        "name":         e.get("name", ""),
+                        "unit":         e.get("unit", "") or "шт.",
+                        "kaznisa":      round(float(e["price"]) * 1.16, 2)}
+                       for e in result["unmatched_pricelist"]]
+                res_gen = {"added": 0, "updated": 0}
+                if gen:
+                    self.after(0, lambda: self._pl_summary.configure(
+                        text=f"Загрузка {len(gen):,} поз. в общую базу..."))
+                    res_gen = self.api.pricelist_to_general(gen)
+                    loaded = True
+            except Exception as e:
+                self.after(0, lambda err=e, b=backup: self._pl_apply_failed(err, b))
+                return
+            self.after(0, lambda: self._pl_apply_done(
+                result, written, res_gen, backup, loaded))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _pl_apply_failed(self, exc: Exception, backup: str):
+        self.progress.grid_remove()
+        self._pl_run_btn.configure(state="normal")
+        self._pl_sync_buttons()
+        tail = (f"\n\nКопия файла сохранена: {os.path.basename(backup)}"
+                if backup else "")
+        self._pl_summary.configure(text=f"❌  {exc}", text_color="#E74C3C")
+        messagebox.showerror("Сверка с прейскурантом", f"{exc}{tail}", parent=self)
+
+    def _pl_apply_done(self, result: dict, written: int, res_gen: dict,
+                       backup: str, loaded: bool):
+        self.progress.set(1.0)
+        self.progress.grid_remove()
+        self._pl_run_btn.configure(state="normal")
+        self._pl_sync_buttons()
+        self._refresh_count()
+        self._load_brand_stats()
+
+        self._pl_summary.configure(
+            text=(f"✅  Обновлено цен: {written:,}   |   "
+                  f"в общую базу добавлено {res_gen.get('added', 0):,}, "
+                  f"обновлено {res_gen.get('updated', 0):,}\n"
+                  f"Копия до изменений: {os.path.basename(backup)}"),
+            text_color="#1E8449")
+
+        self._pl_sync_report(result, applied=True, backup=backup, loaded=loaded)
+
+    def _pl_sync_report(self, result: dict, applied: bool,
+                        backup: str, loaded: bool):
+        """Складывает отчёт рядом с файлом базы и предлагает открыть."""
+        try:
+            from services.pricelist_sync_report import (
+                build_sync_report, default_report_path,
+            )
+            out = default_report_path(self._pl_base_path)
+            build_sync_report(out, result, self._pl_base_path,
+                              os.path.basename(self._pl_path),
+                              applied=applied, backup=backup, loaded=loaded)
+        except Exception as e:
+            messagebox.showwarning("Отчёт", f"Не удалось сохранить отчёт: {e}",
+                                   parent=self)
+            return
+
+        head = ("Цены записаны в файл базы."
+                if applied else
+                "Файл базы НЕ изменялся, в базу ничего не загружено.")
+        if messagebox.askyesno(
+            "Отчёт готов" if applied else "Сравнение готово",
+            f"{head}\n\nОтчёт сохранён отдельным файлом:\n{out}\n\nОткрыть?",
+            parent=self,
+        ):
+            try:
+                os.startfile(out)          # noqa: S606 — Windows-клиент
+            except Exception:
+                pass
 
     def _pl_segments(self):
         try:
@@ -775,7 +1107,6 @@ class DatabasePage(ctk.CTkFrame):
         segs = self._pl_segments()
         self._pl_run_btn.configure(state="disabled", text="Сверка...")
         self._pl_save_btn.configure(state="disabled")
-        self._pl_tree.delete(*self._pl_tree.get_children())
         self.progress.grid()
         self.progress.set(0)
         self._pl_summary.configure(
@@ -829,23 +1160,6 @@ class DatabasePage(ctk.CTkFrame):
                 f"сравнивать нельзя (жёлтые строки)."
             ).replace(",", " ")
         )
-
-        # В таблицу — первые 500 строк, полный список уходит в отчёт
-        for r in rows[:500]:
-            tag = "over" if r.get("over") else ("units" if not r.get("same_unit") else "")
-            self._pl_tree.insert("", "end", tags=(tag,), values=(
-                r["code"], r.get("article", ""), (r.get("name_db", "") or "")[:70],
-                r.get("unit_db", ""), r.get("unit_pl", ""),
-                f"{r['price_db']:,.2f}".replace(",", " "),
-                f"{r['price_pl']:,.2f}".replace(",", " "),
-                f"{r['diff_abs']:,.2f}".replace(",", " "),
-                f"{r['diff_pct']:.1f}",
-            ))
-        if len(rows) > 500:
-            self._pl_tree.insert("", "end", values=(
-                "...", "", f"показаны первые 500 из {len(rows)}; "
-                           f"полный список — в отчёте Excel",
-                "", "", "", "", "", ""))
 
         self._pl_save_btn.configure(state="normal" if rows else "disabled")
 
@@ -901,6 +1215,29 @@ class DatabasePage(ctk.CTkFrame):
             messagebox.showwarning("", f"Не удалось открыть файл: {e}")
 
     def _pl_save_report(self):
+        # После сверки с эксель-базой сохраняем её отчёт, а не отчёт по БД
+        if getattr(self, "_pl_sync_result", None):
+            path = filedialog.asksaveasfilename(
+                title="Сохранить отчёт сверки",
+                defaultextension=".xlsx",
+                initialfile="Сверка с прейскурантом.xlsx",
+                filetypes=[("Excel", "*.xlsx")],
+            )
+            if not path:
+                return
+            try:
+                from services.pricelist_sync_report import build_sync_report
+                build_sync_report(
+                    path, self._pl_sync_result, self._pl_base_path,
+                    os.path.basename(self._pl_path),
+                    applied=getattr(self, "_pl_sync_applied", False),
+                )
+            except Exception as e:
+                messagebox.showerror("Ошибка сохранения", str(e), parent=self)
+                return
+            messagebox.showinfo("Отчёт сохранён", f"Файл: {path}", parent=self)
+            return
+
         if not self._pl_result:
             return
         path = filedialog.asksaveasfilename(
@@ -1129,6 +1466,7 @@ class DatabasePage(ctk.CTkFrame):
         def _worker():
             results = {}
             errors  = []
+            expired = []
             # Для администраторов — берём выбранный сегмент; для менеджеров — их сегмент
             if self._is_admin():
                 label = self._import_seg_var.get()
@@ -1140,16 +1478,35 @@ class DatabasePage(ctk.CTkFrame):
                 seg = getattr(self.app.config, "user_segment", "ss")
             try:
                 results["db"] = self.api.import_products(path, pwd, segment=seg)
+            except SessionExpiredError as e:
+                expired.append(e)
             except Exception as e:
                 errors.append(f"БД: {e}")
-            try:
-                results["const"] = self.api.import_constants(path, pwd)
-            except Exception as e:
-                errors.append(f"Константы: {e}")
+            if not expired:
+                try:
+                    results["const"] = self.api.import_constants(path, pwd)
+                except SessionExpiredError as e:
+                    expired.append(e)
+                except Exception as e:
+                    errors.append(f"Константы: {e}")
 
-            self.after(0, lambda: self._done_both(results, errors))
+            # Истёкшая сессия — не ошибка импорта, а повод перелогиниться
+            if expired:
+                self.after(0, lambda e=expired[0]: self._session_expired_during_import(e))
+            else:
+                self.after(0, lambda: self._done_both(results, errors))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _session_expired_during_import(self, exc: Exception):
+        """Импорт прерван из-за сессии: снимаем прогресс и зовём общий диалог."""
+        self._anim_token = getattr(self, "_anim_token", 0) + 1
+        self.progress.set(0)
+        self.progress.grid_remove()
+        self.db_btn.configure(state="normal")
+        self.status_lbl.configure(text="❌  Сессия истекла — импорт не выполнен",
+                                  text_color="#E74C3C")
+        self._handle_api_error(exc, "импорт базы")
 
     def _animate(self, val, token: int):
         if token != getattr(self, "_anim_token", 0):
