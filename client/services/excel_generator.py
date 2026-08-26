@@ -1170,7 +1170,7 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
         traceback.print_exc()
 
 
-def _prelim_of(item: dict, bm: dict = None, coeff: float = 2.5) -> float:
+def _prelim_of(item: dict, bm: dict = None, coeff: float = 1.9) -> float:
     """Предварительная цена позиции для листа КП и колонки WV 4.0.
 
     Приоритет:

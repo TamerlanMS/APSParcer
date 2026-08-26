@@ -107,7 +107,7 @@ VISIBLE_RATE_IDX    = [1, 3, 4, 5, 8]
 VISIBLE_RATE_LABELS = [RATE_LABELS[i - 1] for i in VISIBLE_RATE_IDX]
 
 # Коэффициент предварительной цены по умолчанию (переопределяется настройкой с сервера)
-DEFAULT_PRELIM_COEFF = 2.5
+DEFAULT_PRELIM_COEFF = 1.9
 
 
 def _norm_rate(value) -> int:

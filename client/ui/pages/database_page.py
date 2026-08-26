@@ -427,7 +427,7 @@ class DatabasePage(ctk.CTkFrame):
             font=FONT_SMALL, text_color=TEXT_SECONDARY,
         ).grid(row=2, column=0, padx=(12, 8), pady=(0, 10), sticky="w")
 
-        self._coeff_var = ctk.StringVar(value="2.5")
+        self._coeff_var = ctk.StringVar(value="1.9")
         self._coeff_entry = ctk.CTkEntry(
             self._settings_frame, textvariable=self._coeff_var,
             width=100, height=28, font=FONT_SMALL, corner_radius=RADIUS_SM,
@@ -539,7 +539,7 @@ class DatabasePage(ctk.CTkFrame):
         def _work():
             try:
                 data = self.api.get_app_settings() or {}
-                coeff = float(data.get("prelim_price_coeff") or 2.5)
+                coeff = float(data.get("prelim_price_coeff") or 1.9)
             except Exception as e:
                 self.after(0, lambda: self._settings_status.configure(
                     text=f"Не удалось загрузить настройки: {e}"))

@@ -995,12 +995,47 @@ async def _get_setting(db: AsyncSession, key: str, default: str = "") -> str:
     return row.value
 
 
+# Прежнее значение коэффициента. На работающей установке строка в базе
+# перебивает константу, поэтому её нужно обновить один раз — при первом
+# чтении настроек после обновления сервера.
+_LEGACY_PRELIM_COEFF = "2.5"
+_prelim_migrated = False
+
+
+async def _migrate_prelim_coeff(db: AsyncSession) -> None:
+    """Меняет сохранённые 2.5 на новое значение по умолчанию.
+
+    Значения, отличные от 2.5, не трогаются: их выставил администратор
+    осознанно, и перезаписывать их обновлением сервера нельзя.
+    """
+    global _prelim_migrated
+    if _prelim_migrated:
+        return
+    _prelim_migrated = True
+    try:
+        res = await db.execute(
+            select(AppSetting).where(AppSetting.key == "prelim_price_coeff")
+        )
+        row = res.scalar_one_or_none()
+        if row is None or (row.value or "").strip() != _LEGACY_PRELIM_COEFF:
+            return
+        new = DEFAULT_APP_SETTINGS["prelim_price_coeff"][0]
+        row.value = new
+        row.updated_by = "system"
+        await db.commit()
+        logger.info("app_settings: prelim_price_coeff %s → %s",
+                    _LEGACY_PRELIM_COEFF, new)
+    except Exception as exc:
+        logger.warning("prelim coeff migration skipped: %s", exc)
+
+
 @router.get("/settings")
 async def get_app_settings(
     db: AsyncSession = Depends(get_db),
     _auth: str = Depends(verify_any_auth),
 ):
     """Глобальные настройки приложения. Доступно всем авторизованным."""
+    await _migrate_prelim_coeff(db)
     raw = await _get_setting(
         db, "prelim_price_coeff",
         DEFAULT_APP_SETTINGS["prelim_price_coeff"][0],

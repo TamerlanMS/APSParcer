@@ -5,6 +5,10 @@ from typing import Tuple, Callable, Optional
 from services.config import AppConfig
 
 
+# Множитель Партнёр→предварительная цена, если сервер настройку не отдал
+DEFAULT_PRELIM_COEFF = 1.9
+
+
 class SessionExpiredError(PermissionError):
     """Raised when the server returns 403 Forbidden on an admin endpoint.
     Usually means the JWT token is expired or the user lost admin rights."""
@@ -725,12 +729,12 @@ class ApiService:
             r.raise_for_status()
             data = r.json() or {}
         except Exception:
-            return {"prelim_price_coeff": 2.5}
+            return {"prelim_price_coeff": DEFAULT_PRELIM_COEFF}
         try:
-            coeff = float(data.get("prelim_price_coeff") or 2.5)
+            coeff = float(data.get("prelim_price_coeff") or DEFAULT_PRELIM_COEFF)
         except (TypeError, ValueError):
-            coeff = 2.5
-        return {"prelim_price_coeff": coeff if coeff > 0 else 2.5}
+            coeff = DEFAULT_PRELIM_COEFF
+        return {"prelim_price_coeff": coeff if coeff > 0 else DEFAULT_PRELIM_COEFF}
 
     def update_app_settings(self, prelim_price_coeff: float = None) -> dict:
         """PUT /database/settings — изменение настроек (только администратор)."""
