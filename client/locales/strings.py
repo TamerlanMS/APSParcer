@@ -178,7 +178,7 @@ STRINGS = {
 
         "col_mult":          "Кратность",
         "col_const":         "Предварительная цена",
-        "col_est_price":     "Сметная цена",
+        "col_est_price":     "Сметная цена (с НДС)",
         "col_est_sum":       "Сметная сумма",
         "col_price_seb":     "Цена себес",
         "col_sum_seb":       "Сумма себес",
@@ -530,7 +530,7 @@ STRINGS = {
 
         "col_mult":          "Еселік",
         "col_const":         "Алдын ала баға",
-        "col_est_price":     "Смета бағасы",
+        "col_est_price":     "Смета бағасы (ҚҚС-пен)",
         "col_est_sum":       "Смета сомасы",
         "col_price_seb":     "Өзіндік құн",
         "col_sum_seb":       "Өзіндік құн сомасы",

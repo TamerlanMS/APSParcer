@@ -24,16 +24,28 @@ class ApiService:
         401 — токен истёк или сессия отозвана, 403 — не хватает прав.
         Для пользователя это один и тот же выход: войти заново.
         """
+        if r.ok:
+            return
+
+        # FastAPI кладёт причину в detail. Без неё пользователь видит только
+        # «400 Client Error» и не понимает, что именно не так с файлом.
+        detail = ""
+        try:
+            body = r.json()
+            if isinstance(body, dict):
+                d = body.get("detail")
+                detail = d if isinstance(d, str) else (json.dumps(d, ensure_ascii=False)
+                                                       if d else "")
+        except ValueError:
+            detail = (r.text or "").strip()[:500]
+
         if r.status_code in (401, 403):
-            detail = ""
-            try:
-                detail = (r.json() or {}).get("detail", "")
-            except ValueError:
-                pass
             raise SessionExpiredError(
                 detail or "Сессия истекла или недостаточно прав. "
                           "Войдите в систему заново."
             )
+        if detail:
+            raise RuntimeError(detail)
         r.raise_for_status()
 
     @property
@@ -163,7 +175,7 @@ class ApiService:
         """POST сметы в /estimate/parse.
 
         items — позиции предпросмотра; сервер вернёт их же с проставленным
-        полем estimate_price. Учитываются только листы с метками Q9, G9, РС.
+        полем estimate_price. Учитываются только листы с метками Q9, G9, K9, РС.
         """
         fname = os.path.basename(estimate_path)
         _mime = ("application/vnd.openxmlformats-officedocument"
