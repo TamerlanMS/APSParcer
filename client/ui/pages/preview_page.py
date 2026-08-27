@@ -1982,7 +1982,7 @@ class PreviewPage(ctk.CTkFrame):
             # Section-header row — render as a bold blue separator spanning the name column
             heading_name = item.get("name_raw", "").replace("\n", " ").strip()
             _h_cb = ("☑" if id(item) in self._checked_items else "☐") if self._select_mode else ""
-            vals = (_h_cb, "", "", heading_name, "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+            vals = (_h_cb, "", "", heading_name) + ("",) * (len(COLS) - 4)
             iid = self.tree.insert("", position, values=vals, tags=("heading",))
             item["_iid"] = iid
             return iid
@@ -2017,9 +2017,14 @@ class PreviewPage(ctk.CTkFrame):
             tag = "orig_analog"
 
         seb, seb_sum, kp, kp_sum = self._compute_kp(item)
-        # Скрываем цены оригинала когда есть аналог-строка (цены учитываются в аналоге)
+        # Все цены замещённой позиции показываются на строке аналога.
+        # Сметная — тоже: иначе строка выглядит как позиция со сметой,
+        # но без себестоимости, и сравнивать её не с чем.
+        _est_p = self._estimate_price(item)
+        _est_s = self._estimate_sum(item)
         if item.get("has_analog_row"):
             seb = seb_sum = kp = kp_sum = 0.0
+            _est_p = _est_s = 0.0
         qty_raw = item.get("qty", 1)
         brand = bm.get("brand", "")
         article = (bm.get("article", "") or item.get("article_raw", "")).replace("\n", " ").strip()
@@ -2086,8 +2091,8 @@ class PreviewPage(ctk.CTkFrame):
             const_price,
             f(kp),
             f(kp_sum),
-            f(self._estimate_price(item)),
-            f(self._estimate_sum(item)),
+            f(_est_p),
+            f(_est_s),
             kaznisa_code,
             item.get("comment", "") or "",
             item.get("delivery", "") or "",
@@ -2095,12 +2100,14 @@ class PreviewPage(ctk.CTkFrame):
             method_lbl,
             item.get("_analog_art", ""),
         )
-        # Сравнение со сметой важнее прочей окраски строки
-        _verdict = self._estimate_verdict(item)
-        if _verdict == "below":
-            tag = "est_below"
-        elif _verdict == "above":
-            tag = "est_above"
+        # Сравнение со сметой важнее прочей окраски — но не для замещённой
+        # позиции: её цены на строке аналога, и вердикт относится к ней же.
+        if not item.get("has_analog_row"):
+            _verdict = self._estimate_verdict(item)
+            if _verdict == "below":
+                tag = "est_below"
+            elif _verdict == "above":
+                tag = "est_above"
 
         _tags = (tag, "anomaly") if _anomaly else (tag,)
         iid = self.tree.insert("", position, values=vals, tags=_tags)
@@ -2740,17 +2747,20 @@ class PreviewPage(ctk.CTkFrame):
 
         def _work():
             try:
-                # Отправляем только то, что нужно для сопоставления
-                payload = [
-                    {
+                # Отправляем только то, что нужно для сопоставления.
+                # _est_key возвращается сервером нетронутым и связывает
+                # ответ со строкой независимо от порядка в списке.
+                payload = []
+                for k, it in enumerate(self.items):
+                    it["_est_key"] = k
+                    payload.append({
+                        "_est_key":         k,
                         "is_heading":       it.get("is_heading", False),
                         "article_raw":      it.get("article_raw", ""),
                         "kaznisa_code_raw": it.get("kaznisa_code_raw", ""),
                         "name_raw":         it.get("name_raw", ""),
                         "best_match":       it.get("best_match") or {},
-                    }
-                    for it in self.items
-                ]
+                    })
                 res = self.api.parse_estimate(path, payload)
             except Exception as e:
                 self.after(0, lambda: (
@@ -2769,14 +2779,38 @@ class PreviewPage(ctk.CTkFrame):
             state="normal", text="📎 Прикрепить сметный лист")
 
         returned = res.get("items") or []
-        n = 0
-        for it, got in zip(self.items, returned):
+
+        # Сопоставляем по ключу, а не по позиции: пока шёл разбор, в списке
+        # могли появиться строки аналогов и всё бы съехало на строку вниз
+        by_key = {it.get("_est_key"): it for it in self.items
+                  if it.get("_est_key") is not None}
+
+        # Цены предыдущей сметы убираем — иначе останутся строки от неё
+        for it in self.items:
+            for k in ("estimate_price", "estimate_price_net",
+                      "estimate_match", "estimate_name"):
+                it.pop(k, None)
+
+        n = skipped = 0
+        for got in returned:
             price = got.get("estimate_price")
-            if price:
-                it["estimate_price"] = price
-                it["estimate_match"] = got.get("estimate_match", "")
-                it["estimate_name"]  = got.get("estimate_name", "")
-                n += 1
+            if not price:
+                continue
+            it = by_key.get(got.get("_est_key"))
+            if it is None:
+                skipped += 1
+                continue
+            it["estimate_price"]     = price
+            it["estimate_price_net"] = got.get("estimate_price_net")
+            it["estimate_match"]     = got.get("estimate_match", "")
+            it["estimate_name"]      = got.get("estimate_name", "")
+            n += 1
+
+        if skipped:
+            print(f"[Смета] {skipped} цен не нашли свою строку — список изменился")
+
+        # Цены замещённых позиций живут на строках аналогов
+        self._sync_analog_estimates()
 
         self._estimate_path  = path
         self._estimate_stats = {**(res.get("stats") or {}),
@@ -2827,6 +2861,24 @@ class PreviewPage(ctk.CTkFrame):
             f"Без сметной цены: {st.get('unmatched', 0)} — "
             f"их можно заполнить вручную в колонке «Сметная цена».",
         )
+
+    def _sync_analog_estimates(self):
+        """Переносит сметные цены с замещённых позиций на их аналоги.
+
+        Смету могли прикрепить уже после подбора аналога — тогда цена
+        осталась бы на строке без цен.
+        """
+        by_parent = {id(it): it for it in self.items if not it.get("is_analog_row")}
+        for a in self.items:
+            if not a.get("is_analog_row"):
+                continue
+            parent = by_parent.get(a.get("_analog_parent_id"))
+            if not parent:
+                continue
+            for k in ("estimate_price", "estimate_price_net",
+                      "estimate_match", "estimate_name"):
+                if parent.get(k) is not None and a.get(k) is None:
+                    a[k] = parent[k]
 
     def _apply_estimate_prices(self):
         """Кнопка «Сметные цены»: переносит сметные цены в Цену КП."""
@@ -3021,6 +3073,12 @@ class PreviewPage(ctk.CTkFrame):
             "article_raw":       db_match.get("article", ""),
             "_user_edited":      True,
         }
+        # Смета сопоставлена с оригиналом (у него код и артикул), а цены
+        # теперь на аналоге — переносим, чтобы сравнение осталось парным
+        for _k in ("estimate_price", "estimate_price_net",
+                   "estimate_match", "estimate_name"):
+            if item.get(_k) is not None:
+                analog_item[_k] = item[_k]
 
         # Вставляем сразу после оригинала
         try:
