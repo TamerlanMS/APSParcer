@@ -62,6 +62,45 @@ def normalize_code(value) -> str:
     return s.replace("\n", "").strip()
 
 
+# Разделители разрядов в выгрузках: обычный, неразрывный, узкий, апостроф
+_GROUP_CHARS = " \u00a0\u202f\u2009\u2007\u2060'\u2019`"
+
+
+def parse_number(val):
+    """Цена из ячейки. Повторяет разбор импорта базы, чтобы одна и та же
+    ячейка читалась одинаково и при загрузке в БД, и при сверке."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        f = float(val)
+        return f if f > 0 else None
+
+    s = str(val).strip()
+    for ch in _GROUP_CHARS:
+        s = s.replace(ch, "")
+    if not s:
+        return None
+
+    dot, comma = s.rfind("."), s.rfind(",")
+    if dot >= 0 and comma >= 0:
+        dec = "." if dot > comma else ","
+        s = s.replace("." if dec == "," else ",", "").replace(dec, ".")
+    else:
+        sep = "." if dot >= 0 else ("," if comma >= 0 else "")
+        if sep:
+            head, tail = s.rsplit(sep, 1)
+            grouping = (s.count(sep) > 1
+                        or (len(tail) == 3 and tail.isdigit()
+                            and head.lstrip("-+") not in ("", "0")))
+            s = s.replace(sep, "") if grouping else s.replace(sep, ".")
+
+    try:
+        f = float(s)
+    except (ValueError, TypeError):
+        return None
+    return f if f > 0 else None
+
+
 def _norm_text(value) -> str:
     if value is None:
         return ""
@@ -119,10 +158,7 @@ def read_base_rows(path: str) -> Tuple[List[dict], str]:
             if not (article or name or code):
                 continue
 
-            try:
-                kaznisa = float(cell(COL_KAZNISA)) if cell(COL_KAZNISA) is not None else None
-            except (TypeError, ValueError):
-                kaznisa = None
+            kaznisa = parse_number(cell(COL_KAZNISA))
 
             rows.append({
                 "row":     idx,
@@ -294,21 +330,35 @@ def make_dated_backup(path: str) -> str:
     return dest
 
 
+# Колонки, которые читает импорт базы в БД
+_IMPORT_COLS = range(1, 13)
+
+
 def write_prices_to_base(path: str, changed: List[dict],
-                         sheet_name: str = "") -> int:
+                         sheet_name: str = "") -> dict:
     """Записывает новые цены КазНИИСА в исходный файл.
 
-    Формулы сохраняются (data_only=False), пишется только колонка E.
-    Файл собирается во временный и подменяется одним движением: обрыв
-    записи не оставит менеджера с половиной базы.
+    Возвращает {"written": N, "formula_cells": M, "formula_cols": [...]}.
+
+    Про formula_cells важно знать вот что: openpyxl сохраняет формулу, но
+    не её посчитанное значение. Excel при открытии пересчитает, а
+    приложение читает файл с data_only=True и увидит пустые ячейки. Если
+    цены в базе заданы формулами, после записи файл обязательно нужно
+    один раз открыть в Excel и сохранить — иначе следующий импорт
+    обнулит эти позиции.
+
+    Пишется только колонка E. Файл собирается во временный и подменяется
+    одним движением: обрыв записи не оставит менеджера с половиной базы.
     """
     if not changed:
-        return 0
+        return {"written": 0, "formula_cells": 0, "formula_cols": []}
 
-    wb = openpyxl.load_workbook(path, data_only=False, keep_vba=path.lower().endswith(".xlsm"))
+    wb = openpyxl.load_workbook(path, data_only=False,
+                                keep_vba=path.lower().endswith(".xlsm"))
     try:
         sheet = sheet_name if sheet_name in wb.sheetnames else _find_db_sheet(wb)
         ws = wb[sheet]
+
         written = 0
         for m in changed:
             cell = ws.cell(row=m["row"], column=COL_KAZNISA)
@@ -316,10 +366,22 @@ def write_prices_to_base(path: str, changed: List[dict],
             cell.number_format = "#,##0.00"
             written += 1
 
+        # Сколько значений потеряет импорт, пока файл не пересчитан Excel
+        formula_cells = 0
+        formula_cols: set = set()
+        for row in ws.iter_rows(min_row=2, max_col=12):
+            for c in row:
+                v = c.value
+                if isinstance(v, str) and v.startswith("="):
+                    formula_cells += 1
+                    formula_cols.add(c.column)
+
         tmp = path + ".tmp"
         wb.save(tmp)
     finally:
         wb.close()
 
     os.replace(tmp, path)
-    return written
+    return {"written": written,
+            "formula_cells": formula_cells,
+            "formula_cols": sorted(formula_cols)}

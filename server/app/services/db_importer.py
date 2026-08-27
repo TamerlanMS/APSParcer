@@ -23,14 +23,65 @@ def _open_workbook(file_bytes: bytes):
     return wb
 
 
-def safe_float(val) -> float | None:
+# Всё, что в выгрузках встречается как разделитель разрядов:
+# обычный, неразрывный, узкий неразрывный и тонкий пробелы, апостроф.
+_GROUP_CHARS = " \u00a0\u202f\u2009\u2007\u2060'\u2019`"
+
+
+def parse_number(val) -> float | None:
+    """Число из ячейки эксель-базы. None, если разобрать нельзя.
+
+    Роль разделителя определяется по длине группы после него:
+      «1 240,04»  → 1240.04   (две цифры — дробная часть)
+      «293.710»   → 293710.0  (три цифры — разряды)
+      «2.937.100» → 2937100.0 (несколько разделителей — точно разряды)
+      «293,710.00»→ 293710.0  (два вида — дробным считается последний)
+
+    Раньше любая точка считалась дробной, и «293.710» превращалось
+    в 293.71 — цена падала на порядок.
+    """
     if val is None:
         return None
-    try:
-        f = float(str(val).replace(',', '.').replace(' ', '').strip())
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        f = float(val)
         return f if f > 0 else None
+
+    s = str(val).strip()
+    if not s:
+        return None
+    for ch in _GROUP_CHARS:
+        s = s.replace(ch, "")
+    s = s.replace("\u2212", "-")          # типографский минус
+    if not s:
+        return None
+
+    dot, comma = s.rfind("."), s.rfind(",")
+    if dot >= 0 and comma >= 0:
+        # Есть оба знака: дробный — тот, что правее
+        dec = "." if dot > comma else ","
+        s = s.replace("." if dec == "," else ",", "")
+        s = s.replace(dec, ".")
+    else:
+        sep = "." if dot >= 0 else ("," if comma >= 0 else "")
+        if sep:
+            tail = s.rsplit(sep, 1)[1]
+            head = s.rsplit(sep, 1)[0]
+            many = s.count(sep) > 1
+            # Ровно три цифры после единственного разделителя — разряды,
+            # но не когда целая часть нулевая: «0.125» — это доля, не 125.
+            grouping = many or (len(tail) == 3 and tail.isdigit()
+                                and head.lstrip("-+") not in ("", "0"))
+            s = s.replace(sep, "") if grouping else s.replace(sep, ".")
+
+    try:
+        f = float(s)
     except (ValueError, TypeError):
         return None
+    return f if f > 0 else None
+
+
+def safe_float(val) -> float | None:
+    return parse_number(val)
 
 
 def safe_int(val) -> int | None:

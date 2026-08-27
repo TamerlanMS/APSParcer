@@ -1170,6 +1170,25 @@ def _restore_missing_rels(tpl_path: str, out_path: str) -> None:
         traceback.print_exc()
 
 
+def _partner_kzt_of(item: dict, bm: dict = None) -> float:
+    """Цена поставщика в тенге. Курс лежит в константах бренда."""
+    bm = bm if bm is not None else (item.get("best_match") or {})
+    try:
+        partner = float(bm.get("partner") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not partner:
+        return 0.0
+    bc = item.get("_brand_consts") or {}
+    try:
+        return (partner
+                * float(bc.get("currency_rate", 1.0) or 1.0)
+                * float(bc.get("nds",           1.0) or 1.0)
+                * float(bc.get("logistics",     1.0) or 1.0))
+    except (TypeError, ValueError):
+        return partner
+
+
 def _prelim_of(item: dict, bm: dict = None, coeff: float = 1.9) -> float:
     """Предварительная цена позиции для листа КП и колонки WV 4.0.
 

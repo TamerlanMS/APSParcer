@@ -1718,6 +1718,38 @@ class PreviewPage(ctk.CTkFrame):
             text_color="#C0392B" if t["below_n"] else TEXT_SECONDARY,
         )
 
+    def _brand_rates(self, item: dict) -> tuple:
+        """Курс, НДС и логистику бренда позиции. По умолчанию — единицы."""
+        bm = item.get("best_match") or {}
+        bc = self.brand_consts.get((bm.get("brand") or "").upper())
+        if not bc:
+            try:
+                return (float(self.const_vars["currency_rate"].get() or 1),
+                        float(self.const_vars["nds"].get() or 1),
+                        float(self.const_vars["logistics"].get() or 1))
+            except (tk.TclError, ValueError, KeyError):
+                return 1.0, 1.0, 1.0
+        return (float(bc.get("currency_rate", 1.0) or 1.0),
+                float(bc.get("nds",           1.0) or 1.0),
+                float(bc.get("logistics",     1.0) or 1.0))
+
+    def _partner_kzt(self, item: dict) -> float:
+        """Цена поставщика, приведённая к тенге.
+
+        В базе она хранится в валюте поставщика: у RUBEZH и EKF в рублях,
+        у HIKVISION и HPE в долларах. Без перевода себестоимость нельзя
+        сравнивать ни с ценой КазНИИСА, ни со сметой — они уже в тенге.
+        """
+        bm = item.get("best_match") or {}
+        try:
+            partner = float(bm.get("partner") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if not partner:
+            return 0.0
+        cur, nds, lo = self._brand_rates(item)
+        return partner * cur * nds * lo
+
     def _prelim_price(self, item: dict) -> float:
         """Предварительная цена позиции.
 
@@ -1746,10 +1778,8 @@ class PreviewPage(ctk.CTkFrame):
         if code and kaz:
             return kaz
 
-        try:
-            partner = float(bm.get("partner") or 0)
-        except (TypeError, ValueError):
-            partner = 0.0
+        # Партнёр в валюте поставщика — сначала в тенге, потом коэффициент
+        partner = self._partner_kzt(item)
         if partner:
             try:
                 coeff = float(self._prelim_coeff or DEFAULT_PRELIM_COEFF)
@@ -1834,12 +1864,13 @@ class PreviewPage(ctk.CTkFrame):
         mg  = float(bc.get("margin",        1.0) or 1.0)
         qty = float(item.get("qty", 1) or 1)
 
-        # ── Цена себес: всегда Проектная из БД, от расценки не зависит ──
+        # ── Цена себес: всегда Проектная из БД, от расценки не зависит,
+        # но переведённая в тенге: в базе она в валюте поставщика ──
         try:
             _partner = float(bm.get("partner") or 0)
         except (TypeError, ValueError):
             _partner = 0.0
-        price_seb = math.ceil(_partner) if _partner else 0.0
+        price_seb = math.ceil(_partner * cur * nds * lo) if _partner else 0.0
 
         # ── Приоритет 1: пользователь задал Цена КП напрямую ────────────
         if item.get("_user_edited") and item.get("_user_price") is not None:

@@ -1006,8 +1006,10 @@ class DatabasePage(ctk.CTkFrame):
                     make_dated_backup, write_prices_to_base,
                 )
                 backup = make_dated_backup(self._pl_base_path)
-                written = write_prices_to_base(
+                _wr = write_prices_to_base(
                     self._pl_base_path, result["changed"], result.get("_sheet", ""))
+                written = _wr["written"]
+                result["_formula_cells"] = _wr["formula_cells"]
 
                 gen = [{"kaznisa_code": e["code"],
                         "name":         e.get("name", ""),
@@ -1046,12 +1048,27 @@ class DatabasePage(ctk.CTkFrame):
         self._refresh_count()
         self._load_brand_stats()
 
+        _fc = result.get("_formula_cells", 0)
         self._pl_summary.configure(
             text=(f"✅  Обновлено цен: {written:,}   |   "
                   f"в общую базу добавлено {res_gen.get('added', 0):,}, "
                   f"обновлено {res_gen.get('updated', 0):,}\n"
-                  f"Копия до изменений: {os.path.basename(backup)}"),
-            text_color="#1E8449")
+                  f"Копия до изменений: {os.path.basename(backup)}"
+                  + (f"\n⚠  В файле {_fc:,} ячеек с формулами — откройте его "
+                     f"в Excel и сохраните, иначе импорт увидит их пустыми."
+                     if _fc else "")),
+            text_color="#B9770E" if _fc else "#1E8449")
+
+        if _fc:
+            messagebox.showwarning(
+                "Файл нужно пересохранить в Excel",
+                f"Цены записаны, но в колонках базы {_fc:,} ячеек заданы "
+                f"формулами.\n\nExcel пересчитает их при открытии, а "
+                f"приложение читает файл напрямую и увидит эти ячейки "
+                f"пустыми.\n\nОткройте файл в Excel и сохраните (Ctrl+S) "
+                f"перед загрузкой базы на сервер.",
+                parent=self,
+            )
 
         self._pl_sync_report(result, applied=True, backup=backup, loaded=loaded)
 
