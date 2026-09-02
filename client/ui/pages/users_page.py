@@ -314,7 +314,7 @@ class UserDialog(ctk.CTkToplevel):
                 detail = str(e)
             self.after(0, lambda: self._on_err(detail))
         except Exception as e:
-            self.after(0, lambda: self._on_err(str(e)))
+            self.after(0, lambda e=e: self._on_err(str(e)))
 
     def _on_ok(self, result: dict):
         if self.on_saved:
@@ -489,7 +489,7 @@ class UsersPage(ctk.CTkFrame):
             roles = self._roles or self.api.get_roles()
             self.after(0, lambda: self._populate(users, roles))
         except Exception as e:
-            self.after(0, lambda: self._status_lbl.configure(
+            self.after(0, lambda e=e: self._status_lbl.configure(
                 text=t("users_error", error=str(e)), text_color="#E74C3C"
             ))
             self.after(0, lambda: self.refresh_btn.configure(state="normal"))
@@ -604,7 +604,7 @@ class UsersPage(ctk.CTkFrame):
             self.api.delete_user(uid)
             self.after(0, lambda: self._on_deleted(name))
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror(
+            self.after(0, lambda e=e: messagebox.showerror(
                 "", t("users_error", error=str(e))
             ))
             self.after(0, lambda: self.del_btn.configure(state="normal"))

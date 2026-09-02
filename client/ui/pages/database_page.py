@@ -541,7 +541,7 @@ class DatabasePage(ctk.CTkFrame):
                 data = self.api.get_app_settings() or {}
                 coeff = float(data.get("prelim_price_coeff") or 1.9)
             except Exception as e:
-                self.after(0, lambda: self._settings_status.configure(
+                self.after(0, lambda e=e: self._settings_status.configure(
                     text=f"Не удалось загрузить настройки: {e}"))
                 return
             def _apply():
@@ -574,7 +574,7 @@ class DatabasePage(ctk.CTkFrame):
             try:
                 self.api.update_app_settings(prelim_price_coeff=coeff)
             except Exception as e:
-                self.after(0, lambda: (
+                self.after(0, lambda e=e: (
                     self._settings_status.configure(
                         text=f"Ошибка сохранения: {e}", text_color="#C0392B"),
                     self._coeff_save_btn.configure(state="normal"),
@@ -1142,7 +1142,7 @@ class DatabasePage(ctk.CTkFrame):
                     progress_cb=_prog,
                 )
             except Exception as e:
-                self.after(0, lambda: self._pl_done(None, str(e)))
+                self.after(0, lambda e=e: self._pl_done(None, str(e)))
                 return
             self.after(0, lambda: self._pl_done(result, None))
 
@@ -1199,7 +1199,7 @@ class DatabasePage(ctk.CTkFrame):
                              self._pl_result.get("stats", {}))
             except Exception as e:
                 import traceback; traceback.print_exc()
-                self.after(0, lambda: self._pl_summary.configure(
+                self.after(0, lambda e=e: self._pl_summary.configure(
                     text=self._pl_summary.cget("text")
                          + f"\n\nОтчёт создать не удалось: {e}"))
                 return
@@ -1275,8 +1275,8 @@ class DatabasePage(ctk.CTkFrame):
                              self._pl_result.get("stats", {}))
             except Exception as e:
                 import traceback; traceback.print_exc()
-                self.after(0, lambda: (
-                    messagebox.showerror("Ошибка сохранения", str(e)),
+                self.after(0, lambda err=e: (
+                    messagebox.showerror("Ошибка сохранения", str(err)),
                     self._pl_save_btn.configure(
                         state="normal", text="💾 Сохранить отчёт как..."),
                 ))
@@ -1339,7 +1339,12 @@ class DatabasePage(ctk.CTkFrame):
                     pass
         else:
             title = f"Ошибка{': ' + context if context else ''}"
-            messagebox.showerror(title, str(exc), parent=self)
+            # Бывают исключения без текста — тогда хотя бы его тип,
+            # иначе в окне остаётся «None» и разбираться не с чем
+            text = str(exc).strip()
+            if not text or text == "None":
+                text = f"{type(exc).__name__} без описания"
+            messagebox.showerror(title, text, parent=self)
 
     def _refresh_count(self):
         def _worker():
@@ -1348,7 +1353,7 @@ class DatabasePage(ctk.CTkFrame):
                 self.after(0, lambda: self.count_lbl.configure(
                     text=t("db_count", count=f"{count:,}")))
             except Exception as e:
-                self.after(0, lambda: self.count_lbl.configure(text=f"Ошибка: {e}"))
+                self.after(0, lambda e=e: self.count_lbl.configure(text=f"Ошибка: {e}"))
         threading.Thread(target=_worker, daemon=True).start()
 
     def _reconnect_pinecone(self):
@@ -1366,7 +1371,7 @@ class DatabasePage(ctk.CTkFrame):
                     self.after(0, lambda: messagebox.showerror(
                         "Pinecone", f"❌ Ошибка подключения:\n{err}"))
             except Exception as e:
-                self.after(0, lambda: self._handle_api_error(e, "Pinecone переподключение"))
+                self.after(0, lambda err=e: self._handle_api_error(err, "Pinecone переподключение"))
         threading.Thread(target=_worker, daemon=True).start()
 
     def _refresh_budget(self):
@@ -1387,7 +1392,7 @@ class DatabasePage(ctk.CTkFrame):
                          + (f"  │  {seg_parts}" if seg_parts else ""))
                 self.after(0, lambda: self._budget_lbl.configure(text=text, text_color=color))
             except Exception as e:
-                self.after(0, lambda: self._budget_lbl.configure(
+                self.after(0, lambda e=e: self._budget_lbl.configure(
                     text=f"Ошибка: {e}", text_color="#E74C3C"))
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1404,9 +1409,9 @@ class DatabasePage(ctk.CTkFrame):
                         f"Всего: {tot:,}")
                 self.after(0, lambda: self._stats_lbl.configure(text=text))
             except SessionExpiredError as e:
-                self.after(0, lambda: self._handle_api_error(e))
+                self.after(0, lambda err=e: self._handle_api_error(err))
             except Exception as e:
-                self.after(0, lambda: self._stats_lbl.configure(text=f"Ошибка: {e}"))
+                self.after(0, lambda e=e: self._stats_lbl.configure(text=f"Ошибка: {e}"))
         threading.Thread(target=_worker, daemon=True).start()
 
     def _clear_segment(self):
@@ -1442,7 +1447,7 @@ class DatabasePage(ctk.CTkFrame):
                     self._refresh_stats(),
                 ))
             except Exception as e:
-                self.after(0, lambda: self._handle_api_error(e, "Очистка сегмента"))
+                self.after(0, lambda err=e: self._handle_api_error(err, "Очистка сегмента"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1590,7 +1595,7 @@ class DatabasePage(ctk.CTkFrame):
                     self._refresh_budget(),
                 ))
             except Exception as e:
-                self.after(0, lambda: self._handle_api_error(e, "Векторизация"))
+                self.after(0, lambda err=e: self._handle_api_error(err, "Векторизация"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1603,9 +1608,9 @@ class DatabasePage(ctk.CTkFrame):
                 data = self.api.get_brand_stats()
                 self.after(0, lambda: self._populate_brand_tree(data))
             except SessionExpiredError as e:
-                self.after(0, lambda: self._handle_api_error(e))
+                self.after(0, lambda err=e: self._handle_api_error(err))
             except Exception as e:
-                self.after(0, lambda: self._brand_summary_lbl.configure(
+                self.after(0, lambda e=e: self._brand_summary_lbl.configure(
                     text=f"Ошибка загрузки: {e}", text_color="#E74C3C"))
         threading.Thread(target=_worker, daemon=True).start()
 

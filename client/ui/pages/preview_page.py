@@ -565,7 +565,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
                         self._pdf_name, self._pdf_art, top_k=5)
                 self.after(0, lambda: self._show_results(db_results, sem_results))
             except Exception as exc:
-                self.after(0, lambda: self._status_lbl.configure(
+                self.after(0, lambda exc=exc: self._status_lbl.configure(
                     text=f"Ошибка поиска: {exc}", text_color="#E74C3C"
                 ))
 
@@ -825,12 +825,11 @@ class PreviewPage(ctk.CTkFrame):
             self.tree.column(col, width=max(w, min_w), minwidth=min_w,
                              anchor=anchor, stretch=False)
 
-        # Скрываем колонки, которые не нужны на экране предпросмотра
-        # (данные хранятся в vals и попадают в Excel — просто не отображаются)
-        _HIDDEN_COLS = {13, 14}  # comment, delivery  (kaznisa_code=12 показываем — нужен для сил. систем)
-        self.tree["displaycolumns"] = [
-            f"c{i}" for i in range(len(COLS)) if i not in _HIDDEN_COLS
-        ]
+        # Показываем все колонки. Раньше здесь скрывались номера 13 и 14 —
+        # они относились к прежней раскладке, а после добавления сметных
+        # колонок под этими номерами оказались «Сметная сумма» и «Код АГСК».
+        # Скрывать колонки номерами хрупко: любая вставка сдвигает их молча.
+        self.tree["displaycolumns"] = [f"c{i}" for i in range(len(COLS))]
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -1305,7 +1304,7 @@ class PreviewPage(ctk.CTkFrame):
                 )
             except Exception as e:
                 import traceback; traceback.print_exc()
-                self.after(0, lambda: (
+                self.after(0, lambda e=e: (
                     messagebox.showerror("Ошибка сохранения", str(e)),
                     self.spec_save_btn.configure(
                         state="normal", text="💾 Сохранить в спецификацию"),
@@ -2794,7 +2793,7 @@ class PreviewPage(ctk.CTkFrame):
                     })
                 res = self.api.parse_estimate(path, payload)
             except Exception as e:
-                self.after(0, lambda: (
+                self.after(0, lambda e=e: (
                     messagebox.showerror("Смета", str(e)),
                     self.attach_est_btn.configure(
                         state="normal", text="📎 Прикрепить сметный лист"),
@@ -2983,7 +2982,7 @@ class PreviewPage(ctk.CTkFrame):
                 results = resp.get("items", [])
                 self.after(0, lambda: self._apply_rematch(targets, results))
             except Exception as e:
-                self.after(0, lambda: self._rematch_error(str(e)))
+                self.after(0, lambda e=e: self._rematch_error(str(e)))
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()

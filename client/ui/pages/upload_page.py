@@ -441,7 +441,7 @@ class UploadPage(ctk.CTkFrame):
                 rows = self.api.get_pdf_history()
                 self.after(0, lambda: self._populate_history(rows))
             except Exception as e:
-                self.after(0, lambda: self._history_error(str(e)))
+                self.after(0, lambda e=e: self._history_error(str(e)))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -668,7 +668,7 @@ class UploadPage(ctk.CTkFrame):
                 )
                 self.after(0, lambda: self._on_all_done(results))
             except Exception as e:
-                self.after(0, lambda: self._on_error(str(e)))
+                self.after(0, lambda e=e: self._on_error(str(e)))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -775,7 +775,7 @@ class UploadPage(ctk.CTkFrame):
                 )
                 self.after(0, lambda: self._on_spec_done(result))
             except Exception as e:
-                self.after(0, lambda: self._on_error(str(e)))
+                self.after(0, lambda e=e: self._on_error(str(e)))
 
         threading.Thread(target=_worker, daemon=True).start()
 
