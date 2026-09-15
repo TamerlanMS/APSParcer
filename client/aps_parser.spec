@@ -99,7 +99,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="GQ-EPC 0.8.2",
+    name="GQ-EPC 0.8.3",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

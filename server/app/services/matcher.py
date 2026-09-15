@@ -60,6 +60,60 @@ _BRAND_SUFFIX_RE = re.compile(
 # Sub-item numbering prefix: "1 / ", "2/ " etc. (assembly щит rows).
 _SUBITEM_PREFIX_RE = re.compile(r"^\d+\s*/\s*", re.UNICODE)
 
+# ─── Подбор по обозначению модели (светотехника) ─────────────────────────────
+
+# Доля токенов обозначения, которая должна совпасть. Подобрано по реальным
+# данным: верная пара даёт 100 %, ближайший ошибочный сосед — 80 %.
+MODEL_MATCH_THRESHOLD = 0.85
+
+# Обозначение считается найденным, если совпадение строго лучше следующего
+# кандидата. При равенстве позиция уходит в «требует уточнения»: выбирать
+# между двумя одинаково похожими оптиками наугад хуже, чем не выбрать.
+MODEL_TIE_MARGIN = 0.01
+
+_TOKEN_RE   = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+")
+_HAS_LAT_RE = re.compile(r"[A-Za-z]")
+
+# Сетевое напряжение: в спецификации пишут, в базе опускают
+_MAINS_RE = re.compile(r"^(220|230|240|380|400)v?$", re.IGNORECASE)
+
+# Токены, которые стоят у половины позиций и товары не различают
+_MODEL_NOISE = {
+    "led", "ac", "dc", "ip", "ip20", "ip44", "ip54", "ip65", "ip66",
+    "w", "v", "k", "вт", "в", "шт", "мм", "тип", "для", "на", "от", "до", "по",
+}
+
+# Минимальная длина токена-обозначения. «S5», «T40» — части обозначения,
+# по ним одним цепляется что угодно.
+_MODEL_MIN_LEN = 4
+
+
+def _model_tokens(text: str) -> set:
+    """Латинско-цифровые токены строки — обозначение без русских слов."""
+    out = set()
+    for t in _TOKEN_RE.findall(text or ""):
+        if not _HAS_LAT_RE.search(t) and not t.isdigit():
+            continue
+        tl = t.lower()
+        if tl in _MODEL_NOISE or _MAINS_RE.match(tl):
+            continue
+        out.add(tl)
+    return out
+
+
+def has_model_designation(text: str) -> bool:
+    """Есть ли в строке обозначение модели — латиница и цифры в одном токене.
+
+    Одной латиницы мало: у кабеля «ППГнг(А)-HF» латинские буквы есть, а
+    обозначения нет, и поиск по единственному токену «HF» вытаскивал
+    96 посторонних светильников.
+    """
+    return any(len(t) >= _MODEL_MIN_LEN
+               and _HAS_LAT_RE.search(t)
+               and any(c.isdigit() for c in t)
+               for t in _model_tokens(text))
+
+
 # Cyrillic character range for optional stripping in sil-segment matching.
 _CYRILLIC_RE = re.compile(r"[А-ЯЁа-яё]")
 # Minimum length of a Cyrillic-stripped article to attempt matching (avoid garbage like "-").
@@ -214,7 +268,8 @@ class _ProductIndex:
 
     __slots__ = ("products", "norm_art", "norm_name", "norm_code",
                  "norm_art_nocyr",
-                 "art_exact", "art_nocyr_exact", "code_exact", "name_exact")
+                 "art_exact", "art_nocyr_exact", "code_exact", "name_exact",
+                 "model_toks", "model_idx")
 
     def __init__(self, products: List[Product]):
         self.products  = products
@@ -245,6 +300,55 @@ class _ProductIndex:
         for i, nn in enumerate(self.norm_name):
             if nn:
                 self.name_exact.setdefault(nn, []).append(i)
+
+        # Обозначения ищем сразу по артикулу и наименованию: у Varton модель
+        # лежит в артикуле, у Philips артикул пуст и модель внутри названия
+        self.model_toks: List[set] = []
+        self.model_idx: Dict[str, List[int]] = {}
+        for i, p in enumerate(products):
+            toks = _model_tokens(f"{p.article or ''} {p.name or ''}")
+            self.model_toks.append(toks)
+            for t in toks:
+                self.model_idx.setdefault(t, []).append(i)
+
+
+def find_model_candidates(query: str, index: "_ProductIndex") -> List[Dict]:
+    """Кандидаты по обозначению модели, от лучшего к худшему.
+
+    Кандидаты отбираются по самому редкому токену запроса: «bvp431» есть
+    у единиц позиций, «out» или «nw» — у сотен, и перебирать по частому
+    токену значит просматривать половину базы впустую.
+    """
+    # Проверку дублируем внутри: вызывающий код может её забыть, а без неё
+    # строка вроде «ППГнг(А)-HF» ищется по единственному токену «HF» и
+    # вытаскивает под сотню посторонних светильников.
+    if not has_model_designation(query):
+        return []
+
+    q = _model_tokens(query)
+    if not q:
+        return []
+
+    known = [t for t in q if t in index.model_idx]
+    if not known:
+        return []
+    anchor = min(known, key=lambda t: len(index.model_idx[t]))
+
+    out: List[Dict] = []
+    for i in index.model_idx[anchor]:
+        ratio = len(q & index.model_toks[i]) / len(q)
+        if ratio >= MODEL_MATCH_THRESHOLD:
+            out.append({
+                "product": index.products[i],
+                "score":   int(round(ratio * 100)),
+                "method":  "model",
+                "_ratio":  ratio,
+            })
+    out.sort(key=lambda x: -x["_ratio"])
+
+    # Равный балл у двух разных позиций — это разные оптики одной модели.
+    # Отдаём обе: пусть менеджер выберет, а не алгоритм наугад.
+    return out[:5]
 
 
 def find_candidates(
@@ -399,6 +503,16 @@ def find_candidates(
         if nocyr_cands:
             nocyr_cands.sort(key=lambda x: x['score'], reverse=True)
             return nocyr_cands[:5]
+
+    # ---- 2e. Подбор по обозначению модели (светотехника) -----------------------
+    # Идёт перед поиском по наименованию: у прожекторов названия совпадают
+    # дословно, и наименование их не разделяет, а обозначение — разделяет.
+    for _src in (article_raw, name_raw):
+        if not _src or not has_model_designation(_src):
+            continue
+        _mc = find_model_candidates(_src, index)
+        if _mc:
+            return _mc
 
     # ---- 3. Name-based fallback (batch) ----------------------------------------
     # Very strict: only engage when the name is specific enough (>= _NAME_MIN_LEN chars)

@@ -1500,6 +1500,11 @@ class DatabasePage(ctk.CTkFrame):
                 seg = getattr(self.app.config, "user_segment", "ss")
             try:
                 results["db"] = self.api.import_products(path, pwd, segment=seg)
+                # Позиции без артикула опознаются по наименованию.
+                # Ноль здесь на базе освещения означает старый код на сервере.
+                _na = (results["db"] or {}).get("no_article")
+                if _na is not None:
+                    print(f"[Импорт] без артикула: {_na}")
             except SessionExpiredError as e:
                 expired.append(e)
             except Exception as e:

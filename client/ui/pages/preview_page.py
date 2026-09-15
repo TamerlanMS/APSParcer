@@ -109,6 +109,12 @@ VISIBLE_RATE_LABELS = [RATE_LABELS[i - 1] for i in VISIBLE_RATE_IDX]
 # Коэффициент предварительной цены по умолчанию (переопределяется настройкой с сервера)
 DEFAULT_PRELIM_COEFF = 1.9
 
+# Маржа для бренда, которого нет в листе «Const». Раньше бралась из панели
+# констант — а там открыт последний выбранный бренд, и цена зависела от
+# того, куда менеджер нажал перед расчётом. Фиксированное значение делает
+# результат воспроизводимым; настоящие константы всё равно нужно завести.
+DEFAULT_BRAND_MARGIN = 1.2
+
 
 def _norm_rate(value) -> int:
     """Приводит сохранённую расценку к используемой в интерфейсе.
@@ -412,7 +418,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         pdf_frame.pack(fill="x", padx=pad, pady=(4, 8))
         pdf_frame.grid_columnconfigure((1, 3, 5), weight=1)
 
-        ctk.CTkLabel(pdf_frame, text="Данные из PDF:",
+        ctk.CTkLabel(pdf_frame, text=t("pv_from_pdf"),
                      font=(*FONT_SMALL[:2], "bold"), text_color=NAVY).grid(
             row=0, column=0, padx=(12, 6), pady=8, sticky="w")
 
@@ -435,7 +441,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         seg_frame.pack(fill="x", padx=pad, pady=(0, 6))
         seg_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(seg_frame, text="База данных:", font=FONT_SMALL,
+        ctk.CTkLabel(seg_frame, text=t("pv_from_db"), font=FONT_SMALL,
                      text_color=TEXT_SECONDARY).grid(row=0, column=0, padx=(0, 10), sticky="w")
 
         try:
@@ -465,7 +471,7 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         search_frame.pack(fill="x", padx=pad, pady=(0, 6))
         search_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(search_frame, text="🔍  Поиск:",
+        ctk.CTkLabel(search_frame, text=t("pv_search_lbl"),
                      font=FONT_NORMAL, text_color=TEXT_SECONDARY).grid(
             row=0, column=0, padx=(12, 6), pady=10, sticky="e")
 
@@ -473,13 +479,13 @@ class ArticleSearchDialog(ctk.CTkToplevel):
         default_q = self._pdf_art or self._pdf_code or self._pdf_name[:60]
         self._q_var = tk.StringVar(value=default_q)
         q_entry = ctk.CTkEntry(search_frame, textvariable=self._q_var,
-                                placeholder_text="Артикул, наименование или код АГСК…",
+                                placeholder_text=t("pv_search_ph"),
                                 height=34, font=FONT_NORMAL)
         q_entry.grid(row=0, column=1, padx=(0, 8), pady=10, sticky="ew")
         q_entry.bind("<Return>", lambda e: self._do_search())
 
         ctk.CTkButton(
-            search_frame, text="🔍  Найти", font=FONT_NORMAL,
+            search_frame, text=t("pv_search_btn"), font=FONT_NORMAL,
             fg_color=NAVY_LIGHT, hover_color=NAVY,
             height=34, width=130, corner_radius=RADIUS_SM,
             command=self._do_search,
@@ -722,7 +728,7 @@ class PreviewPage(ctk.CTkFrame):
         self.reset_btn.grid(row=0, column=4, padx=(8, 4))
 
         self.est_btn = ctk.CTkButton(
-            top, text="📋 Сметные цены", font=FONT_SMALL,
+            top, text=t("pv_est_prices_btn"), font=FONT_SMALL,
             fg_color="#17A589", hover_color="#148F77", text_color="white",
             height=36, width=150, corner_radius=RADIUS_SM,
             command=self._apply_estimate_prices,
@@ -745,7 +751,7 @@ class PreviewPage(ctk.CTkFrame):
 
         # Кнопки справа — пакуем первыми (до пилюль), чтобы pack(side="right") работал правильно
         self.delete_checked_btn = ctk.CTkButton(
-            leg, text="🗑 Удалить (0)",
+            leg, text=t("pv_delete_btn"),
             font=FONT_SMALL, fg_color="#E74C3C", hover_color="#C0392B",
             height=28, width=150, corner_radius=RADIUS_SM,
             command=self._delete_checked,
@@ -754,7 +760,7 @@ class PreviewPage(ctk.CTkFrame):
         self.delete_checked_btn.pack_forget()
 
         self.reset_checked_btn = ctk.CTkButton(
-            leg, text="🔄 Сбросить (0)",
+            leg, text=t("pv_reset_btn"),
             font=FONT_SMALL, fg_color="#2E86AB", hover_color="#1A5E7A",
             height=28, width=150, corner_radius=RADIUS_SM,
             command=self._reset_checked,
@@ -763,7 +769,7 @@ class PreviewPage(ctk.CTkFrame):
         self.reset_checked_btn.pack_forget()
 
         self.select_btn = ctk.CTkButton(
-            leg, text="☑ Выбрать",
+            leg, text=t("pv_select_btn"),
             font=FONT_SMALL, fg_color="#AEB6BF", hover_color=NAVY_LIGHT,
             height=28, width=120, corner_radius=RADIUS_SM,
             command=self._toggle_select_mode,
@@ -772,7 +778,7 @@ class PreviewPage(ctk.CTkFrame):
 
         self._hdg_var = tk.BooleanVar(value=True)
         self.hdg_chk = ctk.CTkCheckBox(
-            leg, text="Заголовки в Excel", font=FONT_SMALL,
+            leg, text=t("pv_excel_headers"), font=FONT_SMALL,
             variable=self._hdg_var, onvalue=True, offvalue=False,
             width=130, checkbox_width=16, checkbox_height=16,
         )
@@ -896,7 +902,7 @@ class PreviewPage(ctk.CTkFrame):
         )
         self._ctx_menu.add_separator()
         self._ctx_menu.add_command(
-            label="🔍 Подобрать аналог",
+            label=t("pv_find_analog"),
             command=self._find_analog_selected,
         )
         self._ctx_menu.add_separator()
@@ -996,7 +1002,7 @@ class PreviewPage(ctk.CTkFrame):
         cf.grid_columnconfigure(12, weight=1)
 
         self.spec_save_btn = ctk.CTkButton(
-            cf, text="💾 Сохранить в спецификацию",
+            cf, text=t("pv_save_to_spec"),
             font=(*FONT_NORMAL[:2], "bold"),
             fg_color="#1E8449", hover_color="#186A3B",
             height=32, width=230, corner_radius=RADIUS_SM,
@@ -1004,7 +1010,7 @@ class PreviewPage(ctk.CTkFrame):
             command=self._save_to_spec,
         )
         self.spec_kp_btn = ctk.CTkButton(
-            cf, text="→ Перейти к КП",
+            cf, text=t("pv_go_to_kp"),
             font=(*FONT_NORMAL[:2], "bold"),
             fg_color=NAVY_LIGHT, hover_color=NAVY,
             height=32, width=230, corner_radius=RADIUS_SM,
@@ -1013,7 +1019,7 @@ class PreviewPage(ctk.CTkFrame):
         )
 
         self.attach_est_btn = ctk.CTkButton(
-            cf, text="📎 Прикрепить сметный лист",
+            cf, text=t("pv_attach_est"),
             font=FONT_SMALL,
             fg_color="#7D6608", hover_color="#5B4A06",
             height=32, width=230, corner_radius=RADIUS_SM,
@@ -1113,7 +1119,7 @@ class PreviewPage(ctk.CTkFrame):
         if self._select_mode:
             self._select_mode = False
             self._checked_items.clear()
-            self.select_btn.configure(fg_color="#AEB6BF", text="☑ Выбрать")
+            self.select_btn.configure(fg_color="#AEB6BF", text=t("pv_select_btn"))
             self.tree.heading("c0", text=t("col_num"))
             self.delete_checked_btn.pack_forget()
             self.reset_checked_btn.pack_forget()
@@ -1159,11 +1165,11 @@ class PreviewPage(ctk.CTkFrame):
     def save_all_excel(self):
         """Save all loaded projects to one multi-sheet Excel file."""
         if not self._projects:
-            messagebox.showinfo("", "Нет проектов для сохранения.")
+            messagebox.showinfo("", t("pv_no_projects"))
             return
 
         path = filedialog.asksaveasfilename(
-            title="Сохранить Excel всех проектов",
+            title=t("pv_save_all_title"),
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx")],
         )
@@ -1180,6 +1186,7 @@ class PreviewPage(ctk.CTkFrame):
                     it["_computed_seb_price"] = seb
                     it["_computed_seb_sum"]   = seb_sum
                     it["_prelim_price"]       = self._prelim_price(it) or None
+                    it["_brand_consts"]       = self._consts_of(it)
 
             _incl_hdg = self._hdg_var.get() if self._hdg_var else True
             gen_projects = [
@@ -1207,14 +1214,14 @@ class PreviewPage(ctk.CTkFrame):
                 for p in self._projects
             )
             if messagebox.askyesno(
-                "Сохранить Excel всех проектов",
+                t("pv_save_all_title"),
                 f"Сохранено {len(self._projects)} файлов, {total_pos} позиций.\n"
                 f"Файл: {out}\n\nОткрыть?",
             ):
                 self._open_file(out)
         except Exception as e:
             import traceback; traceback.print_exc()
-            messagebox.showerror("Ошибка сохранения", str(e))
+            messagebox.showerror(t("pv_save_err"), str(e))
 
     def load_spec_data(self, result: dict):
         """Загружает результат разбора спецификации и включает режим подбора."""
@@ -1255,7 +1262,7 @@ class PreviewPage(ctk.CTkFrame):
         n_all = sum(1 for i in self.items if not i.get("is_heading"))
         if n_found < n_all:
             if not messagebox.askyesno(
-                "Перейти к КП",
+                t("pv_go_kp_title"),
                 f"Подобрано {n_found} из {n_all} позиций.\n"
                 f"Неподобранные не попадут в КП.\n\nПродолжить?",
             ):
@@ -1269,16 +1276,15 @@ class PreviewPage(ctk.CTkFrame):
         self._populate()
         self._update_stats()
         messagebox.showinfo(
-            "Режим КП",
-            "Список перенесён в режим составления КП.\n"
-            "Цены и расценки доступны, сохранение — кнопкой «Сохранить».",
+            t("pv_kp_mode"),
+            t("pv_kp_mode_msg"),
         )
 
     def _save_to_spec(self):
         """Записывает подбор обратно в исходный файл спецификации."""
         if not self._spec_path or not os.path.isfile(self._spec_path):
             path = filedialog.asksaveasfilename(
-                title="Сохранить спецификацию",
+                title=t("pv_save_spec_ttl"),
                 defaultextension=".xlsx",
                 filetypes=[("Excel", "*.xlsx")],
             )
@@ -1289,10 +1295,10 @@ class PreviewPage(ctk.CTkFrame):
         rows = [i for i in self.items
                 if i.get("row") and not i.get("is_heading") and i.get("best_match")]
         if not rows:
-            messagebox.showinfo("", "Нет подобранных позиций для записи.")
+            messagebox.showinfo("", t("pv_no_matched"))
             return
 
-        self.spec_save_btn.configure(state="disabled", text="Сохранение...")
+        self.spec_save_btn.configure(state="disabled", text=t("pv_saving"))
 
         import threading
 
@@ -1305,9 +1311,9 @@ class PreviewPage(ctk.CTkFrame):
             except Exception as e:
                 import traceback; traceback.print_exc()
                 self.after(0, lambda e=e: (
-                    messagebox.showerror("Ошибка сохранения", str(e)),
+                    messagebox.showerror(t("pv_save_err"), str(e)),
                     self.spec_save_btn.configure(
-                        state="normal", text="💾 Сохранить в спецификацию"),
+                        state="normal", text=t("pv_save_to_spec")),
                 ))
                 return
 
@@ -1334,9 +1340,9 @@ class PreviewPage(ctk.CTkFrame):
 
             self.after(0, lambda: (
                 self.spec_save_btn.configure(
-                    state="normal", text="💾 Сохранить в спецификацию"),
+                    state="normal", text=t("pv_save_to_spec")),
                 messagebox.showinfo(
-                    "Спецификация сохранена",
+                    t("pv_spec_saved"),
                     f"Записано позиций: {n}\n"
                     f"Сохранено в базу подбора: {saved}\n\n"
                     f"Файл: {self._spec_path}",
@@ -1717,17 +1723,23 @@ class PreviewPage(ctk.CTkFrame):
             text_color="#C0392B" if t["below_n"] else TEXT_SECONDARY,
         )
 
+    def _consts_of(self, item: dict) -> dict:
+        """Константы бренда позиции — для запасных расчётов в выгрузке.
+
+        Без них excel_generator считал цену поставщика без перевода
+        в тенге: поле _brand_consts читалось, но никем не заполнялось.
+        """
+        bm = item.get("best_match") or {}
+        return dict(self.brand_consts.get((bm.get("brand") or "").upper()) or {})
+
     def _brand_rates(self, item: dict) -> tuple:
         """Курс, НДС и логистику бренда позиции. По умолчанию — единицы."""
         bm = item.get("best_match") or {}
         bc = self.brand_consts.get((bm.get("brand") or "").upper())
         if not bc:
-            try:
-                return (float(self.const_vars["currency_rate"].get() or 1),
-                        float(self.const_vars["nds"].get() or 1),
-                        float(self.const_vars["logistics"].get() or 1))
-            except (tk.TclError, ValueError, KeyError):
-                return 1.0, 1.0, 1.0
+            # Бренда нет в константах — переводить не по чему.
+            # Чужой курс из панели давал ошибку в разы.
+            return 1.0, 1.0, 1.0
         return (float(bc.get("currency_rate", 1.0) or 1.0),
                 float(bc.get("nds",           1.0) or 1.0),
                 float(bc.get("logistics",     1.0) or 1.0))
@@ -1843,20 +1855,23 @@ class PreviewPage(ctk.CTkFrame):
         brand = (bm.get("brand") or "").upper()
         bc    = self.brand_consts.get(brand)
         if not bc:
-            # Фолбэк — берём текущие значения с экрана
+            # Констант бренда нет. Курс, НДС и логистику берём единичными:
+            # в панели открыт последний выбранный бренд, и его курс —
+            # чужой. Ошибка в марже — проценты, ошибка в курсе — разы.
             try:
-                bc = {
-                    "margin":        float(self.const_vars["margin"].get()),
-                    "logistics":     float(self.const_vars["logistics"].get()),
-                    "nds":           float(self.const_vars["nds"].get()),
-                    "currency_rate": float(self.const_vars["currency_rate"].get()),
-                    "rate":          int(float(self.const_vars["rate"].get() or DEFAULT_RATE_IDX)),
-                    "gp":            1.0,
-                }
-            except (tk.TclError, ValueError):
-                return 0.0, 0.0, 0.0, 0.0
+                _rate = int(float(self.const_vars["rate"].get() or DEFAULT_RATE_IDX))
+            except (tk.TclError, ValueError, KeyError):
+                _rate = DEFAULT_RATE_IDX
+            bc = {
+                "margin":        DEFAULT_BRAND_MARGIN,
+                "logistics":     1.0,
+                "nds":           1.0,
+                "currency_rate": 1.0,
+                "rate":          _rate,
+                "gp":            1.0,
+            }
 
-        rate_type = int(bc.get("rate", 3) or 3)
+        rate_type = int(bc.get("rate", DEFAULT_RATE_IDX) or DEFAULT_RATE_IDX)
         cur = float(bc.get("currency_rate", 1.0) or 1.0)
         nds = float(bc.get("nds",           1.0) or 1.0)
         lo  = float(bc.get("logistics",     1.0) or 1.0)
@@ -1883,14 +1898,25 @@ class PreviewPage(ctk.CTkFrame):
             return price_seb, price_seb * qty, price_kp, price_kp * qty
 
         # ── База для Цены КП: ручная предварительная цена либо поле расценки ──
+        # Важно не только значение, но и откуда оно взято: цена КазНИИСА уже
+        # в тенге, а запасные (РРЦ, Партнёр, Опт) — в валюте поставщика.
+        _base_is_kaznisa = False
         if item.get("_user_const_price"):
             base = float(item["_user_const_price"])
+            _base_is_kaznisa = True      # введена вручную, уже в тенге
         else:
             field = RATE_FIELD.get(rate_type, "rrts")
-            base = (bm.get(field)
-                    or bm.get("rrts") or bm.get("partner")
-                    or bm.get("mrc")  or bm.get("opt")
-                    or bm.get("kaznisa") or 0)
+            base = bm.get(field)
+            if base:
+                _base_is_kaznisa = (field == "kaznisa")
+            else:
+                # Поля расценки нет — идём по запасной цепочке.
+                # Это цены поставщика, к ним курс применяется всегда.
+                base = (bm.get("rrts") or bm.get("partner")
+                        or bm.get("mrc") or bm.get("opt") or 0)
+                if not base:
+                    base = bm.get("kaznisa") or 0
+                    _base_is_kaznisa = bool(base)
             if rate_type in GP_RATE_TYPES:
                 gp = float(bc.get("gp", 1.0) or 1.0)
                 base = float(base or 0) * gp
@@ -1900,9 +1926,11 @@ class PreviewPage(ctk.CTkFrame):
             # Себестоимость показываем даже если базы для КП нет
             return price_seb, price_seb * qty, 0.0, 0.0
 
-        if rate_type in AGSK_RATE_TYPES:
-            # kaznisa / АГСК — цена уже в KZT из государственного прайса КазНИИСА.
-            # Курс валюты, НДС и логистика НЕ применяются (они заложены в цене).
+        if _base_is_kaznisa:
+            # Цена КазНИИСА уже в тенге: курс, НДС и логистика в неё заложены.
+            # Привязка именно к источнику цены, а не к типу расценки: при
+            # «Сумме АГСК» без цены КазНИИСА база приходит из РРЦ в рублях,
+            # и пропуск курса давал цену КП ниже себестоимости.
             _kp_base = math.ceil(base)
         else:
             _kp_base = math.ceil(base * cur * nds * lo)
@@ -1934,25 +1962,45 @@ class PreviewPage(ctk.CTkFrame):
         """Return a human-readable Russian label for the match method."""
         if not method:
             return ""
+        # Ключи локализации, а не готовый текст: колонка видна пользователю
+        # и в казахском режиме должна быть на казахском
         _MAP = {
-            "exact":                    "Артикул (точн.)",
-            "contains":                 "Артикул (вхожд.)",
-            "fuzzy_article":            "Артикул (нечётк.)",
-            "fuzzy_name_from_article":  "Артикул (нечётк.)",
-            "name_exact":               "Название (точн.)",
-            "name_contains":            "Название (вхожд.)",
-            "name_fuzzy":               "Название (нечётк.)",
-            "name_partial":             "Название (частич.)",
-            "code_exact":               "АГСК (код)",
-            "kaznisa":                  "АГСК (код)",
+            "exact":                    "method_art_exact",
+            "contains":                 "method_art_contains",
+            "fuzzy_article":            "method_art_fuzzy",
+            "fuzzy_name_from_article":  "method_art_fuzzy",
+            "name_exact":               "method_name_exact",
+            "name_contains":            "method_name_contains",
+            "name_fuzzy":               "method_name_fuzzy",
+            "name_partial":             "method_name_partial",
+            "code_exact":               "method_code",
+            "kaznisa":                  "method_code",
+            # То же точное совпадение по коду, но найденное до обращения к ИИ
+            "code_exact_preai":         "method_code",
+            # Подбор по обозначению модели: латинско-цифровое обозначение
+            # вроде «BVP431 LED134 NW 100W AMB» у светотехники
+            "model":                    "method_model",
+            # Артикул с отброшенной кириллицей — путь для силовых баз
+            "exact_nocyr":              "method_art_nocyr",
+            "contains_nocyr":           "method_art_nocyr",
+            "fuzzy_nocyr":              "method_art_nocyr",
+            # Векторный поиск и переранжирование моделью
+            "vector":                   "method_vector",
+            "ai_vector":                "method_vector",
+            "ai_reranked":              "method_ai",
+            "gpt_rerank":               "method_ai",
+            # Ручная правка менеджера, запомненная приложением
+            "correction":               "method_correction",
+            "correction_history":       "method_history",
         }
         if method in _MAP:
-            return _MAP[method]
-        if method == "correction_history":
-            return "📚 История"
+            return t(_MAP[method])
         if method.startswith("ai"):
-            return "ИИ"
-        return method
+            return t("method_ai")
+        # Служебное имя способа менеджеру ничего не говорит — в колонке
+        # нейтральная подпись, само значение уходит в лог
+        print(f"[Метод] нет подписи для {method!r}")
+        return t("method_other")
 
     def _redraw_row(self, item: dict):
         """
@@ -2092,6 +2140,12 @@ class PreviewPage(ctk.CTkFrame):
         )
         if _no_price_in_db:
             method_lbl = (method_lbl + " | нет цены в БД") if method_lbl else "нет цены в БД"
+
+        # Бренд без констант: курс и НДС к цене не применяются
+        _brand = (bm.get("brand") or "").strip()
+        if _brand and _brand.upper() not in self.brand_consts:
+            _nc = f"нет констант бренда «{_brand[:18]}»"
+            method_lbl = (method_lbl + " | " + _nc) if method_lbl else _nc
 
         if item.get("has_analog_row"):
             method_lbl = "↓ аналог подобран"
@@ -2486,7 +2540,7 @@ class PreviewPage(ctk.CTkFrame):
             return
         bm = item.get("best_match")
         if not bm or not bm.get("id"):
-            messagebox.showinfo(t("search_dialog_title"), "Нет подобранного товара для подтверждения.")
+            messagebox.showinfo(t("search_dialog_title"), t("pv_no_confirm"))
             return
         self._apply_correction(item, iid, bm, confirm_only=True)
 
@@ -2569,11 +2623,11 @@ class PreviewPage(ctk.CTkFrame):
         entry.bind("<FocusOut>", _on_focus_out)
 
         _menu = tk.Menu(entry, tearoff=0)
-        _menu.add_command(label="Вставить",
+        _menu.add_command(label=t("ctx_paste"),
                           command=lambda: entry.event_generate("<<Paste>>"))
-        _menu.add_command(label="Копировать",
+        _menu.add_command(label=t("ctx_copy"),
                           command=lambda: entry.event_generate("<<Copy>>"))
-        _menu.add_command(label="Вырезать",
+        _menu.add_command(label=t("ctx_cut"),
                           command=lambda: entry.event_generate("<<Cut>>"))
 
         def _popup(ev):
@@ -2760,18 +2814,18 @@ class PreviewPage(ctk.CTkFrame):
     def _attach_estimate(self, path: str = ""):
         """Прикрепляет смету генподрядчика и проставляет сметные цены."""
         if not self.items:
-            messagebox.showinfo("", "Сначала загрузите спецификацию.")
+            messagebox.showinfo("", t("pv_load_spec_1st"))
             return
 
         if not path:
             path = filedialog.askopenfilename(
-                title="Выберите сметный лист",
+                title=t("pv_choose_est"),
                 filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("Все файлы", "*.*")],
             )
         if not path:
             return
 
-        self.attach_est_btn.configure(state="disabled", text="Разбор сметы...")
+        self.attach_est_btn.configure(state="disabled", text=t("pv_parsing_est"))
 
         import threading
 
@@ -2794,9 +2848,9 @@ class PreviewPage(ctk.CTkFrame):
                 res = self.api.parse_estimate(path, payload)
             except Exception as e:
                 self.after(0, lambda e=e: (
-                    messagebox.showerror("Смета", str(e)),
+                    messagebox.showerror(t("pv_est"), str(e)),
                     self.attach_est_btn.configure(
-                        state="normal", text="📎 Прикрепить сметный лист"),
+                        state="normal", text=t("pv_attach_est")),
                 ))
                 return
             self.after(0, lambda: self._on_estimate_ready(path, res))
@@ -2806,7 +2860,7 @@ class PreviewPage(ctk.CTkFrame):
     def _on_estimate_ready(self, path: str, res: dict):
         """Переносит сметные цены в позиции и перерисовывает таблицу."""
         self.attach_est_btn.configure(
-            state="normal", text="📎 Прикрепить сметный лист")
+            state="normal", text=t("pv_attach_est"))
 
         returned = res.get("items") or []
 
@@ -2867,7 +2921,7 @@ class PreviewPage(ctk.CTkFrame):
 
         if n == 0:
             messagebox.showwarning(
-                "Сметные цены не проставлены",
+                t("pv_est_none_ttl"),
                 head +
                 "Ни одна позиция не совпала со сметой.\n\n"
                 "Вероятные причины:\n"
@@ -2882,7 +2936,7 @@ class PreviewPage(ctk.CTkFrame):
             return
 
         messagebox.showinfo(
-            "Смета прикреплена",
+            t("pv_est_attached"),
             head +
             f"Проставлено цен: {n}\n"
             f"   по коду АГСК: {st.get('by_code', 0)}\n"
@@ -2916,14 +2970,13 @@ class PreviewPage(ctk.CTkFrame):
                 if not it.get("is_heading") and self._estimate_price(it)]
         if not rows:
             messagebox.showinfo(
-                "Сметные цены",
-                "Нет позиций со сметной ценой.\n"
-                "Прикрепите сметный лист или заполните цены вручную.",
+                t("pv_est_prices"),
+                t("pv_est_no_rows"),
             )
             return
 
         if not messagebox.askyesno(
-            "Сметные цены",
+            t("pv_est_prices"),
             f"Заменить цену КП на сметную для {len(rows)} позиций?\n\n"
             f"Итоговая сумма КП пересчитается по сметным ценам "
             f"и в этом виде попадёт в лист КП.",
@@ -2940,7 +2993,7 @@ class PreviewPage(ctk.CTkFrame):
 
         total = sum(self._estimate_sum(it) for it in rows)
         messagebox.showinfo(
-            "Сметные цены применены",
+            t("pv_est_applied"),
             f"Обновлено позиций: {len(rows)}\n"
             f"Сумма по сметным ценам: {total:,.2f} тг".replace(",", " "),
         )
@@ -2952,7 +3005,7 @@ class PreviewPage(ctk.CTkFrame):
             and not item.get("_user_edited")
         ]
         if not targets:
-            messagebox.showinfo("", "Нет строк для переподбора ИИ.")
+            messagebox.showinfo("", t("pv_ai_no_rows"))
             return
         self._run_rematch(targets)
 
@@ -2998,7 +3051,7 @@ class PreviewPage(ctk.CTkFrame):
         self._update_stats()
 
     def _rematch_error(self, error: str):
-        messagebox.showerror("ИИ-переподбор", f"Ошибка:\n{error}")
+        messagebox.showerror(t("pv_ai_rematch"), f"Ошибка:\n{error}")
 
     def _reset_item_selected(self):
         sel = self.tree.selection()
@@ -3180,10 +3233,10 @@ class PreviewPage(ctk.CTkFrame):
         self._select_mode = not self._select_mode
         self._checked_items.clear()
         if self._select_mode:
-            self.select_btn.configure(fg_color=NAVY_LIGHT, text="✖ Выйти")
+            self.select_btn.configure(fg_color=NAVY_LIGHT, text=t("pv_exit"))
             self.tree.heading("c0", text="☐  №")
         else:
-            self.select_btn.configure(fg_color="#AEB6BF", text="☑ Выбрать")
+            self.select_btn.configure(fg_color="#AEB6BF", text=t("pv_select_btn"))
             self.tree.heading("c0", text=t("col_num"))
             self.delete_checked_btn.pack_forget()
             self.reset_checked_btn.pack_forget()  # исправление: скрываем при выходе из режима
@@ -3360,7 +3413,7 @@ class PreviewPage(ctk.CTkFrame):
             + "\n".join(lines) + tail
             + "\n\nСохранить с ценами из документа?"
         )
-        return messagebox.askyesno("Цены в КП отличаются от экранных",
+        return messagebox.askyesno(t("pv_kp_price_diff"),
                                    msg, icon="warning")
 
     def _save(self):
@@ -3395,7 +3448,7 @@ class PreviewPage(ctk.CTkFrame):
                 + "\n\nДважды кликните по ячейке «Кол-во» чтобы исправить.\n\n"
                 "Сохранить без исправления?"
             )
-            if not messagebox.askyesno("Несовпадение единиц", msg, icon="warning"):
+            if not messagebox.askyesno(t("pv_unit_mismatch"), msg, icon="warning"):
                 return
         # ─────────────────────────────────────────────────────────────────────
 
@@ -3413,6 +3466,7 @@ class PreviewPage(ctk.CTkFrame):
         try:
             for it in self.items:
                 seb, seb_sum, kp, kp_sum = self._compute_kp(it)
+                it["_brand_consts"]      = self._consts_of(it)
                 it["_computed_kp_price"] = kp
                 it["_computed_kp_sum"]   = kp_sum
                 it["_computed_seb_price"] = seb

@@ -131,7 +131,7 @@ class ApiService:
             f"{self._base}/api/v1/users/roles",
             headers=self._h, timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_users(self) -> list:
@@ -140,7 +140,7 @@ class ApiService:
             f"{self._base}/api/v1/users/",
             headers=self._h, timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def create_user(self, data: dict) -> dict:
@@ -149,7 +149,7 @@ class ApiService:
             f"{self._base}/api/v1/users/",
             json=data, headers=self._h, timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def update_user(self, user_id: int, data: dict) -> dict:
@@ -158,7 +158,7 @@ class ApiService:
             f"{self._base}/api/v1/users/{user_id}",
             json=data, headers=self._h, timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def delete_user(self, user_id: int) -> None:
@@ -167,7 +167,7 @@ class ApiService:
             f"{self._base}/api/v1/users/{user_id}",
             headers=self._h, timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
 
     # ── PDF ───────────────────────────────────────────────────────────────────
 
@@ -225,7 +225,7 @@ class ApiService:
                 stream=True,
                 timeout=1800,
             ) as r:
-                r.raise_for_status()
+                self._raise_for_status(r)
                 for raw_line in r.iter_lines():
                     if not raw_line:
                         continue
@@ -278,7 +278,7 @@ class ApiService:
                 stream=True,
                 timeout=3600,  # 1 hour — OCR of large scanned PDFs can take 20-40 min
             ) as r:
-                r.raise_for_status()
+                self._raise_for_status(r)
                 for raw_line in r.iter_lines():
                     if not raw_line:
                         continue
@@ -334,7 +334,7 @@ class ApiService:
                 stream=True,
                 timeout=7200,
             ) as r:
-                r.raise_for_status()
+                self._raise_for_status(r)
                 for raw_line in r.iter_lines():
                     if not raw_line:
                         continue
@@ -403,7 +403,7 @@ class ApiService:
             )
         if progress_cb:
             progress_cb(90, "processing", "Обработка...")
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def rematch_ai(self, items: list) -> dict:
@@ -414,7 +414,7 @@ class ApiService:
             headers=self._h,
             timeout=300,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_pdf_history(self, limit: int = 200) -> list:
@@ -424,7 +424,7 @@ class ApiService:
             params={"limit": limit},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def download_base_template(self, save_path: str) -> bool:
@@ -441,7 +441,7 @@ class ApiService:
         )
         if r.status_code == 404:
             return False
-        r.raise_for_status()
+        self._raise_for_status(r)
         with open(save_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
@@ -457,7 +457,7 @@ class ApiService:
             headers=self._h,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def upload_excel_template(self, file_path: str, description: str = "") -> dict:
@@ -471,7 +471,7 @@ class ApiService:
                 data={"description": description},
                 timeout=60,
             )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def download_excel_template(self, save_path: str) -> bool:
@@ -484,7 +484,7 @@ class ApiService:
         )
         if r.status_code == 404:
             return False
-        r.raise_for_status()
+        self._raise_for_status(r)
         with open(save_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
@@ -501,7 +501,7 @@ class ApiService:
             params={"articles": ",".join(articles)},
             timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json().get("products", [])
 
     def get_constants(self) -> dict:
@@ -510,7 +510,7 @@ class ApiService:
             headers=self._h,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_products_count(self) -> int:
@@ -519,7 +519,7 @@ class ApiService:
             headers=self._h,
             timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json().get("count", 0)
 
     def import_products(self, file_path: str, password: str,
@@ -602,7 +602,7 @@ class ApiService:
             headers=self._h,
             timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_brand_stats(self) -> list:
@@ -612,7 +612,7 @@ class ApiService:
             headers=self._h,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def parse_pricelist(self, pdf_path: str,
@@ -704,7 +704,7 @@ class ApiService:
                 stream=True,
                 timeout=3600,
             ) as r:
-                r.raise_for_status()
+                self._raise_for_status(r)
                 for raw_line in r.iter_lines():
                     if not raw_line:
                         continue
@@ -738,7 +738,7 @@ class ApiService:
                 headers=self._h,
                 timeout=10,
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
             data = r.json() or {}
         except Exception:
             return {"prelim_price_coeff": DEFAULT_PRELIM_COEFF}
@@ -792,7 +792,7 @@ class ApiService:
             params={"limit": limit},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     # ── Corrections (Phase 2.6 — ML learning from manager selections) ─────────
@@ -823,7 +823,7 @@ class ApiService:
                 headers=self._h,
                 timeout=20,
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
             return r.json()
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -841,7 +841,7 @@ class ApiService:
                 headers=self._h,
                 timeout=15,
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
             return r.json().get("results", [])
         except Exception:
             return []
@@ -898,7 +898,7 @@ class ApiService:
             params={"period": period},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_analytics_kpi(self, period: int = 30) -> dict:
@@ -909,7 +909,7 @@ class ApiService:
             params={"period": period},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_analytics_brands(self, period: int = 30) -> dict:
@@ -920,7 +920,7 @@ class ApiService:
             params={"period": period},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_analytics_ai_efficiency(self, period: int = 30) -> dict:
@@ -931,7 +931,7 @@ class ApiService:
             params={"period": period},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_price_history(self, article: str, segment: str = None) -> dict:
@@ -945,7 +945,7 @@ class ApiService:
             params=params,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_analytics_anomalies(self, period: int = 30) -> dict:
@@ -956,7 +956,7 @@ class ApiService:
             params={"period": period},
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def get_correction_stats(self) -> dict:
@@ -967,7 +967,7 @@ class ApiService:
                 headers=self._h,
                 timeout=10,
             )
-            r.raise_for_status()
+            self._raise_for_status(r)
             return r.json()
         except Exception:
             return {"total_corrections": 0, "pinecone_indexed": 0, "unique_products": 0}
@@ -1005,7 +1005,7 @@ class ApiService:
             },
             timeout=30,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def lookup_analogs_batch(self, articles: list, segment: str = None) -> dict:
@@ -1020,7 +1020,7 @@ class ApiService:
             json=payload,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json().get("analogs", {})
 
     def save_analog_db(self, article: str, analog_article: str,
@@ -1043,7 +1043,7 @@ class ApiService:
             json=payload,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()
 
     def delete_analog_db(self, record_id: int) -> bool:
@@ -1053,7 +1053,7 @@ class ApiService:
             headers=self._h,
             timeout=10,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json().get("ok", False)
 
     def get_analog_diagnostics(self) -> dict:
@@ -1063,5 +1063,5 @@ class ApiService:
             headers=self._h,
             timeout=15,
         )
-        r.raise_for_status()
+        self._raise_for_status(r)
         return r.json()

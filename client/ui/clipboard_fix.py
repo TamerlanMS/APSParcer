@@ -16,6 +16,7 @@ Ctrl+X и Ctrl+A.
     from ui.clipboard_fix import enable_clipboard_shortcuts
     enable_clipboard_shortcuts(root)
 """
+from locales.strings import t
 import logging
 
 logger = logging.getLogger(__name__)
@@ -193,11 +194,11 @@ def attach_context_menu(widget) -> None:
         e.state = 0
         return lambda: fn(e)
 
-    menu.add_command(label="Вырезать",  command=_fire(_do_cut))
-    menu.add_command(label="Копировать", command=_fire(_do_copy))
-    menu.add_command(label="Вставить",   command=_fire(_do_paste))
+    menu.add_command(label=t("ctx_cut"),  command=_fire(_do_cut))
+    menu.add_command(label=t("ctx_copy"), command=_fire(_do_copy))
+    menu.add_command(label=t("ctx_paste"),   command=_fire(_do_paste))
     menu.add_separator()
-    menu.add_command(label="Выделить всё", command=_fire(_do_select_all))
+    menu.add_command(label=t("ctx_select_all"), command=_fire(_do_select_all))
 
     def _popup(event):
         try:

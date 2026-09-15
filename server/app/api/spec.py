@@ -37,7 +37,9 @@ MAX_SPEC_SIZE = 50 * 1024 * 1024        # 50 MB
 ALLOWED_EXT   = (".xlsx", ".xlsm", ".xls")
 _SPEC_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spec_parser")
 
-ALL_SEGMENTS = ["ss", "os", "sil"]
+# gen — общая база позиций прейскуранта АГСК: без бренда и артикула,
+# но с ценой КазНИИСА. Участвует в подборе наравне с остальными.
+ALL_SEGMENTS = ["ss", "os", "sil", "gen"]
 
 
 def _parse_segments(raw: Optional[str]) -> List[str]:

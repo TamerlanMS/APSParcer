@@ -32,7 +32,9 @@ MAX_PDF_SIZE_MULTI =  20 * 1024 * 1024  # 20 MB per file when multiple files sen
 _PDF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pdf_parser")
 
 
-ALL_SEGMENTS = ["ss", "os", "sil"]
+# gen — общая база позиций прейскуранта АГСК: без бренда и артикула,
+# но с ценой КазНИИСА. Участвует в подборе наравне с остальными.
+ALL_SEGMENTS = ["ss", "os", "sil", "gen"]
 
 
 def _parse_segments(raw: Optional[str]) -> List[str]:

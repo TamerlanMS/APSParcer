@@ -138,11 +138,11 @@ class AuthDialog(ctk.CTkToplevel):
 
         # Контекстное меню по правой кнопке
         ctx = tk.Menu(entry, tearoff=0)
-        ctx.add_command(label="Вставить",      command=_paste)
-        ctx.add_command(label="Копировать",    command=_copy)
-        ctx.add_command(label="Вырезать",      command=_cut)
+        ctx.add_command(label=t("ctx_paste"),      command=_paste)
+        ctx.add_command(label=t("ctx_copy"),    command=_copy)
+        ctx.add_command(label=t("ctx_cut"),      command=_cut)
         ctx.add_separator()
-        ctx.add_command(label="Выделить всё",  command=_select_all)
+        ctx.add_command(label=t("ctx_select_all"),  command=_select_all)
 
         def _show_ctx(e):
             try:
@@ -233,13 +233,13 @@ class AuthDialog(ctk.CTkToplevel):
         # Language selector
         lang_row = ctk.CTkFrame(self._frame1, fg_color="transparent")
         lang_row.pack(pady=(12, 0), padx=pad, fill="x")
-        ctk.CTkLabel(lang_row, text="Язык / Тіл:", font=FONT_SMALL,
+        ctk.CTkLabel(lang_row, text=t("auth_lang_lbl"), font=FONT_SMALL,
                      text_color=TEXT_SECONDARY).pack(side="left")
         self.lang_var = ctk.StringVar(value=Lang.get())
-        ctk.CTkRadioButton(lang_row, text="Русский", variable=self.lang_var,
+        ctk.CTkRadioButton(lang_row, text=t("auth_lang_ru"), variable=self.lang_var,
                            value="ru", command=self._on_lang_change,
                            font=FONT_NORMAL).pack(side="left", padx=12)
-        ctk.CTkRadioButton(lang_row, text="Қазақша", variable=self.lang_var,
+        ctk.CTkRadioButton(lang_row, text=t("auth_lang_kz"), variable=self.lang_var,
                            value="kz", command=self._on_lang_change,
                            font=FONT_NORMAL).pack(side="left")
 

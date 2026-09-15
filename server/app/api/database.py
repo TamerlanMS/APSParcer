@@ -241,7 +241,7 @@ async def import_products(
     content = await file.read()
     ip = request.client.host if request.client else None
     try:
-        added, updated = await import_products_from_excel(
+        added, updated, no_article = await import_products_from_excel(
             content, db, file.filename, segment=import_segment,
             changed_by=getattr(current_user, "username", ""),
         )
@@ -251,7 +251,8 @@ async def import_products(
         raise HTTPException(422, str(e))
     await write_audit(db, current_user, "import_products",
                       resource=file.filename,
-                      details=f"added={added}, updated={updated}",
+                      details=f"added={added}, updated={updated}, "
+                              f"no_article={no_article}",
                       ip=ip)
     # Сохраняем загруженный файл как мастер-шаблон для следующих rebuild
     try:
@@ -265,7 +266,8 @@ async def import_products(
     invalidate_product_cache()
     # Rebuild cached base template in background (non-blocking)
     asyncio.create_task(rebuild_base_template(db))
-    return {"status": "ok", "added": added, "updated": updated}
+    return {"status": "ok", "added": added, "updated": updated,
+            "no_article": no_article}
 
 
 @router.post("/import/constants")

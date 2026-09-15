@@ -136,14 +136,25 @@ async def import_products_from_excel(
                Product.kaznisa, Product.rrts, Product.mrc, Product.opt)
         .where(Product.segment == segment, Product.is_active == True)
     )
-    pre_prices = {
-        r.article: {
-            "brand": r.brand, "name": r.name,
-            "kaznisa": r.kaznisa, "rrts": r.rrts,
-            "mrc": r.mrc, "opt": r.opt,
-        }
-        for r in pre_q.all() if r.article
-    }
+    # Ключ тот же, что и при импорте: артикул либо наименование.
+    # Иначе у позиций без артикула ключ был бы общий (None) и история цен
+    # для них схлопывалась в одну запись.
+    def _price_key(article, name) -> str:
+        a = (article or "").strip()
+        if a:
+            return a
+        n = " ".join((name or "").split()).lower()
+        return f"~{n}" if n else ""
+
+    pre_prices = {}
+    for r in pre_q.all():
+        _k = _price_key(r.article, r.name)
+        if _k:
+            pre_prices[_k] = {
+                "brand": r.brand, "name": r.name,
+                "kaznisa": r.kaznisa, "rrts": r.rrts,
+                "mrc": r.mrc, "opt": r.opt,
+            }
 
     # ── Полная перезапись сегмента ────────────────────────────────────────────
     # Деактивируем ВСЕ текущие позиции сегмента перед импортом.
@@ -155,14 +166,36 @@ async def import_products_from_excel(
     )
     await db.flush()
 
-    # Карта article → id для ВСЕХ (в т.ч. только что деактивированных) позиций сегмента
+    def _row_key(article: str | None, name: str | None) -> str:
+        """Ключ позиции: артикул, а если его нет — наименование.
+
+        У части товаров артикула не бывает (прожекторы Philips, Led Solution):
+        модель указана прямо в наименовании. Без запасного ключа такие строки
+        либо пропускались целиком, либо схлопывались в одну.
+        """
+        a = (article or "").strip()
+        if a:
+            return a
+        n = " ".join((name or "").split()).lower()
+        # Префикс отделяет пространство имён от настоящих артикулов
+        return f"~{n}" if n else ""
+
+    # Карта ключ → id для ВСЕХ (в т.ч. только что деактивированных) позиций сегмента
     existing = await db.execute(
-        select(Product.article, Product.id).where(Product.segment == segment)
+        select(Product.article, Product.name, Product.id)
+        .where(Product.segment == segment)
     )
-    existing_map = {row[0]: row[1] for row in existing.fetchall() if row[0]}
+    existing_map = {}
+    for _art, _nm, _pid in existing.fetchall():
+        _k = _row_key(_art, _nm)
+        if _k:
+            existing_map[_k] = _pid
 
     rows_to_add    = []
     rows_to_update = []
+    # Позиции без артикула опознаются по наименованию — считаем отдельно,
+    # чтобы было видно, доехали ли они до базы
+    no_article = 0
 
     # Log the header row (row 1) and first data row for diagnostics
     all_rows = list(ws.iter_rows(min_row=1, values_only=True))
@@ -194,8 +227,11 @@ async def import_products_from_excel(
         mult    = safe_int(row[10])  if len(row) > 10 else None
         code    = safe_str(row[11])  if len(row) > 11 else None
 
-        if not article:
-            continue
+        row_key = _row_key(article, name)
+        if not row_key:
+            continue          # нет ни артикула, ни наименования — пустая строка
+        if not (article or "").strip():
+            no_article += 1
 
         data = dict(
             num=num, article=article, name=name, unit=unit,
@@ -204,8 +240,8 @@ async def import_products_from_excel(
             segment=segment, is_active=True,
         )
 
-        if article in existing_map:
-            rows_to_update.append((existing_map[article], data))
+        if row_key in existing_map:
+            rows_to_update.append((existing_map[row_key], data, row_key))
         else:
             rows_to_add.append(data)
 
@@ -213,21 +249,23 @@ async def import_products_from_excel(
         db.add(Product(**data))
         added += 1
 
-    _updated_new_data: dict[str, dict] = {}  # article → новые данные (для сравнения цен)
-    for pid, data in rows_to_update:
+    _updated_new_data: dict[str, dict] = {}  # ключ → новые данные (для сравнения цен)
+    for pid, data, _key in rows_to_update:
         await db.execute(
             Product.__table__.update()
             .where(Product.id == pid)
             .values(**data)
         )
         updated += 1
-        _updated_new_data[data["article"]] = data
+        _updated_new_data[_key] = data
 
     # ── История цен и аномалии ────────────────────────────────────────────────
-    for article, new_data in _updated_new_data.items():
-        if article not in pre_prices:
+    for _pkey, new_data in _updated_new_data.items():
+        if _pkey not in pre_prices:
             continue
-        old = pre_prices[article]
+        # В журнале показываем артикул, а без него — наименование
+        article = new_data.get("article") or (new_data.get("name") or "")[:60]
+        old = pre_prices[_pkey]
         any_changed = False
         for field in ("kaznisa", "rrts", "mrc", "opt"):
             old_val = float(old.get(field) or 0)
@@ -297,10 +335,11 @@ async def import_products_from_excel(
     total_q = await db.execute(select(func.count()).select_from(Product))
     total_p = total_q.scalar() or 0
     logger.info(
-        "Import products done: +%d / ~%d. In DB now: %d total, %d with prices, %d WITHOUT prices.",
-        added, updated, total_p, with_prices, total_p - with_prices
+        "Import products done: +%d / ~%d (без артикула: %d). "
+        "In DB now: %d total, %d with prices, %d WITHOUT prices.",
+        added, updated, no_article, total_p, with_prices, total_p - with_prices
     )
-    return added, updated
+    return added, updated, no_article
 
 
 async def clear_segment_products(

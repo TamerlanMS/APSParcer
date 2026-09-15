@@ -10,6 +10,8 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
+from locales.strings import t
+
 PROVIDERS = [
     ("dkc",    "ДКС"),
     ("ekf",    "EKF"),
@@ -108,7 +110,7 @@ class AnalogDialog(ctk.CTkToplevel):
         hdr.pack_propagate(False)
         ctk.CTkLabel(
             hdr,
-            text="🔍  Подбор аналога",
+            text=t("ad_title"),
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color=_TXT_HEADER,
         ).pack(side="left", padx=18, pady=0)
@@ -123,7 +125,7 @@ class AnalogDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             art_frame,
-            text="Артикул:",
+            text=t("ad_article_lbl"),
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=_TXT_LABEL,
             width=78,
@@ -137,7 +139,7 @@ class AnalogDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=14, weight="bold"),
             width=350,
             height=34,
-            placeholder_text="Введите артикул…",
+            placeholder_text=t("ad_article_ph"),
             fg_color=_ENTRY_BG,
             border_color=_ENTRY_BOR,
             text_color=_TXT_ART,
@@ -173,7 +175,7 @@ class AnalogDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             prov_outer,
-            text="Провайдер:",
+            text=t("ad_provider_lbl"),
             font=ctk.CTkFont(size=12),
             text_color=_TXT_SUB,
         ).pack(anchor="w", pady=(0, 6))
@@ -239,7 +241,7 @@ class AnalogDialog(ctk.CTkToplevel):
 
         self._empty_lbl = ctk.CTkLabel(
             self._scroll,
-            text="Введите артикул и выберите провайдера для поиска",
+            text=t("ad_hint"),
             text_color=_TXT_NOMATCH,
             font=ctk.CTkFont(size=13),
         )
@@ -255,7 +257,7 @@ class AnalogDialog(ctk.CTkToplevel):
 
         self._apply_btn = ctk.CTkButton(
             footer,
-            text="✓ Применить",
+            text=t("ad_apply"),
             width=140, height=36,
             fg_color=_BTN_MATCH,
             hover_color=_BTN_MATCH_H,
@@ -269,7 +271,7 @@ class AnalogDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(
             footer,
-            text="Закрыть",
+            text=t("ad_close"),
             width=100, height=36,
             fg_color=_BTN_CLOSE,
             hover_color=_BTN_CLOSE_H,
@@ -338,7 +340,7 @@ class AnalogDialog(ctk.CTkToplevel):
         prov_name = dict(PROVIDERS).get(provider_key, provider_key)
 
         if cached:
-            self._cached_lbl.configure(text="📦 Из кэша")
+            self._cached_lbl.configure(text=t("ad_from_cache"))
 
         if prov_err and not analogs:
             self._status_var.set(f"⚠  {prov_name}: {prov_err}")
@@ -360,7 +362,7 @@ class AnalogDialog(ctk.CTkToplevel):
             )
             ctk.CTkLabel(
                 self._scroll,
-                text="Аналоги не найдены",
+                text=t("ad_not_found"),
                 text_color=_TXT_NOMATCH,
                 font=ctk.CTkFont(size=13),
             ).pack(pady=40)
@@ -446,7 +448,7 @@ class AnalogDialog(ctk.CTkToplevel):
         else:
             ctk.CTkLabel(
                 name_cell,
-                text="Нет в базе",
+                text=t("ad_not_in_db"),
                 font=ctk.CTkFont(size=11),
                 text_color=_TXT_NOMATCH,
                 anchor="w",
@@ -460,7 +462,7 @@ class AnalogDialog(ctk.CTkToplevel):
         if match:
             sel_btn = ctk.CTkButton(
                 right,
-                text="Выбрать",
+                text=t("ad_pick"),
                 width=86, height=28,
                 fg_color=_BTN_MATCH,
                 hover_color=_BTN_MATCH_H,
@@ -483,13 +485,13 @@ class AnalogDialog(ctk.CTkToplevel):
             prev = self._results[self._selected_idx]
             btn  = prev.get("_sel_btn")
             if btn:
-                btn.configure(fg_color=_BTN_MATCH, text="Выбрать")
+                btn.configure(fg_color=_BTN_MATCH, text=t("ad_pick"))
 
         self._selected_idx = idx
         cur = self._results[idx]
         btn = cur.get("_sel_btn")
         if btn:
-            btn.configure(fg_color=_BTN_ACTIVE, text="✓ Выбрано")
+            btn.configure(fg_color=_BTN_ACTIVE, text=t("ad_picked"))
 
         self._apply_btn.configure(state="normal")
 
