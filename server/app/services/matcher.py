@@ -114,6 +114,45 @@ def has_model_designation(text: str) -> bool:
                for t in _model_tokens(text))
 
 
+# ─── Ключ артикула: одинаковая запись разными способами ──────────────────────
+
+# Латинские буквы, неотличимые на вид от кириллических. Приводим к кириллице:
+# «2х7-P-БР» и «2х7 -Р БР» пишутся одинаково, но P и Р — разные символы.
+_HOMOGLYPHS = str.maketrans({
+    "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "K": "К", "M": "М",
+    "O": "О", "P": "Р", "T": "Т", "X": "Х", "Y": "У",
+})
+
+# Складская пометка в конце: «(2к К1)», «(К4)». К товару не относится.
+_ART_TAIL_RE = re.compile(r"\s*\([^()]*\)\s*$")
+
+# Служебные слова перед исполнением
+_ART_SERVICE_RE = re.compile(r"\b(ИСП|ИСПОЛНЕНИЕ|ВЕРСИЯ|ВЕР)\.?\s*")
+
+# Дефис и пробел в артикулах взаимозаменяемы: «2х7-Р-БР» = «2х7 -Р БР»
+_ART_DASH_RE = re.compile(r"[-\u2013\u2014]+")
+
+# Ключ короче этого ни о чём не говорит — «БР», «К1» совпадут с чем угодно
+_ART_KEY_MIN_LEN = 6
+
+
+def article_key(text: str) -> str:
+    """Артикул в виде, не зависящем от способа записи.
+
+    Снимает складской хвост в скобках, служебное «исп.», разницу между
+    латиницей и кириллицей в одинаковых на вид буквах и между дефисом
+    и пробелом. Пустая строка означает «ключ строить не из чего».
+    """
+    s = _ART_TAIL_RE.sub("", str(text or "").strip())
+    if not s:
+        return ""
+    s = normalize(s).translate(_HOMOGLYPHS)
+    s = _ART_SERVICE_RE.sub("", s)
+    s = _ART_DASH_RE.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) >= _ART_KEY_MIN_LEN else ""
+
+
 # Cyrillic character range for optional stripping in sil-segment matching.
 _CYRILLIC_RE = re.compile(r"[А-ЯЁа-яё]")
 # Minimum length of a Cyrillic-stripped article to attempt matching (avoid garbage like "-").
@@ -269,7 +308,7 @@ class _ProductIndex:
     __slots__ = ("products", "norm_art", "norm_name", "norm_code",
                  "norm_art_nocyr",
                  "art_exact", "art_nocyr_exact", "code_exact", "name_exact",
-                 "model_toks", "model_idx")
+                 "model_toks", "model_idx", "art_key_exact")
 
     def __init__(self, products: List[Product]):
         self.products  = products
@@ -284,6 +323,14 @@ class _ProductIndex:
         for i, na in enumerate(self.norm_art):
             if na:
                 self.art_exact.setdefault(na, []).append(i)
+
+        # Артикул, приведённый к единой форме записи: снимает разницу
+        # между «исп. 2х7-P-БР» и «2х7 -Р БР (2к К1)»
+        self.art_key_exact: Dict[str, List[int]] = {}
+        for i, p in enumerate(products):
+            k = article_key(p.article or "")
+            if k:
+                self.art_key_exact.setdefault(k, []).append(i)
 
         # O(1) lookup for Cyrillic-stripped article exact matches.
         self.art_nocyr_exact: Dict[str, List[int]] = {}
@@ -411,6 +458,20 @@ def find_candidates(
             for i in index.code_exact[norm_code_q]:
                 candidates.append({"product": products[i], "score": EXACT_SCORE, "method": "code_exact"})
             return candidates[:1]
+
+    # ---- 1d. Артикул с точностью до способа записи (O(1)) ----------------------
+    # Идёт после точных совпадений и кода АГСК, но до нечёткого поиска:
+    # такая пара надёжнее любого балла схожести, а нечёткое сравнение
+    # давало ей 68 из 100 и вытесняло из выдачи чужими позициями.
+    _art_key = article_key(article_raw)
+    if _art_key and _art_key in index.art_key_exact:
+        _hits = index.art_key_exact[_art_key]
+        # Несколько позиций с одним ключом — отдаём все: пусть выбирает
+        # менеджер, а не алгоритм наугад
+        _kc = [{"product": products[i], "score": CONTAINS_SCORE + 2,
+                "method": "article_key"} for i in _hits[:5]]
+        if _kc:
+            return _kc
 
     # ---- 2. Substring / fuzzy scan by article (BATCH -- O(1) Python overhead) ---
     # Uses rapidfuzz.process.extract which runs all comparisons in C without

@@ -464,6 +464,7 @@ STRINGS = {
         "method_correction": "✏️ Исправление",
         "method_other": "Другой способ",
         "seg_gen": "Общая (АГСК)",
+        "method_art_key": "Артикул (запись)",
     },
 
     "kz": {
@@ -926,6 +927,7 @@ STRINGS = {
         "method_correction": "✏️ Түзету",
         "method_other": "Басқа тәсіл",
         "seg_gen": "Жалпы (АГСК)",
+        "method_art_key": "Артикул (жазылуы)",
     },
 }
 

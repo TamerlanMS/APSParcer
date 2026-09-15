@@ -1973,6 +1973,8 @@ class PreviewPage(ctk.CTkFrame):
             "name_contains":            "method_name_contains",
             "name_fuzzy":               "method_name_fuzzy",
             "name_partial":             "method_name_partial",
+            # Артикул совпал после приведения к единой форме записи
+            "article_key":              "method_art_key",
             "code_exact":               "method_code",
             "kaznisa":                  "method_code",
             # То же точное совпадение по коду, но найденное до обращения к ИИ
