@@ -9,6 +9,9 @@ from typing import List, Dict, Optional
 
 from assets.theme import *
 from locales.strings import t
+# Внутри _update_estimate_summary имя t занято итогами по смете,
+# поэтому для подписей используется алиас
+t_ = t
 from services.api_service import ApiService
 from ui.dialogs.analog_dialog import AnalogDialog
 from services.excel_generator import generate_excel
@@ -114,6 +117,15 @@ DEFAULT_PRELIM_COEFF = 1.9
 # того, куда менеджер нажал перед расчётом. Фиксированное значение делает
 # результат воспроизводимым; настоящие константы всё равно нужно завести.
 DEFAULT_BRAND_MARGIN = 1.2
+
+# Виды работ для расчёта СМР: ключ → (подпись, цена за м² по умолчанию).
+# Совпадает с SMR_KINDS на сервере; настоящие цены приходят из настроек базы.
+SMR_KINDS = (
+    ("eom", "ЭОМ",                  7600.0),
+    ("ss",  "СС",                   8500.0),
+    ("out", "Внутриплощадные сети", 9500.0),
+)
+SMR_LABELS = [lbl for _k, lbl, _v in SMR_KINDS]
 
 
 def _norm_rate(value) -> int:
@@ -784,6 +796,17 @@ class PreviewPage(ctk.CTkFrame):
         )
         self.hdg_chk.pack(side="right", padx=(4, 8))
 
+        # Отбор «в наличии»: в КП уходят только найденные точно либо
+        # подтверждённые строки. По умолчанию выключено — предложение
+        # обычно составляется по всей спецификации.
+        self._stock_var = tk.BooleanVar(value=False)
+        self.stock_chk = ctk.CTkCheckBox(
+            leg, text=t("pv_only_in_stock"), font=FONT_SMALL,
+            variable=self._stock_var, onvalue=True, offvalue=False,
+            width=190, checkbox_width=16, checkbox_height=16,
+        )
+        self.stock_chk.pack(side="right", padx=(4, 8))
+
         for bg, key in [
             (C_EXACT,    "preview_legend_exact"),
             (C_MULTIPLE, "preview_legend_warn"),
@@ -996,6 +1019,43 @@ class PreviewPage(ctk.CTkFrame):
                 entry.grid(row=1, column=3 + col_i * 2, padx=(0, 8), pady=(0, 10))
                 self.const_vars[var_key] = var
 
+        # ── Расчёт СМР: вид работ, цена за м² и площадь ─────────────────────
+        # Цена хранится по видам работ, поэтому переключение не теряет правку
+        self._smr_prices = {k: v for k, v, in
+                            ((k, v) for k, _l, v in SMR_KINDS)}
+        self._smr_kind = SMR_KINDS[0][0]
+
+        ctk.CTkLabel(cf, text=t("smr_kind"), font=FONT_SMALL,
+                     text_color=TEXT_SECONDARY
+                     ).grid(row=2, column=0, padx=(16, 4), pady=(0, 10), sticky="w")
+        self._smr_kind_var = ctk.StringVar(value=SMR_KINDS[0][1])
+        self._smr_kind_dd = ctk.CTkOptionMenu(
+            cf, values=SMR_LABELS, variable=self._smr_kind_var,
+            width=180, height=30, command=self._on_smr_kind,
+        )
+        self._smr_kind_dd.grid(row=2, column=1, padx=(0, 16), pady=(0, 10))
+
+        self._smr_price_lbl = ctk.CTkLabel(cf, text=t("smr_price"),
+                                           font=FONT_SMALL, text_color=TEXT_SECONDARY)
+        self._smr_price_lbl.grid(row=2, column=2, padx=(8, 4), pady=(0, 10), sticky="w")
+        self._smr_price_var = tk.StringVar(value=f"{SMR_KINDS[0][2]:g}")
+        self._smr_price_var.trace_add("write", self._on_smr_change)
+        ctk.CTkEntry(cf, textvariable=self._smr_price_var, width=90, height=30,
+                     font=FONT_SMALL).grid(row=2, column=3, padx=(0, 8), pady=(0, 10))
+
+        self._smr_area_lbl = ctk.CTkLabel(cf, text=t("smr_area"),
+                                          font=FONT_SMALL, text_color=TEXT_SECONDARY)
+        self._smr_area_lbl.grid(row=2, column=4, padx=(8, 4), pady=(0, 10), sticky="w")
+        self._smr_area_var = tk.StringVar(value="")
+        self._smr_area_var.trace_add("write", self._on_smr_change)
+        ctk.CTkEntry(cf, textvariable=self._smr_area_var, width=90, height=30,
+                     font=FONT_SMALL).grid(row=2, column=5, padx=(0, 8), pady=(0, 10))
+
+        self._smr_total_lbl = ctk.CTkLabel(
+            cf, text="", font=(*FONT_SMALL[:2], "bold"), text_color=NAVY)
+        self._smr_total_lbl.grid(row=2, column=6, columnspan=4,
+                                 padx=(8, 16), pady=(0, 10), sticky="w")
+
         # ── Кнопки режима подбора по спецификации ───────────────────────────
         # Живут в панели констант: в верхней панели они не помещались.
         # Колонка-распорка прижимает их к правому краю.
@@ -1031,7 +1091,7 @@ class PreviewPage(ctk.CTkFrame):
         # Подсказка
         self.hint_lbl = ctk.CTkLabel(cf, text=t("preview_rate_hint"),
                                       font=FONT_SMALL, text_color=TEXT_SECONDARY)
-        self.hint_lbl.grid(row=2, column=0, columnspan=12, padx=16, pady=(0, 10), sticky="w")
+        self.hint_lbl.grid(row=3, column=0, columnspan=12, padx=16, pady=(0, 10), sticky="w")
 
         self._no_data_lbl = ctk.CTkLabel(self, text=t("preview_no_data"),
                                           font=FONT_HEADING, text_color="#AEB6BF")
@@ -1396,6 +1456,8 @@ class PreviewPage(ctk.CTkFrame):
             _st = self.api.get_app_settings() or {}
             _c  = float(_st.get("prelim_price_coeff") or DEFAULT_PRELIM_COEFF)
             self._prelim_coeff = _c if _c > 0 else DEFAULT_PRELIM_COEFF
+            # Тарифы СМР приходят оттуда же — одним запросом
+            self._load_smr_prices(_st)
         except Exception as e:
             print(f"[Preview] get_app_settings: {e}")
             self._prelim_coeff = DEFAULT_PRELIM_COEFF
@@ -1761,6 +1823,83 @@ class PreviewPage(ctk.CTkFrame):
         cur, nds, lo = self._brand_rates(item)
         return partner * cur * nds * lo
 
+    # ── Строительно-монтажные работы ─────────────────────────────────────
+
+    def _on_smr_kind(self, label: str):
+        """Смена вида работ: подставляем его цену, запомнив текущую."""
+        for k, lbl, _v in SMR_KINDS:
+            if lbl == label:
+                self._smr_kind = k
+                break
+        self._suppress_smr = True
+        self._smr_price_var.set(f"{self._smr_prices.get(self._smr_kind, 0):g}")
+        self._suppress_smr = False
+        self._update_smr()
+
+    def _on_smr_change(self, *_a):
+        """Правка цены или площади. Цена запоминается за текущим видом работ."""
+        if getattr(self, "_suppress_smr", False):
+            return
+        self._smr_prices[self._smr_kind] = self._smr_price_num()
+        self._update_smr()
+
+    def _smr_price_num(self) -> float:
+        try:
+            return float((self._smr_price_var.get() or "0").replace(",", "."))
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def _smr_area_num(self) -> float:
+        try:
+            return float((self._smr_area_var.get() or "0").replace(",", "."))
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def smr_total(self) -> float:
+        """Стоимость СМР: цена за м² × площадь."""
+        return max(0.0, self._smr_price_num()) * max(0.0, self._smr_area_num())
+
+    def smr_info(self) -> dict:
+        """Данные СМР для выгрузки в Excel."""
+        label = next((lbl for k, lbl, _v in SMR_KINDS if k == self._smr_kind), "")
+        return {"kind": self._smr_kind, "label": label,
+                "price": self._smr_price_num(), "area": self._smr_area_num(),
+                "total": self.smr_total()}
+
+    def _update_smr(self):
+        """Перерисовывает подпись рядом с полями и итоговую полосу."""
+        if not hasattr(self, "_smr_total_lbl"):
+            return
+        total = self.smr_total()
+        self._smr_total_lbl.configure(
+            text=(f"= {total:,.0f} ₸".replace(",", " ") if total else ""))
+        self._update_stats()
+
+    def _load_smr_prices(self, settings: dict):
+        """Подставляет тарифы из настроек базы, не затирая правку проекта."""
+        if getattr(self, "_smr_user_edited", False):
+            return
+        for k, _lbl, default in SMR_KINDS:
+            try:
+                v = float(settings.get(f"smr_price_{k}") or default)
+            except (TypeError, ValueError):
+                v = default
+            self._smr_prices[k] = v
+        self._suppress_smr = True
+        self._smr_price_var.set(f"{self._smr_prices.get(self._smr_kind, 0):g}")
+        self._suppress_smr = False
+        self._update_smr()
+
+    def _equipment_total(self) -> float:
+        """Сумма КП по всем позициям — оборудование без работ."""
+        total = 0.0
+        for it in self.items:
+            if it.get("is_heading") or it.get("has_analog_row"):
+                continue
+            _s, _ss, _kp, kp_sum = self._compute_kp(it)
+            total += kp_sum or 0.0
+        return total
+
     def _prelim_price(self, item: dict) -> float:
         """Предварительная цена позиции.
 
@@ -1848,7 +1987,8 @@ class PreviewPage(ctk.CTkFrame):
                    5=Опт, 6=Цена ГП (РРЦ×ГП), 7=Сумма ГП, 8=Проект
                    либо ручная предварительная цена
             price_kp = base × курс × НДС × лог-ка × маржа
-                       (для АГСК курс/НДС/логистика не применяются)
+                       (цена КазНИИСА берётся как есть: курс, НДС,
+                        логистика и маржа в сметную цену уже заложены)
             суммы    = цена × Кол-во, округление вверх.
         """
         bm    = item.get("best_match") or {}
@@ -1884,7 +2024,9 @@ class PreviewPage(ctk.CTkFrame):
             _partner = float(bm.get("partner") or 0)
         except (TypeError, ValueError):
             _partner = 0.0
-        price_seb = math.ceil(_partner * cur * nds * lo) if _partner else 0.0
+        # round до копеек — против мусора двоичного представления в кэше формул
+        price_seb = (math.ceil(round(_partner * cur * nds * lo, 2))
+                     if _partner else 0.0)
 
         # ── Приоритет 1: пользователь задал Цена КП напрямую ────────────
         if item.get("_user_edited") and item.get("_user_price") is not None:
@@ -1931,10 +2073,14 @@ class PreviewPage(ctk.CTkFrame):
             # Привязка именно к источнику цены, а не к типу расценки: при
             # «Сумме АГСК» без цены КазНИИСА база приходит из РРЦ в рублях,
             # и пропуск курса давал цену КП ниже себестоимости.
-            _kp_base = math.ceil(base)
+            #
+            # Маржа здесь тоже не начисляется: сметная цена — это потолок
+            # продажи с НДС, наценка в ней уже учтена. Так «Цена КП» сходится
+            # с «Предварительной ценой», которая уходит в лист КП.
+            price_kp = math.ceil(round(base, 2))
         else:
-            _kp_base = math.ceil(base * cur * nds * lo)
-        price_kp = math.ceil(_kp_base * mg)
+            _kp_base = math.ceil(round(base * cur * nds * lo, 2))
+            price_kp = math.ceil(round(_kp_base * mg, 2))
         return price_seb, price_seb * qty, price_kp, price_kp * qty
 
     # ── Заполнение таблицы ───────────────────────────────────────────────────
@@ -2288,6 +2434,21 @@ class PreviewPage(ctk.CTkFrame):
         _anom = self._anomaly_count()
         if _anom:
             stat_text += f"   ⚠ требуют проверки цен: {_anom}"
+
+        # Стоимость работ и полная сумма проекта — здесь, а не в полосе
+        # сметы: та отвечает на другой вопрос и появляется не всегда
+        _smr = self.smr_total() if hasattr(self, "_smr_price_var") else 0.0
+        if _smr:
+            def _m(v):
+                return f"{v:,.0f}".replace(",", " ")
+            _smr_equip = self._equipment_total()
+            _info = self.smr_info()
+            stat_text += (
+                f"\n{t('smr_total')} · {_info['label']}: "
+                f"{_m(_info['area'])} м² × {_m(_info['price'])} ₸ = {_m(_smr)} ₸"
+                f"   |   оборудование: {_m(_smr_equip)} ₸"
+                f"   |   {t('smr_grand')}: {_m(_smr_equip + _smr)} ₸"
+            )
         self.stat_lbl.configure(text=stat_text)
         self._update_estimate_summary()
 
@@ -3368,11 +3529,60 @@ class PreviewPage(ctk.CTkFrame):
         _s, _ss, kp, _ks = self._compute_kp(item)
         return kp
 
+    # ── Отбор строк для выгрузки ─────────────────────────────────────────
+
+    @staticmethod
+    def _is_heading_row(item: dict) -> bool:
+        return bool(item.get("is_heading") or item.get("status") == "heading")
+
+    def _is_in_stock(self, item: dict) -> bool:
+        """Позиция «в наличии» — товар из базы найден точно либо подтверждён.
+
+        Сюда входят точное совпадение по артикулу или коду, подбор
+        менеджера и всё, что менеджер правил или выбирал руками, включая
+        строки аналогов. Жёлтые совпадения и ИИ-подбор без проверки не
+        считаются: по ним ещё не решено, тот ли это товар.
+        """
+        if self._is_heading_row(item):
+            return False
+        status = item.get("status", "not_found")
+        if status == "not_found" or not (item.get("best_match") or {}):
+            return False
+        return (status in ("exact", "manager_match")
+                or bool(item.get("_user_edited")))
+
+    def _export_items(self) -> list:
+        """Строки, которые уйдут в файл, с учётом обеих галочек."""
+        incl_hdg   = self._hdg_var.get()   if getattr(self, "_hdg_var",   None) else True
+        only_stock = self._stock_var.get() if getattr(self, "_stock_var", None) else False
+
+        rows = self.items
+        if only_stock:
+            rows = [it for it in self.items
+                    if self._is_heading_row(it) or self._is_in_stock(it)]
+
+        if not incl_hdg:
+            return [it for it in rows if not self._is_heading_row(it)]
+        if not only_stock:
+            return list(rows)
+
+        # Заголовок оставляем, только если следующая строка — позиция:
+        # раздел, из которого всё вылетело, в документе не нужен
+        out = []
+        for i, it in enumerate(rows):
+            if not self._is_heading_row(it):
+                out.append(it)
+                continue
+            nxt = rows[i + 1] if i + 1 < len(rows) else None
+            if nxt is not None and not self._is_heading_row(nxt):
+                out.append(it)
+        return out
+
     def _confirm_export_prices(self) -> bool:
         """Показывает расхождение экранных цен с выгрузкой. False — отмена."""
         screen_sum = export_sum = 0.0
         diff_rows = []
-        for it in self.items:
+        for it in self._export_items():
             if it.get("is_heading") or it.get("has_analog_row"):
                 continue
             try:
@@ -3422,9 +3632,20 @@ class PreviewPage(ctk.CTkFrame):
         if not self.items:
             return
 
+        # Отбор «в наличии» может не оставить ни одной позиции — сообщаем
+        # сразу, а не после выбора имени файла
+        _sel = [it for it in self._export_items() if not self._is_heading_row(it)]
+        if not _sel:
+            messagebox.showwarning(t("preview_save"), t("pv_stock_empty"))
+            return
+        _dropped = sum(1 for it in self.items
+                       if not self._is_heading_row(it)) - len(_sel)
+
         # ── Проверка несовпадений единиц ─────────────────────────────────────
+        # По выгружаемым строкам: ругаться на то, чего в файле не будет,
+        # значит заставлять менеджера править позиции впустую
         mismatches = []
-        for it in self.items:
+        for it in _sel:
             bm = it.get("best_match") or {}
             if not bm:
                 continue
@@ -3496,10 +3717,7 @@ class PreviewPage(ctk.CTkFrame):
                 except Exception as e_db:
                     print(f"[Save] get_all_products: {e_db}")
 
-            _incl_hdg = self._hdg_var.get() if self._hdg_var else True
-            _excel_items = self.items if _incl_hdg else [
-                it for it in self.items if not it.get("is_heading")
-            ]
+            _excel_items = self._export_items()
             try:
                 out = generate_excel(
                     _excel_items, path,
@@ -3510,16 +3728,21 @@ class PreviewPage(ctk.CTkFrame):
                     client_name="",
                     manager_name="",
                     base_template_path=base_tpl,
+                    smr=self.smr_info(),
                 )
             finally:
                 if base_tpl and os.path.exists(base_tpl):
                     try: os.unlink(base_tpl)
                     except Exception: pass
 
+            _tail = ("\n\n" + t("pv_stock_dropped", n=_dropped)
+                     if _dropped else "")
             if messagebox.askyesno(
                 t("preview_save"),
-                t("preview_saved", path=out, count=len(self.items))
-                + "\n\n" + t("preview_open_file"),
+                t("preview_saved", path=out,
+                  count=sum(1 for it in _excel_items
+                            if not self._is_heading_row(it)))
+                + _tail + "\n\n" + t("preview_open_file"),
             ):
                 self._open_file(out)
         except FileNotFoundError as e:

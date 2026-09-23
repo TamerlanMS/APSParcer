@@ -12,6 +12,14 @@ except Exception:
     DND_FILES = "DND_Files"
 
 
+# Виды работ для расчёта СМР: ключ → (подпись, цена за м² по умолчанию).
+# Совпадает с SMR_KINDS на сервере; значения приходят из настроек базы.
+SMR_KINDS = (
+    ("eom", "ЭОМ",                  "7600"),
+    ("ss",  "СС",                   "8500"),
+    ("out", "Внутриплощадные сети", "9500"),
+)
+
 class DropCard(ctk.CTkFrame):
     """Drag-and-drop card for xlsx files."""
     def __init__(self, parent, label_key: str, **kwargs):
@@ -442,6 +450,26 @@ class DatabasePage(ctk.CTkFrame):
         )
         self._coeff_save_btn.grid(row=2, column=2, padx=(0, 8), pady=(0, 10))
 
+        # ── Тарифы СМР: цена за квадратный метр по видам работ ──────────
+        ctk.CTkLabel(
+            self._settings_frame, text="Стоимость СМР, ₸ за м²:",
+            font=(*FONT_SMALL[:2], "bold"), text_color=NAVY,
+        ).grid(row=3, column=0, columnspan=3, padx=(12, 8),
+               pady=(6, 2), sticky="w")
+
+        self._smr_vars = {}
+        for _i, (_key, _lbl, _def) in enumerate(SMR_KINDS):
+            ctk.CTkLabel(
+                self._settings_frame, text=_lbl + ":",
+                font=FONT_SMALL, text_color=TEXT_SECONDARY,
+            ).grid(row=4 + _i, column=0, padx=(24, 8), pady=(0, 6), sticky="w")
+            var = ctk.StringVar(value=_def)
+            ctk.CTkEntry(
+                self._settings_frame, textvariable=var,
+                width=100, height=28, font=FONT_SMALL, corner_radius=RADIUS_SM,
+            ).grid(row=4 + _i, column=1, padx=(0, 8), pady=(0, 6), sticky="w")
+            self._smr_vars[_key] = var
+
         self._settings_status = ctk.CTkLabel(
             self._settings_frame, text="", font=FONT_SMALL,
             text_color=TEXT_SECONDARY, anchor="w",
@@ -546,6 +574,12 @@ class DatabasePage(ctk.CTkFrame):
                 return
             def _apply():
                 self._coeff_var.set(f"{coeff:g}")
+                for _k, _lbl, _def in SMR_KINDS:
+                    try:
+                        _v = float(data.get(f"smr_price_{_k}") or _def)
+                    except (TypeError, ValueError):
+                        _v = float(_def)
+                    self._smr_vars[_k].set(f"{_v:g}")
                 self._settings_status.configure(text="")
             self.after(0, _apply)
 
@@ -554,6 +588,25 @@ class DatabasePage(ctk.CTkFrame):
 
     def _save_settings(self):
         """Сохраняет коэффициент на сервере."""
+        # Тарифы СМР проверяем до коэффициента: неверное число здесь
+        # не должно молча уехать вместе с верным коэффициентом
+        smr = {}
+        for _k, _lbl, _def in SMR_KINDS:
+            _raw = (self._smr_vars[_k].get() or "").strip().replace(",", ".")
+            try:
+                _v = float(_raw)
+            except ValueError:
+                messagebox.showwarning(
+                    "Стоимость СМР",
+                    f"«{_lbl}»: {_raw!r} — это не число.", parent=self)
+                return
+            if _v < 0:
+                messagebox.showwarning(
+                    "Стоимость СМР",
+                    f"«{_lbl}»: цена не может быть отрицательной.", parent=self)
+                return
+            smr[f"smr_price_{_k}"] = _v
+
         raw = (self._coeff_var.get() or "").strip().replace(",", ".")
         try:
             coeff = float(raw)
@@ -572,7 +625,7 @@ class DatabasePage(ctk.CTkFrame):
 
         def _work():
             try:
-                self.api.update_app_settings(prelim_price_coeff=coeff)
+                self.api.update_app_settings(prelim_price_coeff=coeff, **smr)
             except Exception as e:
                 self.after(0, lambda e=e: (
                     self._settings_status.configure(

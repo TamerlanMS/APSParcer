@@ -339,6 +339,15 @@ def _fill_const_sheet(wb: openpyxl.Workbook, constants: Dict):
     rate_dv.sqref = f"K2:K{dv_end_row}"
 
 
+def _smr_caption(smr: Dict) -> str:
+    """Подпись строки СМР с раскрытым расчётом."""
+    area  = f"{float(smr.get('area') or 0):,.0f}".replace(",", " ")
+    price = f"{float(smr.get('price') or 0):,.0f}".replace(",", " ")
+    kind  = (smr.get("label") or "").strip()
+    head  = "Строительно-монтажные работы"
+    return f"{head}, {kind}: {area} м² × {price} ₸/м²" if kind else head
+
+
 def _fill_kp_header(wb: openpyxl.Workbook, manager: str, project: str, client: str):
     """Заполняем шапку коммерческого предложения."""
     if "КП" not in wb.sheetnames:
@@ -365,7 +374,8 @@ def _shift_row_refs(formula: str, old_итого: int, shift: int) -> str:
     return _re.sub(r'([A-Za-z]+)(\d+)', _rep, formula)
 
 
-def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
+def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict,
+                  smr: Optional[Dict] = None):
     """Заполняет строки данных листа КП.
 
     НЕ использует insert_rows() — это ломает VBA-модули в .xlsm файлах.
@@ -547,6 +557,18 @@ def _fill_kp_data(wb: openpyxl.Workbook, items: List[Dict], brand_consts: Dict):
         except (TypeError, ValueError, AttributeError):
             pass
         last_data_row = row
+
+    # ── 5b. Строительно-монтажные работы ────────────────────────────────────
+    # Отдельной строкой после позиций, но до подвала: ниже «ИТОГО» она
+    # не попала бы в сумму предложения.
+    if smr and float(smr.get("total") or 0) > 0:
+        last_data_row += 1
+        kp.cell(row=last_data_row, column=KP_NAME, value=_smr_caption(smr))
+        kp.cell(row=last_data_row, column=KP_UNIT, value="компл.")
+        kp.cell(row=last_data_row, column=KP_QTY,  value=1)
+        _t = float(smr["total"])
+        kp.cell(row=last_data_row, column=KP_PRICE_KP, value=_t)
+        kp.cell(row=last_data_row, column=KP_SUM_KP,   value=_t)
 
     # ── 6. Перенести подвал на новую позицию ────────────────────────────────
     new_итого_row = last_data_row + 2   # пустая строка-разделитель
@@ -1426,9 +1448,13 @@ def generate_excel(
     client_name: str = "",
     manager_name: str = "",
     base_template_path: str = "",
+    smr: Optional[Dict] = None,
 ) -> str:
     """
     Сохраняет результат в .xlsm на основе шаблона со всеми макросами.
+
+    smr — {"label", "price", "area", "total"} из предпросмотра. Если сумма
+    нулевая, строка не добавляется: пустая работа в предложении не нужна.
 
     items              — список позиций с best_match, status, qty, _user_price, …
     constants          — ответ api.get_constants() (brands, managers, currencies)
@@ -1688,6 +1714,21 @@ def generate_excel(
         if delivery:
             ws.cell(row=row, column=WV_DELIVERY, value=delivery)
 
+    # Строительно-монтажные работы — отдельной строкой под позициями
+    try:
+        if smr and float(smr.get("total") or 0) > 0:
+            _r = row + 1
+            ws.cell(row=_r, column=WV_NAME, value=_smr_caption(smr))
+            ws.cell(row=_r, column=WV_UNIT, value="компл.")
+            ws.cell(row=_r, column=WV_QTY,  value=1)
+            _t = float(smr["total"])
+            _c = ws.cell(row=_r, column=WV_PRICE_KP, value=_t)
+            _c.number_format = "#,##0.00"
+            _c = ws.cell(row=_r, column=WV_SUM_KP, value=_t)
+            _c.number_format = "#,##0.00"
+    except (TypeError, ValueError, KeyError) as e:
+        print(f"[Excel/СМР WV] {e}")
+
     # _extend_wv_formulas пропущен — лист БД отсутствует, данные статичные
 
     # 4. Заполняем шапку и данные листа КП
@@ -1700,7 +1741,7 @@ def generate_excel(
         print(f"[Excel/КП header] {e}")
 
     try:
-        _fill_kp_data(wb, items, brand_consts or {})
+        _fill_kp_data(wb, items, brand_consts or {}, smr=smr)
     except Exception as e:
         print(f"[Excel/КП data] {e}")
 

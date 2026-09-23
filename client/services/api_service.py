@@ -748,11 +748,19 @@ class ApiService:
             coeff = DEFAULT_PRELIM_COEFF
         return {"prelim_price_coeff": coeff if coeff > 0 else DEFAULT_PRELIM_COEFF}
 
-    def update_app_settings(self, prelim_price_coeff: float = None) -> dict:
-        """PUT /database/settings — изменение настроек (только администратор)."""
+    def update_app_settings(self, prelim_price_coeff: float = None,
+                            **smr) -> dict:
+        """PUT /database/settings — изменение настроек (только администратор).
+
+        smr — цены СМР за м² вида smr_price_eom / _ss / _out. Передаются
+        только заданные ключи: None на сервере означает «не менять».
+        """
         payload = {}
         if prelim_price_coeff is not None:
             payload["prelim_price_coeff"] = float(prelim_price_coeff)
+        for k, v in smr.items():
+            if k.startswith("smr_price_") and v is not None:
+                payload[k] = float(v)
         r = requests.put(
             f"{self._base}/api/v1/database/settings",
             headers=self._h,

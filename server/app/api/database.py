@@ -14,7 +14,7 @@ from app.core.audit import write_audit
 from app.core.config import settings
 from app.models.models import (
     Product, BrandConstant, CurrencyRate, ImportLog, Manager,
-    AppSetting, DEFAULT_APP_SETTINGS,
+    AppSetting, DEFAULT_APP_SETTINGS, SMR_KINDS,
 )
 from app.services.db_importer import (
     import_products_from_excel, import_constants_from_excel,
@@ -986,6 +986,10 @@ async def pricelist_to_general(
 
 class AppSettingsUpdate(BaseModel):
     prelim_price_coeff: Optional[float] = None
+    # Цена СМР за м² по видам работ. None означает «не менять».
+    smr_price_eom: Optional[float] = None
+    smr_price_ss:  Optional[float] = None
+    smr_price_out: Optional[float] = None
 
 
 async def _get_setting(db: AsyncSession, key: str, default: str = "") -> str:
@@ -1048,7 +1052,17 @@ async def get_app_settings(
         coeff = float(DEFAULT_APP_SETTINGS["prelim_price_coeff"][0])
     if coeff <= 0:
         coeff = float(DEFAULT_APP_SETTINGS["prelim_price_coeff"][0])
-    return {"prelim_price_coeff": coeff}
+
+    out = {"prelim_price_coeff": coeff}
+    for _k, _lbl, _default in SMR_KINDS:
+        key = f"smr_price_{_k}"
+        raw_v = await _get_setting(db, key, _default)
+        try:
+            val = float(raw_v)
+        except (TypeError, ValueError):
+            val = float(_default)
+        out[key] = val if val >= 0 else float(_default)
+    return out
 
 
 @router.put("/settings")
@@ -1063,6 +1077,28 @@ async def update_app_settings(
         raise HTTPException(403, "Требуются права администратора")
 
     updated = {}
+
+    async def _set(key: str, value: float, descr: str) -> None:
+        res = await db.execute(select(AppSetting).where(AppSetting.key == key))
+        row = res.scalar_one_or_none()
+        if row is None:
+            row = AppSetting(key=key, description=descr)
+            db.add(row)
+        row.value      = str(value)
+        row.updated_by = getattr(current_user, "username", None)
+        updated[key] = value
+
+    for _k, _lbl, _default in SMR_KINDS:
+        val = getattr(body, f"smr_price_{_k}", None)
+        if val is None:
+            continue
+        if val < 0:
+            raise HTTPException(400, f"Цена СМР «{_lbl}» не может быть отрицательной")
+        await _set(f"smr_price_{_k}", float(val),
+                   f"Стоимость СМР за м², вид работ «{_lbl}»")
+    if updated:
+        await db.commit()
+
     if body.prelim_price_coeff is not None:
         coeff = float(body.prelim_price_coeff)
         if coeff <= 0:
