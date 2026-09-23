@@ -340,12 +340,14 @@ def _fill_const_sheet(wb: openpyxl.Workbook, constants: Dict):
 
 
 def _smr_caption(smr: Dict) -> str:
-    """Подпись строки СМР с раскрытым расчётом."""
-    area  = f"{float(smr.get('area') or 0):,.0f}".replace(",", " ")
-    price = f"{float(smr.get('price') or 0):,.0f}".replace(",", " ")
-    kind  = (smr.get("label") or "").strip()
-    head  = "Строительно-монтажные работы"
-    return f"{head}, {kind}: {area} м² × {price} ₸/м²" if kind else head
+    """Подпись строки СМР: работы и вид, без ставки и метража.
+
+    Расчёт в наименование не выносится — метраж и цена за квадрат остаются
+    внутренней кухней, в предложение идёт готовая сумма.
+    """
+    kind = (smr.get("label") or "").strip()
+    head = "Строительно-монтажные работы"
+    return f"{head}, {kind}" if kind else head
 
 
 def _fill_kp_header(wb: openpyxl.Workbook, manager: str, project: str, client: str):
